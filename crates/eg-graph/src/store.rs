@@ -67,6 +67,28 @@ fn io_err(context: impl Into<String>) -> impl FnOnce(io::Error) -> StoreError {
     move |source| StoreError::Io { context, source }
 }
 
+/// The format version a stored file announces, ignoring every other field.
+///
+/// Read on its own so that a file whose *shape* belongs to another version is
+/// recognised as such. Deserialising the whole file to reach its `version`
+/// would fail first, on the very fields the version bump changed — which would
+/// make the version gate unreachable in exactly the case it exists for.
+/// `None` means the file is not a versioned document of ours at all.
+fn stored_version(bytes: &[u8]) -> Option<u32> {
+    #[derive(Deserialize)]
+    struct Versioned {
+        version: u32,
+    }
+    serde_json::from_slice::<Versioned>(bytes)
+        .ok()
+        .map(|v| v.version)
+}
+
+/// Whether a stored file was written by a format version we do not understand.
+fn from_another_version(bytes: &[u8]) -> bool {
+    stored_version(bytes).is_some_and(|v| v != FORMAT_VERSION)
+}
+
 /// One workbook graph, as written to disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredGraph {
@@ -129,24 +151,22 @@ impl Corpus {
 
         let manifest_path = root.join("manifest.json");
         let manifest = match fs::read(&manifest_path) {
-            Ok(bytes) => serde_json::from_slice::<Manifest>(&bytes)
-                .map_err(|source| StoreError::Decode {
+            // A manifest from another version is discarded rather than
+            // migrated. Rebuilding costs seconds; a wrong answer out of a
+            // half-understood file costs more. The version is read on its own
+            // first: a version change is exactly when the rest of the shape
+            // changes, so deserialising the whole file to reach the version
+            // field would fail before ever reaching it.
+            Ok(bytes) if from_another_version(&bytes) => Manifest {
+                version: FORMAT_VERSION,
+                ..Default::default()
+            },
+            Ok(bytes) => {
+                serde_json::from_slice::<Manifest>(&bytes).map_err(|source| StoreError::Decode {
                     path: manifest_path.display().to_string(),
                     source,
-                })
-                .map(|m| {
-                    // A manifest from another version is discarded rather than
-                    // migrated. Rebuilding costs seconds; a wrong answer out of
-                    // a half-understood file costs more.
-                    if m.version == FORMAT_VERSION {
-                        m
-                    } else {
-                        Manifest {
-                            version: FORMAT_VERSION,
-                            ..Default::default()
-                        }
-                    }
-                })?,
+                })?
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Manifest {
                 version: FORMAT_VERSION,
                 ..Default::default()
@@ -187,12 +207,24 @@ impl Corpus {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(io_err(format!("reading {}", path.display()))(e)),
         };
+        // Checked before deserialising, not after: a version bump is what a
+        // shape change is announced by, so a file from another version would
+        // fail to parse long before its `version` field could be compared.
+        if from_another_version(&bytes) {
+            return Ok(None);
+        }
         let stored: StoredGraph =
             serde_json::from_slice(&bytes).map_err(|source| StoreError::Decode {
                 path: path.display().to_string(),
                 source,
             })?;
         if stored.version != FORMAT_VERSION || stored.content_hash != content_hash {
+            return Ok(None);
+        }
+        // `root` is a raw index, and a petgraph index means nothing except
+        // against the graph it came from. One past the end would panic in the
+        // first caller that looked the node up, a long way from the bad file.
+        if stored.root as usize >= stored.graph.node_count() {
             return Ok(None);
         }
         Ok(Some(stored))
@@ -240,13 +272,17 @@ impl Corpus {
         if self.manifest.workbooks.remove(content_hash).is_none() {
             return Ok(false);
         }
+        // The manifest goes first. It is what `get` consults, so once the entry
+        // is gone the workbook is forgotten whatever happens to the file; the
+        // other order leaves a manifest on disk that still lists it while this
+        // `Corpus` believes it does not.
+        self.write_manifest()?;
         let path = self.graph_path(content_hash);
         match fs::remove_file(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(io_err(format!("removing {}", path.display()))(e)),
         }
-        self.write_manifest()?;
         Ok(true)
     }
 

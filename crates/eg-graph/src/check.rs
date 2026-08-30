@@ -12,9 +12,12 @@
 //!   wrong region still yields a reachable, single-sheet, positively weighted
 //!   edge. Only comparing against what a reader would draw catches that, which
 //!   is P8's job.
-//! - **Whether the weights are right.** A lifting bug that double-counts every
-//!   reference passes every check here; `references_scanned` against the summed
-//!   edge weight in the report is the number that would move.
+//! - **Whether the weights are right**, for the two dependency kinds that can
+//!   fan out. `CROSS_WORKBOOK_REF` and `REFERENCES_NAME` are pinned exactly to
+//!   the counts that produced them, so double-counting either is caught. A
+//!   `DEPENDS_ON` or `CROSS_SHEET_REF` reference may legitimately land on
+//!   several regions, so only a lower bound is checkable here; the ratio of
+//!   summed weight to `references_scanned` is the number that would move.
 //! - **Anything about the cells themselves.** These checks read the graph, not
 //!   the workbook. If ingest lost a formula, the graph is consistently missing
 //!   its edges.
@@ -148,6 +151,14 @@ pub fn check(built: &BuiltGraph) -> Vec<Violation> {
 
     // Every scanned reference is accounted for exactly once, so a reference
     // cannot be quietly dropped between scanning and lifting.
+    //
+    // On its own this is weak: the buckets are incremented on mutually
+    // exclusive paths of one function, so it holds by construction and would
+    // only ever break under an edit that added a sixth outcome. The checks
+    // below are the ones with teeth, because they measure the report against
+    // the *graph* — counted independently by `BuildReport::count_graph` — and
+    // so a lifting bug that dropped or doubled an edge would move one side
+    // without the other.
     let accounted = r.references_lifted
         + r.references_within_source_region
         + r.references_external
@@ -159,6 +170,56 @@ pub fn check(built: &BuiltGraph) -> Vec<Violation> {
             detail: format!(
                 "scanned {} but accounted for {accounted}",
                 r.references_scanned
+            ),
+        });
+    }
+
+    // An external reference lifts to exactly one edge — the workbook it names —
+    // and a resolved name to exactly one, the definition. Neither can be
+    // dropped as a self-loop and neither can fan out, so the summed weight in
+    // the graph must equal the count in the report, exactly.
+    for (kind, counted, what) in [
+        (
+            EdgeKind::CrossWorkbookRef,
+            r.references_external,
+            "external references",
+        ),
+        (EdgeKind::ReferencesName, r.names_resolved, "resolved names"),
+    ] {
+        let weight = r.edge_weight_of(kind);
+        if weight != counted {
+            out.push(Violation {
+                invariant: "lifted weight equals the references behind it",
+                detail: format!(
+                    "{counted} {what} but {} of {} weight",
+                    weight,
+                    kind.as_str()
+                ),
+            });
+        }
+    }
+
+    // A cell reference can straddle regions, so these cannot be equalities: one
+    // reference may carry several edges. It can never carry fewer than one,
+    // which is what makes the bound a real constraint on lifting.
+    let dependency =
+        r.edge_weight_of(EdgeKind::DependsOn) + r.edge_weight_of(EdgeKind::CrossSheetRef);
+    if dependency < r.references_lifted {
+        out.push(Violation {
+            invariant: "every lifted reference carries at least one edge",
+            detail: format!(
+                "{} lifted but only {dependency} of dependency weight",
+                r.references_lifted
+            ),
+        });
+    }
+    if r.edge_weight_of(EdgeKind::CrossSheetRef) < r.references_cross_sheet {
+        out.push(Violation {
+            invariant: "every lifted reference carries at least one edge",
+            detail: format!(
+                "{} cross-sheet but only {} of CROSS_SHEET_REF weight",
+                r.references_cross_sheet,
+                r.edge_weight_of(EdgeKind::CrossSheetRef)
             ),
         });
     }

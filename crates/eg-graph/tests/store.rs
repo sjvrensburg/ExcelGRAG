@@ -199,3 +199,113 @@ fn a_missing_graph_file_is_a_miss_not_an_error() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+#[test]
+fn a_file_whose_shape_belongs_to_another_version_is_a_miss() {
+    // The version bump *is* the shape change, so a stored file from another
+    // version does not deserialise into this one's `StoredGraph`. Reaching the
+    // version field only after deserialising makes the gate unreachable in
+    // exactly the case it exists for, and turns a stale cache into a hard
+    // error that no rebuild can get past.
+    let root = dir();
+    let wb = workbook("hash-shape");
+    let built = build(&wb);
+
+    let mut corpus = Corpus::open(&root).unwrap();
+    corpus
+        .put("hash-shape", &wb.path, 2, 12, false, &built)
+        .unwrap();
+
+    let file = std::fs::read_dir(root.join("graphs"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::write(
+        &file,
+        br#"{"version":999999,"content_hash":"hash-shape","shape_from_the_future":[]}"#,
+    )
+    .unwrap();
+    assert!(corpus.get("hash-shape").unwrap().is_none());
+
+    // And the same for a manifest, whose `Entry` shape moves with the version.
+    std::fs::write(
+        root.join("manifest.json"),
+        br#"{"version":999999,"workbooks":{"hash-shape":{"path":"book.xlsx"}}}"#,
+    )
+    .unwrap();
+    let fresh = Corpus::open(&root).expect("a foreign manifest is discarded, not an error");
+    assert!(fresh.is_empty());
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn a_root_outside_the_graph_is_a_miss() {
+    // A petgraph index means nothing except against the graph it came from.
+    // Handed back unchecked, a root one past the end panics in the first
+    // caller that looks the node up, a long way from the file that caused it.
+    let root = dir();
+    let wb = workbook("hash-root");
+    let built = build(&wb);
+
+    let mut corpus = Corpus::open(&root).unwrap();
+    corpus
+        .put("hash-root", &wb.path, 2, 12, false, &built)
+        .unwrap();
+
+    let file = std::fs::read_dir(root.join("graphs"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let text = std::fs::read_to_string(&file).unwrap();
+    let broken = text.replacen("\"root\":0", "\"root\":4294967295", 1);
+    assert_ne!(broken, text, "the root field should be present");
+    std::fs::write(&file, broken).unwrap();
+
+    assert!(corpus.get("hash-root").unwrap().is_none());
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn node_indices_survive_the_round_trip() {
+    // Every node payload carries indices implicitly: `root` is one, and every
+    // edge is a pair of them. A serialisation that renumbered nodes would
+    // still reload into a valid graph — just one describing a different
+    // workbook — so this compares index for index, not totals.
+    let root = dir();
+    let wb = workbook("hash-idx");
+    let built = build(&wb);
+
+    let mut corpus = Corpus::open(&root).unwrap();
+    corpus
+        .put("hash-idx", &wb.path, wb.sheets.len(), 12, true, &built)
+        .unwrap();
+    let reloaded = corpus
+        .get("hash-idx")
+        .unwrap()
+        .expect("stored")
+        .into_built();
+
+    assert_eq!(reloaded.root, built.root);
+    assert_eq!(reloaded.graph.node_count(), built.graph.node_count());
+    for i in built.graph.node_indices() {
+        assert_eq!(reloaded.graph[i], built.graph[i], "node {i:?} moved");
+    }
+
+    let edges = |g: &eg_graph::Graph| -> Vec<(usize, usize, EdgeKind, u64)> {
+        g.edge_indices()
+            .map(|e| {
+                let (a, b) = g.edge_endpoints(e).unwrap();
+                (a.index(), b.index(), g[e].kind, g[e].weight)
+            })
+            .collect()
+    };
+    assert_eq!(edges(&reloaded.graph), edges(&built.graph));
+
+    std::fs::remove_dir_all(&root).ok();
+}

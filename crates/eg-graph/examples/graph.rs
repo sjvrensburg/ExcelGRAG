@@ -43,9 +43,18 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn realloc(&self, p: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let q = unsafe { System.realloc(p, layout, new_size) };
         if !q.is_null() {
-            let live = LIVE.load(Ordering::Relaxed) + new_size - layout.size();
-            LIVE.store(live, Ordering::Relaxed);
-            PEAK.fetch_max(live, Ordering::Relaxed);
+            // One atomic read-modify-write, not a load and a store: the latter
+            // loses every concurrent allocation between the two, and the whole
+            // point of this example is a number that can be trusted.
+            if new_size >= layout.size() {
+                let grew = new_size - layout.size();
+                PEAK.fetch_max(
+                    LIVE.fetch_add(grew, Ordering::Relaxed) + grew,
+                    Ordering::Relaxed,
+                );
+            } else {
+                LIVE.fetch_sub(layout.size() - new_size, Ordering::Relaxed);
+            }
         }
         q
     }

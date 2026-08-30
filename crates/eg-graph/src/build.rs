@@ -290,14 +290,20 @@ impl<'a> Builder<'a> {
     fn lift_dependencies(&mut self) {
         let mut refs: Vec<ReferenceSpan> = Vec::new();
         let mut names: Vec<NameSpan> = Vec::new();
+        // Reused across every name token of every formula. `to_uppercase`
+        // allocates, and there are several name-shaped tokens — mostly function
+        // names — in each of millions of formulas.
+        let mut upper = String::new();
         let resolve_names = !self.names.is_empty();
 
         // Moved out for the duration so that reading regions and writing edges
         // are not two borrows of `self` at the same time. Put back at the end.
         let regions = std::mem::take(&mut self.regions);
 
-        for sheet in &self.workbook.sheets {
-            let index = sheet.id.0 as usize;
+        // Keyed by position, which is how `add_sheet` filled both vectors.
+        // `SheetId` is that position for every workbook ingest produces, but
+        // indexing by it here would panic on one where it is not.
+        for (index, sheet) in self.workbook.sheets.iter().enumerate() {
             let mut source_hint = 0usize;
             let mut target_hint = 0usize;
             for (at, cell) in sheet.iter() {
@@ -332,7 +338,7 @@ impl<'a> Builder<'a> {
                 if resolve_names {
                     scan_names_into(formula, &mut names);
                     for span in &names {
-                        self.lift_name(source, span, formula);
+                        self.lift_name(source, span, formula, &mut upper);
                     }
                 }
             }
@@ -370,12 +376,19 @@ impl<'a> Builder<'a> {
                 Some(id) => id,
                 None => {
                     self.report.references_dangling += 1;
-                    *self.unknown_sheets.entry(name.clone()).or_default() += 1;
-                    self.record_dangling(
-                        at,
-                        span.text(formula).to_string(),
-                        DanglingReason::UnknownSheet(name.clone()),
-                    );
+                    // Cloned only the first time the name is seen: one deleted
+                    // sheet accounts for millions of these.
+                    match self.unknown_sheets.get_mut(name) {
+                        Some(count) => *count += 1,
+                        None => {
+                            self.unknown_sheets.insert(name.clone(), 1);
+                        }
+                    }
+                    self.record_dangling(|| DanglingRef {
+                        from: at,
+                        text: span.text(formula).to_string(),
+                        reason: DanglingReason::UnknownSheet(name.clone()),
+                    });
                     return;
                 }
             },
@@ -430,9 +443,15 @@ impl<'a> Builder<'a> {
             self.report.references_unpopulated_target += 1;
             // Cited with its sheet: an unqualified `D21` in the report reads as
             // a reference to the source sheet, which is exactly wrong when the
-            // formula wrote `Other!$D$21`.
-            let cited = self.workbook.cite_range(range);
-            self.record_dangling(at, cited, DanglingReason::UnpopulatedTarget);
+            // formula wrote `Other!$D$21`. Built lazily — formatting a citation
+            // per reference, for millions of references whose examples are
+            // long since capped, is pure waste.
+            let workbook = self.workbook;
+            self.record_dangling(|| DanglingRef {
+                from: at,
+                text: workbook.cite_range(range),
+                reason: DanglingReason::UnpopulatedTarget,
+            });
         }
     }
 
@@ -451,23 +470,38 @@ impl<'a> Builder<'a> {
         node
     }
 
-    fn lift_name(&mut self, source: NodeIndex, span: &NameSpan, formula: &str) {
-        let text = span.text(formula);
-        let Some(candidates) = self.names.get(&text.to_uppercase()) else {
+    fn lift_name(&mut self, source: NodeIndex, span: &NameSpan, formula: &str, upper: &mut String) {
+        // `Rates!Tax_Rate` names the definition scoped to `Rates`, wherever the
+        // formula lives. Only an unqualified name is resolved against the
+        // formula's own sheet.
+        let scope = match &span.sheet_name {
+            Some(name) => match self.workbook.sheet_id_by_name(name) {
+                Some(id) => Some(id),
+                None => {
+                    // Qualified by a sheet the workbook does not have, so no
+                    // definition it could name exists.
+                    self.report.names_not_defined += 1;
+                    return;
+                }
+            },
+            None => self.graph[source].sheet(),
+        };
+
+        upper.clear();
+        upper.extend(span.text(formula).chars().flat_map(char::to_uppercase));
+        // A sheet-scoped name shadows a workbook-scoped one, so prefer the
+        // scope the reference asks for and fall back to global, which is
+        // visible from every sheet.
+        let target = self.names.get(upper.as_str()).and_then(|candidates| {
+            candidates
+                .iter()
+                .find(|(s, _)| *s == scope)
+                .or_else(|| candidates.iter().find(|(s, _)| s.is_none()))
+                .map(|&(_, node)| node)
+        });
+        let Some(target) = target else {
             // Almost certainly a function this scanner does not know. Names
             // that resolve are the signal; the rest is vocabulary.
-            self.report.names_not_defined += 1;
-            return;
-        };
-        // A sheet-scoped name shadows a workbook-scoped one, so prefer the
-        // scope matching the formula's own sheet and fall back to global.
-        let sheet = self.graph[source].sheet();
-        let target = candidates
-            .iter()
-            .find(|(scope, _)| *scope == sheet)
-            .or_else(|| candidates.iter().find(|(scope, _)| scope.is_none()))
-            .map(|&(_, node)| node);
-        let Some(target) = target else {
             self.report.names_not_defined += 1;
             return;
         };
@@ -478,11 +512,15 @@ impl<'a> Builder<'a> {
         self.report.names_resolved += 1;
     }
 
-    fn record_dangling(&mut self, from: CellRef, text: String, reason: DanglingReason) {
+    /// Keep an unresolved reference as a worked example, if there is room.
+    ///
+    /// The example is built by the closure only when it will be kept. The
+    /// counts are exact either way, and a workbook with one broken sheet
+    /// reference has millions of these to decline.
+    fn record_dangling(&mut self, make: impl FnOnce() -> DanglingRef) {
         if self.report.dangling_examples.len() < self.opts.max_dangling_examples {
-            self.report
-                .dangling_examples
-                .push(DanglingRef { from, text, reason });
+            let example = make();
+            self.report.dangling_examples.push(example);
         }
     }
 

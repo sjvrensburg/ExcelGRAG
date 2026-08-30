@@ -296,3 +296,83 @@ fn every_node_carries_the_cells_it_stands_for() {
         }
     }
 }
+
+#[test]
+fn a_sheet_qualified_name_resolves_in_the_sheet_it_names() {
+    // `Rates!Tax_Rate` names the definition scoped to Rates, wherever the
+    // formula lives. Resolved against the formula's own sheet instead, it
+    // silently points at a different definition with the same name — a wrong
+    // answer that every structural invariant is blind to, because the edge it
+    // produces is perfectly well formed.
+    let mut wb = workbook(vec![
+        grid(0, "Sales", &["Net", "=Rates!Tax_Rate*2"]),
+        grid(1, "Rates", &["Rate", "1"]),
+    ]);
+    wb.defined_names.push(DefinedName {
+        name: "Tax_Rate".into(),
+        refers_to: "Sales!$Z$1".into(),
+        scope: Some(SheetId(0)),
+    });
+    wb.defined_names.push(DefinedName {
+        name: "Tax_Rate".into(),
+        refers_to: "Rates!$Z$9".into(),
+        scope: Some(SheetId(1)),
+    });
+
+    let built = build(&wb);
+    assert_eq!(check(&built), vec![]);
+    assert_eq!(built.report.names_resolved, 1);
+
+    let target = built
+        .graph
+        .edge_indices()
+        .find(|&e| built.graph[e].kind == EdgeKind::ReferencesName)
+        .map(|e| built.graph.edge_endpoints(e).unwrap().1)
+        .expect("one REFERENCES_NAME edge");
+    match &built.graph[target] {
+        Node::DefinedName(n) => assert_eq!(n.refers_to, "Rates!$Z$9", "{n:?}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn an_unqualified_name_still_prefers_its_own_sheet_then_the_workbook() {
+    let mut wb = workbook(vec![
+        grid(0, "Sales", &["Net", "=Tax_Rate*2"]),
+        grid(1, "Rates", &["Rate", "1"]),
+    ]);
+    wb.defined_names.push(DefinedName {
+        name: "Tax_Rate".into(),
+        refers_to: "Any!$A$1".into(),
+        scope: None,
+    });
+    wb.defined_names.push(DefinedName {
+        name: "Tax_Rate".into(),
+        refers_to: "Sales!$Z$1".into(),
+        scope: Some(SheetId(0)),
+    });
+    let built = build(&wb);
+    let target = built
+        .graph
+        .edge_indices()
+        .find(|&e| built.graph[e].kind == EdgeKind::ReferencesName)
+        .map(|e| built.graph.edge_endpoints(e).unwrap().1)
+        .expect("one REFERENCES_NAME edge");
+    match &built.graph[target] {
+        Node::DefinedName(n) => assert_eq!(n.refers_to, "Sales!$Z$1", "the sheet-scoped one wins"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_name_qualified_by_a_missing_sheet_defines_nothing() {
+    let mut wb = workbook(vec![grid(0, "Sales", &["Net", "=Gone!Tax_Rate"])]);
+    wb.defined_names.push(DefinedName {
+        name: "Tax_Rate".into(),
+        refers_to: "Sales!$Z$1".into(),
+        scope: None,
+    });
+    let built = build(&wb);
+    assert_eq!(built.report.names_resolved, 0);
+    assert_eq!(built.report.edges_of(EdgeKind::ReferencesName), 0);
+}
