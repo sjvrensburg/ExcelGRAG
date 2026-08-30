@@ -217,7 +217,9 @@ fn cite(range: RangeRef, sheets: &FxHashMap<SheetId, String>) -> String {
 mod tests {
     use super::*;
     use eg_graph::build;
-    use eg_model::{Cell, CellValue, DefinedName, Sheet, SheetId, Workbook, WorkbookFormat};
+    use eg_model::{
+        Cell, CellValue, DefinedName, RangeRef, Sheet, SheetId, Workbook, WorkbookFormat,
+    };
 
     fn grid(id: u16, name: &str, rows: &[&str]) -> Sheet {
         let mut sheet = Sheet::new(SheetId(id), name);
@@ -346,6 +348,46 @@ mod tests {
         );
         // A name stands for no cells of its own, whatever it points at.
         assert_eq!(of_kind(&docs, NodeKind::DefinedName)[0].cells, 0);
+    }
+
+    #[test]
+    fn a_formula_group_takes_its_context_from_its_region_not_its_column() {
+        // `parents` follows CONTAINS only. A formula group is contained by its
+        // region and *also* headed by a column, and taking the header as the
+        // parent would make the ancestry depend on which edge came first.
+        let built = build(&sample());
+        let docs = docs_for(&built.graph);
+        let groups = of_kind(&docs, NodeKind::FormulaGroup);
+        assert!(
+            !groups.is_empty(),
+            "the fixture should have a formula group"
+        );
+
+        for group in groups {
+            let parent = parents(&built.graph)
+                .get(&NodeIndex::new(group.node as usize))
+                .map(|&p| built.graph[p].kind());
+            assert_eq!(
+                parent,
+                Some(NodeKind::Region),
+                "{} is parented by {parent:?}",
+                group.label
+            );
+        }
+    }
+
+    #[test]
+    fn a_citation_falls_back_rather_than_being_dropped() {
+        // A range whose sheet has no node in the graph still has to cite
+        // something: silently dropping the citation would leave a hit that
+        // cannot be traced back to a cell.
+        let sheets = FxHashMap::default();
+        let range = RangeRef::new(SheetId(7), 0, 0, 2, 2);
+        let cited = cite(range, &sheets);
+        // `#7` rather than a bare `7`, so the fallback can never be misread as
+        // a sheet actually named 7.
+        assert!(cited.starts_with("#7!"), "cited as {cited}");
+        assert!(cited.contains(&range.to_a1()));
     }
 
     #[test]

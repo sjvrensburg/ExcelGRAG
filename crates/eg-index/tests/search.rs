@@ -215,6 +215,37 @@ fn a_plural_in_the_workbook_answers_the_singular_typed() {
 }
 
 #[test]
+fn a_range_is_a_citation_to_hand_back_and_never_something_to_match() {
+    // The schema stores `a1` without indexing it, on the reasoning that nobody
+    // searches for `$B$7` and that indexing it would let a stray `A1` in a
+    // query pull in every node whose range happens to start there.
+    let (_root, index) = indexed("ranges", &[sales()]);
+
+    for query in ["A1", "B2", "A1:C4", "C2"] {
+        let hits = index
+            .search(
+                query,
+                &SearchOptions {
+                    limit: 50,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // A region with no title is labelled by its range, and that label *is*
+        // indexed — so a hit is only wrong if it was matched through the
+        // citation of a node whose label says something else.
+        for hit in &hits {
+            assert!(
+                hit.label.contains(query) || hit.a1.is_none(),
+                "{query} matched {:?} through its citation {:?}",
+                hit.label,
+                hit.a1
+            );
+        }
+    }
+}
+
+#[test]
 fn filters_narrow_by_kind_sheet_and_workbook() {
     let (_root, index) = indexed("filters", &[sales(), payroll()]);
 
