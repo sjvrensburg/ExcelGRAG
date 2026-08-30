@@ -341,6 +341,35 @@ fn reindexing_a_workbook_replaces_it_rather_than_doubling_it() {
 }
 
 #[test]
+fn the_index_says_which_workbooks_it_holds() {
+    let (_root, mut index) = indexed("contains", &[sales()]);
+    assert!(index.contains("hash-sales").unwrap());
+    assert!(!index.contains("hash-payroll").unwrap());
+
+    index.forget("hash-sales").unwrap();
+    assert!(!index.contains("hash-sales").unwrap());
+}
+
+#[test]
+fn a_rebuilt_index_reports_holding_nothing() {
+    // What this guards: a caller deciding whether to index by asking some
+    // *other* index, and so never noticing that this one was reset.
+    let root = dir("contains-rebuild");
+    {
+        let mut index = TextIndex::open(&root).unwrap();
+        let wb = sales();
+        index
+            .index_built(&build(&wb), &wb.content_hash, &wb.path)
+            .unwrap();
+        assert!(index.contains("hash-sales").unwrap());
+    }
+    std::fs::remove_dir_all(root.join("text")).unwrap();
+
+    let index = TextIndex::open(&root).unwrap();
+    assert!(!index.contains("hash-sales").unwrap());
+}
+
+#[test]
 fn forgetting_a_workbook_leaves_the_others() {
     let (_root, mut index) = indexed("forget", &[sales(), payroll()]);
     index.forget("hash-payroll").unwrap();

@@ -303,6 +303,20 @@ impl TextIndex {
         Ok(self.len()? == 0)
     }
 
+    /// Whether the index already holds documents for this workbook.
+    ///
+    /// Asked of the lexical index in its own right: a caller that inferred it
+    /// from the vector index would index nothing after this one is rebuilt for
+    /// a schema change, and report success.
+    pub fn contains(&self, content_hash: &str) -> Result<bool, IndexError> {
+        let searcher = self.searcher()?;
+        let query = self.term_query(self.fields.hash, content_hash);
+        let found = searcher
+            .search(&query, &tantivy::collector::Count)
+            .map_err(tantivy_err("counting a workbook's documents"))?;
+        Ok(found > 0)
+    }
+
     /// Index a graph loaded from the corpus.
     pub fn index_stored(&mut self, stored: &StoredGraph) -> Result<usize, IndexError> {
         self.index_graph(&stored.graph, &stored.content_hash, &stored.path)
