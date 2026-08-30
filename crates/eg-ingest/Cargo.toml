@@ -1,0 +1,18 @@
+[package]
+name = "eg-ingest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+eg-model.workspace = true
+calamine = { version = "0.36", features = ["dates"] }
+blake3 = "1"
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+rust_xlsxwriter = "0.91"
+tempfile = "3"

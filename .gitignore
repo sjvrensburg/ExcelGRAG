@@ -1,0 +1,8 @@
+/target
+Cargo.lock
+
+# Confidential or user-supplied workbooks. Never commit real spreadsheets:
+# they routinely contain commercial, personal or financial data.
+/private/
+*.private.xlsx
+*.private.xlsb

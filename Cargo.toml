@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/eg-model",
+    "crates/eg-ingest",
+    "crates/eg-structure",
+    "crates/eg-graph",
+    "crates/eg-index",
+    "crates/eg-retrieve",
+    "crates/eg-eval",
+    "crates/eg-mcp",
+    "crates/eg-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sjvrensburg/ExcelGRAG"
+rust-version = "1.85"
+
+[workspace.dependencies]
+eg-model = { path = "crates/eg-model" }
+eg-ingest = { path = "crates/eg-ingest" }
+eg-structure = { path = "crates/eg-structure" }
+eg-graph = { path = "crates/eg-graph" }
+eg-index = { path = "crates/eg-index" }
+eg-retrieve = { path = "crates/eg-retrieve" }
+eg-eval = { path = "crates/eg-eval" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rustc-hash = "2"
+smallvec = { version = "1", features = ["serde"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
