@@ -1,7 +1,7 @@
 # Upstream issues in calamine
 
-Six defects found in [calamine](https://github.com/tafia/calamine) 0.36.1 while
-building ExcelGRAG.
+Seven defects found in [calamine](https://github.com/tafia/calamine) 0.36.1
+while building ExcelGRAG.
 
 **Status:** issues 2 and 3 are fixed in a fork at `../calamine`, branch
 `xlsb-shared-formulas`, wired in through `[patch.crates-io]` in the workspace
@@ -10,10 +10,11 @@ format — submitted as [tafia/calamine#712](https://github.com/tafia/calamine/p
 Issue 1 was our own bug and is fixed here. Issue 4 was found later, while
 building the graph, and is submitted separately as
 [#713](https://github.com/tafia/calamine/pull/713) — unrelated code, so it did
-not belong on a branch already under review. Issues 5 and 6 were found later still, by
+not belong on a branch already under review. Issues 5, 6 and 7 were found later still, by
 recomputing formulas rather than reading them, and sit on their own branches
-`xlsb-relative-columns` and `xlsb-formula-error-cells`; both are pushed to the
-fork but not yet opened upstream.
+`xlsb-relative-columns`, `xlsb-formula-error-cells` and
+`xlsb-external-supbooks`; all three are pushed to the fork but not yet opened
+upstream.
 
 The workspace patches in an `excelgrag` branch carrying both fixes, since
 `[patch.crates-io]` takes a single source.
@@ -523,19 +524,88 @@ No fixture exercises it and none can be authored, for the usual reason. Verified
 against the reference workbook, where a `VLOOKUP` column returning `#N/A` came
 back blank before and comes back `#N/A` after.
 
-### What is left
+### What was left
 
-Eleven formulas out of 6,793,166 still disagree, and they fall into four kinds,
-none of which is a decoding failure of the sort above:
+Eleven formulas out of 6,793,166 still disagreed after this. Ten of them were
+issue 7 below. The eleventh was ours — Excel forces a subtraction whose
+operands are equal to 15 significant digits to zero, and `eg-eval` returned the
+`1.49e-8` between the doubles.
 
-- Two read `JOURNAL_IMPAIR!$D$21`–`$D$24` on a sheet that is 13 rows long. The
-  sheet index in the reference may be resolving to the wrong sheet.
-- Two read a pivot table's cells, which our load has as empty.
-- Two look up `'#Unknown'!A:C` — the marker a reader substitutes when it cannot
-  resolve a sheet index — and Excel stored a number, so it resolved.
-- One computes `1.49e-8` where Excel stored `0`, from a subtraction of two
-  numbers equal to 15 significant digits. That one is ours: Excel snaps such a
-  result to zero and `eg-eval` does not.
+## 7. A reference into another workbook is resolved against this one
 
-The first three point at the same place — how a sheet index in a formula is
-resolved to a sheet — which is the next thing to look at.
+**Affects:** `.xlsb`. Pre-existing upstream.
+
+**Fixed** in the fork on branch `xlsb-external-supbooks`, branched from `master`
+and independent of every other branch. Not yet opened upstream.
+
+An `Xti` carries two indices: a supporting book, and a tab within *that* book.
+`BrtExternSheet` used only the second:
+
+```rust
+match read_i32(&xti[4..8]) {
+    -2 => "#ThisWorkbook",
+    -1 => "#InvalidWorkSheet",
+    p if p >= 0 && (p as usize) < sheets.len() => &sheets[p as usize].0,
+    _ => "#Unknown",
+}
+```
+
+For a workbook that links to another one — last year's copy of itself, most
+commonly — that names a real sheet of ours, records a real dependency, and
+points it at the wrong place. **Nothing about the result looks wrong.** The
+reference reads `JOURNAL_IMPAIR!$D$21`, `JOURNAL_IMPAIR` exists, and `$D$21` is
+a cell on it.
+
+### Measured on the reference workbook
+
+Its externals block declares four supporting books — `BrtSupSelf` (`0x0165`)
+first, then three `BrtSupBookSrc` (`0x0163`) — and its 18 `Xti` entries name
+them:
+
+| ixti | supbook | tab | resolved to | actually |
+|---|---|---|---|---|
+| 2 | 1 | 5 | `JOURNAL_IMPAIR` | sheet 6 of another workbook |
+| 6 | 2 | 12 | `PIVOT PER SERVICE` | sheet 13 of another workbook |
+| 16 | 3 | 26 | `#Unknown` | sheet 27 of another workbook |
+
+Twelve formulas used them. Ten disagreed with the value Excel had stored; two
+agreed by coincidence, the local cell happening to hold the same number as the
+foreign one, which is the case that would never have been found by looking.
+
+The proof is arithmetic rather than documentary. `Sheet1!AB2` reads
+
+```
+=IF($B2="ACTIVE",JOURNAL_IMPAIR!$D$21,JOURNAL_IMPAIR!$D$22)
+```
+
+and Excel stored 2. `JOURNAL_IMPAIR` is 13 rows long, so `$D$21` is empty and
+the formula could not have produced 2 from it. `INDICATORS!D21:D24` — the sheet
+the *self*-book `Xti` at index 3 names — holds `2, 0, 2, 1`, which is what all
+six formulas of that family stored. The external books are copies of this
+workbook, and their indicator sheet sits at a different tab index.
+
+### The fix
+
+Supporting books are tracked in declaration order, and a tab index resolves
+against our sheets only when the `Xti` names ours. A reference into another
+book is written `[1]#Sheet3`, in the shape an external reference already has,
+because the sheet's own name lives in that workbook and it is not open. A
+workbook that declares no supporting books keeps the old behaviour, every
+reference being local. The two sentinels still outrank the book index.
+
+`xti_sheet` is a free function with unit tests for each case. No fixture has an
+external link and none can be authored for `.xlsb`; the end-to-end evidence is
+that workbook.
+
+### What it changed, measured
+
+| | Before | After |
+|---|---|---|
+| Agreed with the stored value | 98.3% | **98.3%** |
+| Disagreed | 11 | **0** |
+| Not recomputable | 115,757 | 115,769 |
+
+**Zero.** Every one of the 6,677,397 formulas `eg-eval` can evaluate now
+computes exactly what Excel stored. What is left in the last row is 115,566
+`PV()`, 191 `GETPIVOTDATA()` and the 12 references into workbooks that are not
+open — three honest gaps, no decoding failures.

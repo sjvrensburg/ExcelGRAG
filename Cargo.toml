@@ -48,7 +48,7 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 
-# calamine fork carrying five fixes, each on its own branch and pointed at here
+# calamine fork carrying six fixes, each on its own branch and pointed at here
 # through one integration branch, since `[patch.crates-io]` takes a single
 # source:
 #
@@ -63,6 +63,9 @@ codegen-units = 1
 #   branch xlsb-formula-error-cells, not yet submitted — a formula cell whose
 #     cached value is an error is skipped, so the cell is absent rather than
 #     merely valueless.
+#   branch xlsb-external-supbooks, not yet submitted — a reference into another
+#     workbook is resolved against this one's sheets, naming a real sheet and
+#     recording a real dependency on the wrong one.
 #
 # Drop this section once they land in a published release.
 [patch.crates-io]

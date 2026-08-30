@@ -554,3 +554,16 @@ fn a_long_lookup_column_answers_the_same_as_a_short_one() {
     // The approximate form is not indexed, since it asks an ordering question.
     assert_eq!(value("VLOOKUP(1234,B1:B2000,1)"), CellValue::Number(1234.0));
 }
+
+#[test]
+fn operands_that_cancel_at_fifteen_digits_subtract_to_zero() {
+    // Two numbers a sheet shows identically are the same number, so their
+    // difference is zero rather than the 1.49e-8 between the doubles. Excel
+    // does this, and a column of differences reads as empty because of it.
+    assert_eq!(number("49276148.73000001-49276148.73"), 0.0);
+    assert_eq!(number("49276148.73000001+(0-49276148.73)"), 0.0);
+    // A difference a sheet can show survives untouched.
+    assert_eq!(number("49276148.7301-49276148.73"), 0.00010000169277191162);
+    assert_eq!(number("1-0.9"), 0.09999999999999998);
+    assert_eq!(number("0.1+0.2"), 0.30000000000000004);
+}
