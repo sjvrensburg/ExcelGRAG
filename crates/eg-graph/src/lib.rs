@@ -24,6 +24,7 @@ pub mod build;
 pub mod check;
 pub mod node;
 pub mod report;
+pub mod store;
 
 pub use build::{
     build, build_with, nodes_of_kind, reachable_from, BuiltGraph, Graph, GraphOptions,
@@ -34,3 +35,4 @@ pub use node::{
     FormulaGroupNode, Node, NodeKind, RegionNode, SheetNode, WorkbookNode,
 };
 pub use report::{degree_stats, BuildReport, DegreeStats};
+pub use store::{Corpus, StoreError, StoredGraph};

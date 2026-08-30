@@ -35,7 +35,7 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rustc-hash = "2"
-petgraph = "0.8"
+petgraph = { version = "0.8", features = ["serde-1"] }
 smallvec = { version = "1", features = ["serde"] }
 
 [profile.release]

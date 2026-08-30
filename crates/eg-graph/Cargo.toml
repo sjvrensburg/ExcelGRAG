@@ -12,6 +12,8 @@ eg-structure = { workspace = true }
 petgraph = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 eg-ingest = { workspace = true }
