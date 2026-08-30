@@ -1,8 +1,12 @@
 # Upstream issues in calamine
 
 Three defects found in [calamine](https://github.com/tafia/calamine) 0.36.1 while
-building `eg-ingest`. Two are worked around locally; the third is a blocker that
-cannot be worked around from outside the crate.
+building `eg-ingest`.
+
+**Status:** issues 2 and 3 are fixed in a fork at `../calamine`, branch
+`xlsb-shared-formulas`, wired in through `[patch.crates-io]` in the workspace
+`Cargo.toml`. The fix is ready to upstream as a pull request. Issue 1 was our
+own bug and is fixed here.
 
 All three were found by the format-parity test — reading the same logical
 workbook as `.xlsx` and as `.xlsb` and requiring identical values and formulas —
@@ -59,11 +63,14 @@ same workbook yields `A1>=A2`.
 binary workbook is inverted at the boundary — `>=` becomes `>` and vice versa.
 Any threshold logic built on it is wrong, with no error raised.
 
-**Workaround:** `fix_binary_comparison_operators` in
-`crates/eg-ingest/src/convert.rs`. Because the two operators are exactly
-transposed, swapping them back is a complete fix rather than a heuristic. The
-swap is token-aware: `<>` and `<=` are left alone, and string literals and
-quoted sheet names are never rewritten.
+**Fixed** in the fork for `.xlsb`.
+
+`.xls` carries the same transposed table in `src/xls.rs` and is left alone in
+the fork, to keep the pull request to a single format. It is handled here
+instead by `fix_binary_comparison_operators` in
+`crates/eg-ingest/src/convert.rs`, which is applied to `.xls` only — applying it
+to `.xlsb` as well would transpose the operators straight back, a mistake the
+parity test caught immediately.
 
 ---
 

@@ -41,3 +41,9 @@ smallvec = { version = "1", features = ["serde"] }
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+# Local fork of calamine carrying fixes for XLSB shared/array formulas and the
+# transposed `>`/`>=` operators. See docs/upstream-issues.md; to be dropped once
+# the changes land upstream.
+[patch.crates-io]
+calamine = { path = "../calamine" }

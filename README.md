@@ -27,6 +27,20 @@ are not yet built.
 | `eg-mcp` | MCP server | stub |
 | `eg-cli` | Command-line front-end | stub |
 
+## The calamine fork
+
+`eg-ingest` depends on a forked calamine at `../calamine`, wired in via
+`[patch.crates-io]`. It fixes two silent XLSB bugs — dropped shared and array
+formulas, and transposed `>=` / `>` — without which 70% of the formulas in a
+real workbook go missing. Clone it alongside this repo:
+
+```sh
+git clone https://github.com/tafia/calamine.git ../calamine
+cd ../calamine && git checkout xlsb-shared-formulas
+```
+
+The fix is ready to upstream; see `docs/upstream-issues.md`.
+
 ## Testing
 
 ```sh
