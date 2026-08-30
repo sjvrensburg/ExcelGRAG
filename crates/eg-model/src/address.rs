@@ -338,10 +338,11 @@ fn split_sheet_prefix(s: &str) -> Result<(Option<String>, &str), AddressError> {
     Ok((Some(s[..=i].to_string()), local))
 }
 
+/// A decomposed sheet prefix: workbook, sheet, and (for 3-D refs) end sheet.
+type SheetPrefix = (Option<String>, Option<String>, Option<String>);
+
 /// Decompose a sheet prefix into workbook, sheet, and (for 3-D refs) end sheet.
-fn parse_sheet_prefix(
-    prefix: &str,
-) -> Result<(Option<String>, Option<String>, Option<String>), AddressError> {
+fn parse_sheet_prefix(prefix: &str) -> Result<SheetPrefix, AddressError> {
     let mut p = prefix.trim();
 
     // Strip the surrounding quotes first; the workbook marker lives inside them

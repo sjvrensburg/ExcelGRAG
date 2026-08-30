@@ -7,3 +7,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+eg-model.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+eg-ingest.workspace = true
