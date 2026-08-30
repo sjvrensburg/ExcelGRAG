@@ -7,3 +7,14 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+eg-model.workspace = true
+petgraph.workspace = true
+eg-graph.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true
+tantivy.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+eg-ingest.workspace = true
+tantivy.workspace = true

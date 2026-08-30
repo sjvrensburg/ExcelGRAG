@@ -1,0 +1,451 @@
+//! Searching a corpus small enough to know the right answer for.
+//!
+//! The reference workbook says whether the index is fast and how big it gets.
+//! These say whether the hit it returns is the node a person meant.
+
+use eg_graph::store::Corpus;
+use eg_graph::{build, NodeKind};
+use eg_index::{IndexError, SearchOptions, TextIndex};
+use eg_model::{Cell, CellValue, DefinedName, Sheet, SheetId, Workbook, WorkbookFormat};
+
+fn grid(id: u16, name: &str, rows: &[&str]) -> Sheet {
+    let mut sheet = Sheet::new(SheetId(id), name);
+    for (r, line) in rows.iter().enumerate() {
+        for (c, tok) in line.split_whitespace().enumerate() {
+            if tok == "." {
+                continue;
+            }
+            let cell = match tok.strip_prefix('=') {
+                Some(f) => Cell {
+                    value: CellValue::Number(0.0),
+                    formula: Some(f.to_string()),
+                    format: Default::default(),
+                },
+                None => match tok.parse::<f64>() {
+                    Ok(n) => Cell::literal(CellValue::Number(n)),
+                    Err(_) => Cell::literal(CellValue::Text(tok.to_string())),
+                },
+            };
+            sheet.set(r as u32, c as u16, cell);
+        }
+    }
+    sheet
+}
+
+/// A workbook whose sheet name shares a word with a column header, which is the
+/// case that decides whether the field weights are doing anything.
+fn sales() -> Workbook {
+    Workbook {
+        path: "sales.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash-sales".into(),
+        sheets: vec![
+            grid(
+                0,
+                "Q3 Sales",
+                &[
+                    "Region Revenue Net",
+                    "North 10 =B2*Rates!B2",
+                    "South 20 =B3*Rates!B3",
+                    "East 30 =B4*Rates!B4",
+                ],
+            ),
+            grid(1, "Rates", &["Country Tariff", "ZA 0.15", "UK 0.2"]),
+        ],
+        defined_names: vec![DefinedName {
+            name: "TaxRate".into(),
+            refers_to: "Rates!$B$2".into(),
+            scope: None,
+        }],
+        external_links: Vec::new(),
+    }
+}
+
+fn payroll() -> Workbook {
+    Workbook {
+        path: "payroll.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash-payroll".into(),
+        sheets: vec![grid(
+            0,
+            "Staff",
+            &["Name Salary", "Ada 100", "Grace 120", "Alan 90"],
+        )],
+        defined_names: Vec::new(),
+        external_links: Vec::new(),
+    }
+}
+
+/// Headers written the way spreadsheets actually write them.
+fn compounds() -> Workbook {
+    Workbook {
+        path: "compounds.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash-compounds".into(),
+        sheets: vec![grid(
+            0,
+            "Sheet1",
+            &[
+                "Region NetRevenue FY2024 Tariffs",
+                "North 10 11 0.1",
+                "South 20 21 0.2",
+                "East 30 31 0.3",
+            ],
+        )],
+        defined_names: Vec::new(),
+        external_links: Vec::new(),
+    }
+}
+
+fn dir(tag: &str) -> std::path::PathBuf {
+    let base = std::env::temp_dir().join(format!(
+        "eg-index-{tag}-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&base);
+    base
+}
+
+fn indexed(tag: &str, workbooks: &[Workbook]) -> (std::path::PathBuf, TextIndex) {
+    let root = dir(tag);
+    let mut index = TextIndex::open(&root).unwrap();
+    for wb in workbooks {
+        let built = build(wb);
+        index
+            .index_built(&built, &wb.content_hash, &wb.path)
+            .unwrap();
+    }
+    (root, index)
+}
+
+fn labels(hits: &[eg_index::Hit]) -> Vec<&str> {
+    hits.iter().map(|h| h.label.as_str()).collect()
+}
+
+#[test]
+fn a_column_outranks_the_sheet_it_shares_a_word_with() {
+    let (_root, index) = indexed("rank", &[sales()]);
+    let hits = index.search("revenue", &SearchOptions::default()).unwrap();
+
+    assert!(!hits.is_empty(), "revenue matched nothing");
+    let top = &hits[0];
+    assert_eq!(top.kind, NodeKind::Column);
+    assert_eq!(top.label, "Revenue");
+    assert_eq!(top.sheet.as_deref(), Some("Q3 Sales"));
+    // The hit has to be enough to go back to the workbook with.
+    assert_eq!(top.workbook, "hash-sales");
+    assert_eq!(top.path, "sales.xlsx");
+    assert!(top.a1.as_deref().unwrap().starts_with("'Q3 Sales'!"));
+}
+
+#[test]
+fn a_table_is_found_by_a_column_it_holds() {
+    let (_root, index) = indexed("region", &[sales()]);
+    let hits = index
+        .search(
+            "revenue",
+            &SearchOptions {
+                kinds: vec![NodeKind::Region],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected the one table, got {:?}",
+        labels(&hits)
+    );
+    assert_eq!(hits[0].kind, NodeKind::Region);
+    assert_eq!(hits[0].sheet.as_deref(), Some("Q3 Sales"));
+}
+
+#[test]
+fn a_compound_identifier_is_found_by_one_of_its_words() {
+    let (_root, index) = indexed("compound", &[compounds()]);
+
+    // `Sheet1` is one token to a default tokenizer, so `sheet` would miss every
+    // sheet in the corpus.
+    let sheets = index.search("sheet", &SearchOptions::default()).unwrap();
+    assert!(
+        sheets.iter().any(|h| h.label == "Sheet1"),
+        "sheet found {:?}",
+        labels(&sheets)
+    );
+
+    for (query, wanted) in [
+        ("revenue", "NetRevenue"),
+        ("net", "NetRevenue"),
+        ("netrevenue", "NetRevenue"),
+        ("2024", "FY2024"),
+        ("fy", "FY2024"),
+    ] {
+        let hits = index
+            .search(
+                query,
+                &SearchOptions {
+                    kinds: vec![NodeKind::Column],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            hits.iter().any(|h| h.label == wanted),
+            "{query} should find {wanted}, found {:?}",
+            labels(&hits)
+        );
+    }
+}
+
+#[test]
+fn a_plural_in_the_workbook_answers_the_singular_typed() {
+    let (_root, index) = indexed("stem", &[compounds()]);
+    let hits = index
+        .search(
+            "tariff",
+            &SearchOptions {
+                kinds: vec![NodeKind::Column],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(labels(&hits), vec!["Tariffs"]);
+}
+
+#[test]
+fn filters_narrow_by_kind_sheet_and_workbook() {
+    let (_root, index) = indexed("filters", &[sales(), payroll()]);
+
+    let names = index
+        .search(
+            "taxrate",
+            &SearchOptions {
+                kinds: vec![NodeKind::DefinedName],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(labels(&names), vec!["TaxRate"]);
+
+    let on_rates = index
+        .search(
+            "country tariff",
+            &SearchOptions {
+                sheet: Some("Rates".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(!on_rates.is_empty());
+    assert!(on_rates.iter().all(|h| h.sheet.as_deref() == Some("Rates")));
+
+    // A word that matches every node of both workbooks, so only the filter can
+    // be what keeps the other one out.
+    let one_book = index
+        .search(
+            "xlsx",
+            &SearchOptions {
+                workbook: Some("hash-payroll".into()),
+                limit: 100,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(!one_book.is_empty());
+    assert!(one_book.iter().all(|h| h.workbook == "hash-payroll"));
+}
+
+/// Two formula groups writing the same formula, one filled down 40 rows and
+/// one left at a single cell.
+fn ties() -> Workbook {
+    let mut rows = vec!["Data Small Big".to_string()];
+    for r in 1..=40u32 {
+        // Both formulas read column A of their own row, so each column is one
+        // group; only the second is filled down.
+        let small = if r == 1 {
+            format!("=LOOKUP(A{})", r + 1)
+        } else {
+            ".".to_string()
+        };
+        rows.push(format!("10 {small} =LOOKUP(A{})", r + 1));
+    }
+    let borrowed: Vec<&str> = rows.iter().map(String::as_str).collect();
+    Workbook {
+        path: "ties.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash-ties".into(),
+        sheets: vec![grid(0, "Ties", &borrowed)],
+        defined_names: Vec::new(),
+        external_links: Vec::new(),
+    }
+}
+
+#[test]
+fn between_equal_matches_the_one_standing_for_more_cells_wins() {
+    let (_root, index) = indexed("ties", &[ties()]);
+    let hits = index
+        .search(
+            "lookup",
+            &SearchOptions {
+                kinds: vec![NodeKind::FormulaGroup],
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let ranges: Vec<&str> = hits.iter().filter_map(|h| h.a1.as_deref()).collect();
+    assert_eq!(hits.len(), 2, "expected two groups, got {ranges:?}");
+    // Both write `LOOKUP(A2)`, so text relevance has nothing to separate them
+    // by; the group standing for 40 cells is the one to look at first.
+    assert!(
+        hits[0].a1.as_deref().unwrap().contains("C2:C41"),
+        "the 40-cell group should lead, got {ranges:?}"
+    );
+    assert!(hits[0].score > hits[1].score);
+}
+
+#[test]
+fn size_does_not_outweigh_an_exact_match() {
+    // The Revenue column covers three cells; the sheet it is on covers twelve
+    // and matches only through context. Size must not flip that.
+    let (_root, index) = indexed("size", &[sales()]);
+    let hits = index.search("revenue", &SearchOptions::default()).unwrap();
+    assert_eq!(hits[0].kind, NodeKind::Column);
+    assert_eq!(hits[0].label, "Revenue");
+}
+
+#[test]
+fn reindexing_a_workbook_replaces_it_rather_than_doubling_it() {
+    let (_root, mut index) = indexed("reindex", &[sales()]);
+    let before = index.len().unwrap();
+
+    let wb = sales();
+    index
+        .index_built(&build(&wb), &wb.content_hash, &wb.path)
+        .unwrap();
+
+    assert_eq!(index.len().unwrap(), before);
+    let hits = index
+        .search(
+            "revenue",
+            &SearchOptions {
+                kinds: vec![NodeKind::Column],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(labels(&hits), vec!["Revenue"]);
+}
+
+#[test]
+fn forgetting_a_workbook_leaves_the_others() {
+    let (_root, mut index) = indexed("forget", &[sales(), payroll()]);
+    index.forget("hash-payroll").unwrap();
+
+    let salary = index.search("salary", &SearchOptions::default()).unwrap();
+    assert!(salary.is_empty(), "payroll survived: {:?}", labels(&salary));
+
+    let revenue = index.search("revenue", &SearchOptions::default()).unwrap();
+    assert!(!revenue.is_empty(), "sales was dropped too");
+}
+
+#[test]
+fn a_query_full_of_formula_punctuation_is_not_an_error() {
+    let (_root, index) = indexed("lenient", &[sales()]);
+    // Every one of these is invalid query-parser syntax. A person who pastes a
+    // formula they saw should get results, not a parse failure.
+    for query in ["=B2*Rates!B2", "'Q3 Sales'!", "SUM(B:B", "revenue^^"] {
+        let hits = index.search(query, &SearchOptions::default());
+        assert!(hits.is_ok(), "{query} failed: {:?}", hits.err());
+    }
+}
+
+#[test]
+fn an_empty_query_returns_nothing_rather_than_everything() {
+    let (_root, index) = indexed("empty", &[sales()]);
+    assert!(index
+        .search("", &SearchOptions::default())
+        .unwrap()
+        .is_empty());
+    assert!(index
+        .search("   ", &SearchOptions::default())
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn the_index_reopens_over_what_is_already_there() {
+    let root = dir("reopen");
+    {
+        let mut index = TextIndex::open(&root).unwrap();
+        let wb = sales();
+        index
+            .index_built(&build(&wb), &wb.content_hash, &wb.path)
+            .unwrap();
+    }
+    let index = TextIndex::open(&root).unwrap();
+    assert!(index.len().unwrap() > 0);
+    assert!(!index
+        .search("revenue", &SearchOptions::default())
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn an_index_written_by_another_schema_is_rebuilt_rather_than_read() {
+    let root = dir("schema");
+    {
+        let mut index = TextIndex::open(&root).unwrap();
+        let wb = sales();
+        index
+            .index_built(&build(&wb), &wb.content_hash, &wb.path)
+            .unwrap();
+        assert!(index.len().unwrap() > 0);
+    }
+
+    // Stand in for a schema change by writing a tantivy index of a different
+    // shape into the same directory.
+    std::fs::remove_dir_all(root.join("text")).unwrap();
+    std::fs::create_dir_all(root.join("text")).unwrap();
+    let mut other = tantivy::schema::Schema::builder();
+    other.add_text_field("something-else", tantivy::schema::TEXT);
+    tantivy::Index::create_in_dir(root.join("text"), other.build()).unwrap();
+
+    let index = TextIndex::open(&root).unwrap();
+    assert_eq!(
+        index.len().unwrap(),
+        0,
+        "the stale index was read, not rebuilt"
+    );
+}
+
+#[test]
+fn a_graph_out_of_the_corpus_indexes_the_same_as_a_fresh_one() -> Result<(), IndexError> {
+    let root = dir("corpus");
+    let wb = sales();
+    let built = build(&wb);
+
+    let mut corpus = Corpus::open(&root).unwrap();
+    corpus
+        .put(
+            &wb.content_hash,
+            &wb.path,
+            wb.sheets.len(),
+            wb.total_cells() as u64,
+            true,
+            &built,
+        )
+        .unwrap();
+    let stored = corpus.get(&wb.content_hash).unwrap().unwrap();
+
+    let mut index = TextIndex::open(&root)?;
+    index.index_stored(&stored)?;
+
+    let hits = index.search("revenue", &SearchOptions::default())?;
+    assert_eq!(hits[0].label, "Revenue");
+    assert_eq!(hits[0].sheet.as_deref(), Some("Q3 Sales"));
+    Ok(())
+}

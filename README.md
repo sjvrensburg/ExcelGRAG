@@ -9,9 +9,10 @@ all, and the only Python library that can, `pyxlsb`, does not surface formulas.
 
 ## Status
 
-Early, but a workbook now goes all the way to a graph. `eg-model`, `eg-ingest`,
-`eg-structure` and `eg-graph` are implemented and tested; the index, retrieval,
-evaluation and MCP layers are not yet built.
+Early, but a workbook now goes all the way to a graph you can search. `eg-model`,
+`eg-ingest`, `eg-structure` and `eg-graph` are implemented and tested, and
+`eg-index` has its lexical half; the vector half, and the retrieval, evaluation
+and MCP layers, are not yet built.
 
 ## Workspace
 
@@ -21,7 +22,7 @@ evaluation and MCP layers are not yet built.
 | `eg-ingest` | Loading xlsx/xlsm/xlsb/xls/ods via calamine | implemented |
 | `eg-structure` | Region detection, header inference, formula grouping | implemented |
 | `eg-graph` | Graph build, reference lifting, invariants, store | implemented |
-| `eg-index` | Lexical (tantivy) and vector (fastembed) indexes | stub |
+| `eg-index` | Lexical (tantivy) and vector (fastembed) indexes | lexical done |
 | `eg-retrieve` | Hybrid search, graph expansion, context rendering | stub |
 | `eg-eval` | Formula evaluation and what-if | stub |
 | `eg-mcp` | MCP server | stub |
@@ -124,6 +125,59 @@ point they are rebuilt.
 cargo run --release -p eg-graph --example corpus -- index private/*.xlsb  # add
 cargo run --release -p eg-graph --example corpus -- index                # list
 ```
+
+## The lexical index
+
+Search over every node of every stored graph, so a question that arrives as
+words — "revenue", "the tax rate" — becomes the handful of nodes worth
+traversing from. A hit is a content hash plus a node index, which is exactly
+what reopening that graph and expanding outwards needs.
+
+Each node is flattened into its own name, the names of the nodes above it, and
+whatever else it holds, and the three are weighed differently. Otherwise every
+node on a sheet called Revenue outranks the Revenue column itself. A table also
+carries the headers of its columns, so searching for a column finds the table it
+belongs to as well.
+
+Tokenisation is the part worth knowing about. A spreadsheet writes `NetRevenue`,
+`FY2024` and `Sheet1`, and tantivy's default tokenizer splits on punctuation
+only — so `sheet` matches no sheet in the corpus. Each run is indexed whole
+*and* split at its case and letter/digit boundaries, then stemmed, so `net`,
+`revenue` and `netrevenue` all reach the same column.
+
+On the real 170 MB workbook the region-level index is **732 documents, 0.1 MiB,
+built in 0.04s**, and a query returns in **0.4ms**.
+
+```sh
+cargo run --release -p eg-graph --example corpus -- index private/book.xlsb
+cargo run --release -p eg-index --example search -- index revenue
+cargo run --release -p eg-index --example search -- index --kind column net revenue
+```
+
+The index is keyed by the same blake3 the corpus is, so reindexing a workbook
+replaces it rather than doubling it, and a changed workbook can never match
+under its old hash. It prints node labels and A1 ranges, never cell values.
+
+### Indexing the formulas
+
+Formula groups are the layer the corpus deliberately does not store — 119 MiB of
+near-identical text. Whether they are worth *indexing* is a different question,
+and the answer is yes: **464,302 documents in 1.73s, 35.6 MiB on disk**, and a
+search over them still returns in about **10ms**.
+
+```sh
+cargo run --release -p eg-index --example formulas -- private/formulas private/book.xlsb vlookup
+```
+
+That measurement also found the one thing text relevance cannot do here. Nearly
+every formula in a real workbook is a lookup, so `vlookup` matches 463,570
+groups with the same score, and which ones surface is then arbitrary. Each node
+carries how many cells it stands for, and the score is multiplied by
+`1 + log10(1 + cells) / 4` — the same idea as an edge's weight, that how much of
+the workbook rests on something is part of how much it matters. The `vlookup`
+list now leads with the group covering 195,366 cells. The multiplier tops out
+near 2.4x, far below the spread of real text scores, so it orders ties without
+ever putting a big irrelevant node above a small exact match.
 
 ## Testing
 

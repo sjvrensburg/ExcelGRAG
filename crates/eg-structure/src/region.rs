@@ -49,6 +49,16 @@ pub enum RegionKind {
     Note,
 }
 
+impl RegionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RegionKind::Table => "table",
+            RegionKind::Block => "block",
+            RegionKind::Note => "note",
+        }
+    }
+}
+
 /// A detected region of a sheet.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Region {

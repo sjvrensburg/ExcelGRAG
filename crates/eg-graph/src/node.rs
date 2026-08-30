@@ -65,6 +65,15 @@ impl NodeKind {
             NodeKind::ExternalWorkbook => "external workbook",
         }
     }
+
+    /// The inverse of [`NodeKind::as_str`].
+    ///
+    /// `None` rather than a default, because a kind read back from a store or
+    /// an index that we do not recognise means the file is not ours, and
+    /// guessing `Workbook` would put a stranger at the root of the graph.
+    pub fn parse(s: &str) -> Option<NodeKind> {
+        NodeKind::ALL.into_iter().find(|k| k.as_str() == s)
+    }
 }
 
 impl Node {
