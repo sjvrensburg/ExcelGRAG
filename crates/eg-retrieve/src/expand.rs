@@ -515,7 +515,11 @@ fn push_dependencies(
 
 /// Walk up the containment tree, adding whatever is not already there.
 ///
-/// Returns the nodes it added and whether the budget stopped it partway.
+/// Returns the nodes it added, and whether it stopped short — either because
+/// the budget ran out or because the containment chain turned out to be
+/// cyclic. Both mean the ancestry is incomplete, which is the one thing the
+/// caller must not report as whole.
+///
 /// Unbounded in depth on purpose: the tree is workbook → sheet → region →
 /// column, so this is at most three steps, and stopping halfway would leave a
 /// column whose table is unnamed.

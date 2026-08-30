@@ -88,18 +88,24 @@ pub fn render(found: &Retrieved, opts: &RenderOptions) -> Rendered {
         // One line, not one paragraph each. Twenty stale hashes used to be 2.2
         // KB of near-identical prose written before the ceiling was consulted,
         // which then left no room for any real workbook.
+        //
+        // Counted per workbook, which is what `missing_workbooks` holds. It
+        // read "result(s)" before, so three hits into one evicted workbook
+        // announced themselves as one — understating the loss to exactly the
+        // reader the notice exists for.
         const NAMED: usize = 8;
+        let count = found.missing_workbooks.len();
         let named: Vec<String> = found
             .missing_workbooks
             .iter()
             .take(NAMED)
             .map(|h| h.chars().take(8).collect())
             .collect();
-        let more = found.missing_workbooks.len().saturating_sub(NAMED);
-        let notice = format!(
-            "{} result(s) matched workbooks no longer in the corpus ({}{}); \
-             their context is missing. Reindex to recover it.\n\n",
-            found.missing_workbooks.len(),
+        let more = count.saturating_sub(NAMED);
+        let full = format!(
+            "{count} workbook(s) matched by the search are no longer in the \
+             corpus ({}{}); their context is missing. Reindex to recover \
+             it.\n\n",
             named.join(", "),
             if more > 0 {
                 format!(", and {more} more")
@@ -107,6 +113,14 @@ pub fn render(found: &Retrieved, opts: &RenderOptions) -> Rendered {
                 String::new()
             }
         );
+        // Under a ceiling too small even for that, the hashes go and the fact
+        // does not. Losing the names costs a reader a lookup; losing the notice
+        // costs them the knowledge that anything is missing at all.
+        let notice = if full.chars().count() <= opts.max_chars {
+            full
+        } else {
+            format!("{count} workbook(s) matched by the search are missing from the corpus.\n\n")
+        };
         chars += notice.chars().count();
         out.text.push_str(&notice);
     }
@@ -178,13 +192,30 @@ fn render_workbook(
             workbook, &order, i, upto, &reads, &read_by, opts, pad, &indent,
         )
     };
-    // Measured against the longest the heading can be. `fits` is at most
-    // `order.len()`, so writing the smaller number can only shorten it.
-    let widest_heading = self::heading(workbook, order.len(), order.len());
+    // Measured against the longest heading this workbook could end up writing.
+    //
+    // Not against the uncut one: a smaller `shown` selects a *different and
+    // longer* sentence — "4 of 30 node(s), the rest cut to fit" against "30
+    // node(s)" — so measuring the uncut form and then writing the cut one
+    // overran the ceiling by the difference, about thirty characters. The
+    // previous comment here asserted the opposite and was wrong.
+    let widest_heading = [
+        self::heading(workbook, order.len(), order.len())
+            .chars()
+            .count(),
+        self::heading(workbook, order.len().saturating_sub(1), order.len())
+            .chars()
+            .count(),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
     let mut fits = 0usize;
     // Entries are measured with every relation present, which is the largest
     // they can be; filtering them afterwards only shrinks the passage.
-    let mut used = *chars + widest_heading.chars().count();
+    // Plus the blank line that closes the workbook, which is written whether or
+    // not anything was cut and so belongs in the measurement.
+    let mut used = *chars + widest_heading + 1;
     for i in 0..order.len() {
         let size = entry(i, order.len()).chars().count();
         // The very first entry of the whole passage always goes in. A preamble

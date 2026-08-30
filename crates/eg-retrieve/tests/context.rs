@@ -263,15 +263,10 @@ fn the_ceiling_holds_across_several_workbooks() {
 
     // The trailing "left out to fit" notice is written after the ceiling on
     // purpose — a passage has to be able to say it was cut.
-    let body = rendered
-        .text
-        .split("further node(s) were retrieved")
-        .next()
-        .unwrap();
     assert!(
-        body.chars().count() <= ceiling,
+        body(&rendered.text).chars().count() <= ceiling,
         "asked for {ceiling} characters and got {}",
-        body.chars().count()
+        body(&rendered.text).chars().count()
     );
     assert!(!rendered.text.is_empty());
 
@@ -295,6 +290,54 @@ fn the_ceiling_holds_across_several_workbooks() {
         "the passage never mentions the workbooks it dropped:\n{}",
         rendered.text
     );
+}
+
+/// The body of a passage: everything before the trailing "left out" footer,
+/// which is written after the ceiling on purpose so a cut can announce itself.
+///
+/// Splitting on the phrase alone left the footer's own newline and node count
+/// in the body, which is four characters of slack in every assertion about the
+/// ceiling — enough to hide the overshoot these tests exist to catch.
+fn body(text: &str) -> &str {
+    let Some(at) = text.find(" further node(s) were retrieved") else {
+        return text;
+    };
+    let bytes = text.as_bytes();
+    let mut start = at;
+    while start > 0 && (bytes[start - 1].is_ascii_digit() || bytes[start - 1] == b'\n') {
+        start -= 1;
+    }
+    &text[..start]
+}
+
+#[test]
+fn the_ceiling_holds_at_every_size_and_not_just_the_convenient_ones() {
+    // A single value passes on slack. The overshoot this guards against was
+    // about thirty characters wide and only appeared where the cut heading —
+    // which is longer than the uncut one — was not what got measured.
+    let found = retrieved("sweep", "Net", NodeKind::Column, &ExpandOptions::default());
+
+    for ceiling in (200..=3_000).step_by(1) {
+        let rendered = render(
+            &found,
+            &RenderOptions {
+                max_chars: ceiling,
+                ..Default::default()
+            },
+        );
+        let shown = entries(&rendered.text).len();
+        // The first entry is documented as unconditional; everything past that
+        // is inside the ceiling or the ceiling means nothing.
+        if shown <= 1 {
+            continue;
+        }
+        assert!(
+            body(&rendered.text).chars().count() <= ceiling,
+            "at a ceiling of {ceiling} the body ran to {} characters:\n{}",
+            body(&rendered.text).chars().count(),
+            rendered.text
+        );
+    }
 }
 
 #[test]
@@ -345,17 +388,16 @@ fn a_pile_of_stale_hashes_does_not_become_the_whole_passage() {
             ..Default::default()
         },
     );
-    let body = rendered
-        .text
-        .split("further node(s) were retrieved")
-        .next()
-        .unwrap();
     assert!(
-        body.chars().count() <= 1_500,
+        body(&rendered.text).chars().count() <= 1_500,
         "asked for 1500 characters and got {}",
-        body.chars().count()
+        body(&rendered.text).chars().count()
     );
-    assert!(rendered.text.contains("20 result(s) matched workbooks"));
+    // Counted per workbook, which is what the field holds — "result(s)" made
+    // three hits into one evicted workbook read as one loss.
+    assert!(rendered
+        .text
+        .contains("20 workbook(s) matched by the search"));
     assert!(rendered.text.contains("and 12 more"));
     // And the real workbook still got room.
     assert!(!entries(&rendered.text).is_empty(), "{}", rendered.text);
@@ -377,13 +419,42 @@ fn the_ceiling_counts_characters_and_not_bytes() {
             ..Default::default()
         },
     );
-    let body = rendered
-        .text
-        .split("further node(s) were retrieved")
-        .next()
-        .unwrap();
-    assert!(body.chars().count() <= 400 || entries(&rendered.text).len() == 1);
+    assert!(body(&rendered.text).chars().count() <= 400 || entries(&rendered.text).len() == 1);
     assert!(rendered.text.contains("決算書"));
+}
+
+#[test]
+fn the_fact_that_workbooks_are_missing_outlives_a_tiny_ceiling() {
+    // The names can go; the fact cannot. A caller not told that data is absent
+    // presents what is left as everything there was.
+    let found = retrieved(
+        "tinynotice",
+        "Net",
+        NodeKind::Column,
+        &ExpandOptions::default(),
+    );
+    let mut stale = found.clone();
+    for i in 0..20 {
+        stale.missing_workbooks.push(format!("{i:040x}"));
+    }
+
+    let rendered = render(
+        &stale,
+        &RenderOptions {
+            max_chars: 120,
+            ..Default::default()
+        },
+    );
+    assert!(
+        rendered.text.contains("20 workbook(s)"),
+        "the notice vanished under a small ceiling:\n{}",
+        rendered.text
+    );
+    assert!(
+        !rendered.text.contains("and 12 more"),
+        "the long form was written anyway:\n{}",
+        rendered.text
+    );
 }
 
 #[test]
