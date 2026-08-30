@@ -5,8 +5,8 @@ building `eg-ingest`.
 
 **Status:** issues 2 and 3 are fixed in a fork at `../calamine`, branch
 `xlsb-shared-formulas`, wired in through `[patch.crates-io]` in the workspace
-`Cargo.toml`. Both are fixed for `.xlsb` and `.xls`, in three commits — one per
-format plus a performance fix — ready to upstream as a pull request. Issue 1 was our own bug and is fixed here.
+`Cargo.toml`. Both are fixed for `.xlsb` and `.xls`, in two commits — one per
+format — ready to upstream as a pull request. Issue 1 was our own bug and is fixed here.
 
 All three were found by the format-parity test — reading the same logical
 workbook as `.xlsx` and as `.xlsb` and requiring identical values and formulas —
@@ -229,3 +229,36 @@ Definitions are now indexed by column and located by binary search, which is
 sound because groups within a column cannot overlap. That brings the same
 workbook to **10.1s** while decoding 3.4x as many formulas — with identical
 output.
+
+---
+
+## What the review caught
+
+A code review before opening the PR found a third bug in the `.xls` work, worth
+recording because of *how* it hid.
+
+The column offset in a BIFF8 `RgceLocRel` is **8 bits** wide, not the 14 bits
+XLSB uses — the older format has 256 columns, not 16384. Masking 14 bits reads
+the `-1` written as `0xFF` as `+255`, so `SUM(B38:I38)` decoded as
+`SUM(IX38:JE38)`. Ninety formulas in calamine's own fixtures were wrong, and
+they would have shipped.
+
+**The row-advance invariant cannot catch this.** Every member of a group gets
+the *same* wrong column, so consecutive rows still differ by exactly one row and
+the check passes. Verifying rows says nothing about columns.
+
+Two things exposed it:
+
+- Generating a fixture with LibreOffice, which cannot write XLSB but *can* write
+  `.xls`, and diffing against the `.xlsx` twin: `A1*2` against `IW1*2`.
+- `crates/eg-ingest/examples/column_sanity.rs`, which checks that a sheet-local
+  reference lands inside the columns the sheet actually uses. Column `JJ` in a
+  256-column format is impossible on its face — the smell was visible in the
+  earlier output and went unremarked.
+
+Running that checker over the real workbook also retired the last unverified
+assumption, that XLSB columns really are 14 bits: no reference exceeds XFD. It
+found that unpatched calamine already emits out-of-range references at a higher
+rate than the patched build (14.5% against 2.8%), including a column `USO` on a
+sheet using `A..I`. That is pre-existing behaviour on other token types, not a
+regression, and is left alone here.
