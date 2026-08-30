@@ -266,7 +266,12 @@ pub fn scan_names_into(formula: &str, out: &mut Vec<NameSpan>) {
             }
             c if c.is_ascii_alphabetic() || c == b'_' || c == b'\\' => {
                 let start = i;
-                let end = scan_ident(b, i);
+                // Excel allows a name to begin with `\`, but only there, so it
+                // is not an identifier byte and `scan_ident` must start past
+                // it. Scanning from `start` would return an empty run, leaving
+                // `i` where it was: an infinite loop, pushing an empty name on
+                // every pass until the allocator gives out.
+                let end = scan_ident(b, if c == b'\\' { i + 1 } else { i });
 
                 if end < b.len() && b[end] == b'!' {
                     let sheet = formula[start..end].to_string();
@@ -742,6 +747,20 @@ mod tests {
         // reference. Neither is a defined name.
         assert_eq!(names("Sheet1!A1+'My Sheet'!B2"), Vec::<String>::new());
         assert_eq!(names("[1]Sheet1!A1"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_name_starting_with_a_backslash_terminates() {
+        // Excel allows `\` as a name's first character. It is not an
+        // identifier byte, so scanning once ran forever on it, pushing an
+        // empty name each pass until the process ran out of memory. The
+        // assertion on the text is what proves the fix consumed the byte
+        // rather than merely skipping it.
+        assert_eq!(names("\\Rate+1"), ["\\Rate"]);
+        assert_eq!(names("SUM(\\A,\\B)"), ["\\A", "\\B"]);
+        // A lone backslash still has to advance.
+        assert_eq!(names("\\"), ["\\"]);
+        assert_eq!(names("1+\\"), ["\\"]);
     }
 
     #[test]
