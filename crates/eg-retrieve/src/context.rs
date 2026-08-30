@@ -69,6 +69,10 @@ pub struct Rendered {
     /// Nodes dropped to fit `max_chars`. Named in the text too, because a
     /// passage that was cut and does not say so reads as a complete one.
     pub omitted: usize,
+    /// Workbooks that got no room at all, and so are not in the text under any
+    /// heading. Counted separately: a reader can see that a listed workbook was
+    /// cut short, and has no way at all to notice one that never appeared.
+    pub omitted_workbooks: usize,
 }
 
 /// Render an expansion.
@@ -80,11 +84,28 @@ pub fn render(found: &Retrieved, opts: &RenderOptions) -> Rendered {
     let mut chars = 0usize;
     let mut wrote_an_entry = false;
 
-    for hash in &found.missing_workbooks {
+    if !found.missing_workbooks.is_empty() {
+        // One line, not one paragraph each. Twenty stale hashes used to be 2.2
+        // KB of near-identical prose written before the ceiling was consulted,
+        // which then left no room for any real workbook.
+        const NAMED: usize = 8;
+        let named: Vec<String> = found
+            .missing_workbooks
+            .iter()
+            .take(NAMED)
+            .map(|h| h.chars().take(8).collect())
+            .collect();
+        let more = found.missing_workbooks.len().saturating_sub(NAMED);
         let notice = format!(
-            "A result matched workbook {} which is no longer in the corpus; \
-             its context is missing. Reindex to recover it.\n\n",
-            hash.chars().take(8).collect::<String>()
+            "{} result(s) matched workbooks no longer in the corpus ({}{}); \
+             their context is missing. Reindex to recover it.\n\n",
+            found.missing_workbooks.len(),
+            named.join(", "),
+            if more > 0 {
+                format!(", and {more} more")
+            } else {
+                String::new()
+            }
         );
         chars += notice.chars().count();
         out.text.push_str(&notice);
@@ -95,9 +116,17 @@ pub fn render(found: &Retrieved, opts: &RenderOptions) -> Rendered {
     }
 
     if out.omitted > 0 {
+        let whole = if out.omitted_workbooks > 0 {
+            format!(
+                ", including {} workbook(s) that do not appear above at all",
+                out.omitted_workbooks
+            )
+        } else {
+            String::new()
+        };
         let _ = write!(
             out.text,
-            "\n{} further node(s) were retrieved and left out to fit. \
+            "\n{} further node(s) were retrieved and left out to fit{whole}. \
              Raise the character ceiling, or expand fewer hops.\n",
             out.omitted
         );
@@ -149,11 +178,13 @@ fn render_workbook(
             workbook, &order, i, upto, &reads, &read_by, opts, pad, &indent,
         )
     };
-    let heading = self::heading(workbook, order.len());
+    // Measured against the longest the heading can be. `fits` is at most
+    // `order.len()`, so writing the smaller number can only shorten it.
+    let widest_heading = self::heading(workbook, order.len(), order.len());
     let mut fits = 0usize;
     // Entries are measured with every relation present, which is the largest
     // they can be; filtering them afterwards only shrinks the passage.
-    let mut used = *chars + heading.chars().count();
+    let mut used = *chars + widest_heading.chars().count();
     for i in 0..order.len() {
         let size = entry(i, order.len()).chars().count();
         // The very first entry of the whole passage always goes in. A preamble
@@ -166,9 +197,18 @@ fn render_workbook(
         fits += 1;
     }
     if fits == 0 {
+        // Everything this workbook offered is omitted, and the workbook itself
+        // never appears. Both have to be counted: a reader can see that a
+        // listed workbook was cut short, and cannot notice one that is absent.
+        out.omitted += order.len();
+        out.omitted_workbooks += 1;
         return;
     }
 
+    // Reporting `order.len()` here put "27 node(s)" above a list ending at
+    // [4]: a passage contradicting itself, which the reader can only resolve
+    // from a footer several workbooks further down.
+    let heading = self::heading(workbook, fits, order.len());
     out.text.push_str(&heading);
     *chars += heading.chars().count();
     for (i, node) in order.iter().enumerate().take(fits) {
@@ -185,7 +225,7 @@ fn render_workbook(
     *chars += 1;
 }
 
-fn heading(workbook: &WorkbookContext, nodes: usize) -> String {
+fn heading(workbook: &WorkbookContext, shown: usize, total: usize) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# {}", workbook.path);
     if workbook.truncated {
@@ -195,10 +235,15 @@ fn heading(workbook: &WorkbookContext, nodes: usize) -> String {
              match, not all of it."
         );
     }
+    let count = if shown < total {
+        format!("{shown} of {total} node(s), the rest cut to fit")
+    } else {
+        format!("{total} node(s)")
+    };
     let _ = writeln!(
         out,
-        "\n{nodes} node(s). A `*` marks something the search matched; the rest \
-         were reached from it. Every range below is a live location in this \
+        "\n{count}. A `*` marks something the search matched; the rest were \
+         reached from it. Every range below is a live location in this \
          workbook, not a value.\n"
     );
     out

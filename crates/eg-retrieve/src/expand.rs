@@ -536,7 +536,11 @@ fn add_ancestry(
     while let Some(parent) = containing(graph, child) {
         steps += 1;
         if steps > graph.node_count() {
-            return (added, false);
+            // Reported as truncated, because it is: the ancestry stops
+            // somewhere arbitrary in a cycle, and a caller told the context was
+            // complete would present a broken file as a whole one. This is the
+            // case the guard exists for, so it is the last case to be quiet in.
+            return (added, true);
         }
         if got.taken.contains(&parent) {
             child = parent;

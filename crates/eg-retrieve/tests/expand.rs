@@ -681,6 +681,13 @@ fn a_containment_cycle_on_disk_gives_a_short_answer_not_a_hung_process() {
         let path = found.workbooks[0].ancestry(node.node);
         assert!(path.len() <= found.workbooks[0].nodes.len());
     }
+    // The ancestry stops somewhere arbitrary in the cycle, so the context is
+    // knowingly incomplete and has to say so. Reporting it whole is what the
+    // guard was added to avoid.
+    assert!(
+        found.truncated(),
+        "a cycle-shortened ancestry was reported as complete"
+    );
 }
 
 #[test]

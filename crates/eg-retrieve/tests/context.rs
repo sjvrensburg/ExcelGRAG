@@ -273,8 +273,92 @@ fn the_ceiling_holds_across_several_workbooks() {
         "asked for {ceiling} characters and got {}",
         body.chars().count()
     );
-    assert!(rendered.omitted > 0);
     assert!(!rendered.text.is_empty());
+
+    // `omitted > 0` was the old assertion and it passed on the first
+    // workbook's cut alone, while nine workbooks vanished without a word. The
+    // count has to account for every node that was retrieved and not printed.
+    let retrieved: usize = many.total_nodes();
+    let printed = entries(&rendered.text).len();
+    assert_eq!(
+        rendered.omitted,
+        retrieved - printed,
+        "{retrieved} retrieved, {printed} printed, {} reported omitted",
+        rendered.omitted
+    );
+    assert!(
+        rendered.omitted_workbooks > 0,
+        "workbooks dropped whole were not counted"
+    );
+    assert!(
+        rendered.text.contains("do not appear above at all"),
+        "the passage never mentions the workbooks it dropped:\n{}",
+        rendered.text
+    );
+}
+
+#[test]
+fn the_heading_counts_what_is_shown_and_not_what_was_retrieved() {
+    // "27 node(s)" above a list ending at [4] is a passage contradicting
+    // itself, and the reader can only resolve it from a footer further down.
+    let found = retrieved(
+        "heading",
+        "Net",
+        NodeKind::Column,
+        &ExpandOptions::default(),
+    );
+    let rendered = render(
+        &found,
+        &RenderOptions {
+            max_chars: 420,
+            ..Default::default()
+        },
+    );
+
+    let shown = entries(&rendered.text).len();
+    assert!(shown > 0 && shown < found.total_nodes(), "shown {shown}");
+    assert!(
+        rendered
+            .text
+            .contains(&format!("{shown} of {} node(s)", found.total_nodes())),
+        "the heading does not say {shown} of {}:\n{}",
+        found.total_nodes(),
+        rendered.text
+    );
+}
+
+#[test]
+fn a_pile_of_stale_hashes_does_not_become_the_whole_passage() {
+    // One line for all of them, and inside the ceiling. Twenty notices used to
+    // be 2.2 KB written before the budget was consulted, which then left no
+    // room for any real workbook at all.
+    let found = retrieved("stale", "Net", NodeKind::Column, &ExpandOptions::default());
+    let mut many = found.clone();
+    for i in 0..20 {
+        many.missing_workbooks.push(format!("{i:040x}"));
+    }
+
+    let rendered = render(
+        &many,
+        &RenderOptions {
+            max_chars: 1_500,
+            ..Default::default()
+        },
+    );
+    let body = rendered
+        .text
+        .split("further node(s) were retrieved")
+        .next()
+        .unwrap();
+    assert!(
+        body.chars().count() <= 1_500,
+        "asked for 1500 characters and got {}",
+        body.chars().count()
+    );
+    assert!(rendered.text.contains("20 result(s) matched workbooks"));
+    assert!(rendered.text.contains("and 12 more"));
+    // And the real workbook still got room.
+    assert!(!entries(&rendered.text).is_empty(), "{}", rendered.text);
 }
 
 #[test]
