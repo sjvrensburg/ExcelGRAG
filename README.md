@@ -9,10 +9,10 @@ all, and the only Python library that can, `pyxlsb`, does not surface formulas.
 
 ## Status
 
-Early, but a workbook now goes all the way to a graph you can search. `eg-model`,
-`eg-ingest`, `eg-structure` and `eg-graph` are implemented and tested, and
-`eg-index` has its lexical half; the vector half, and the retrieval, evaluation
-and MCP layers, are not yet built.
+Early, but a workbook now goes all the way to a graph you can search, by word
+and by meaning. `eg-model`, `eg-ingest`, `eg-structure`, `eg-graph` and
+`eg-index` are implemented and tested; the retrieval, evaluation and MCP layers
+are not yet built.
 
 ## Workspace
 
@@ -22,7 +22,7 @@ and MCP layers, are not yet built.
 | `eg-ingest` | Loading xlsx/xlsm/xlsb/xls/ods via calamine | implemented |
 | `eg-structure` | Region detection, header inference, formula grouping | implemented |
 | `eg-graph` | Graph build, reference lifting, invariants, store | implemented |
-| `eg-index` | Lexical (tantivy) and vector (fastembed) indexes | lexical done |
+| `eg-index` | Lexical (tantivy) and vector (fastembed) indexes | implemented |
 | `eg-retrieve` | Hybrid search, graph expansion, context rendering | stub |
 | `eg-eval` | Formula evaluation and what-if | stub |
 | `eg-mcp` | MCP server | stub |
@@ -178,6 +178,57 @@ the workbook rests on something is part of how much it matters. The `vlookup`
 list now leads with the group covering 195,366 cells. The multiplier tops out
 near 2.4x, far below the spread of real text scores, so it orders ties without
 ever putting a big irrelevant node above a small exact match.
+
+## The vector index
+
+Words are not always what a question shares with the answer. `recoverability`
+matches nothing in the reference workbook lexically — not one node, at any
+stemming — while the same query against embeddings returns the column headed
+`Indicators of impairment` and the one headed `DEBTOR CLASSIFICATION`. Neither
+shares a token with the question.
+
+It runs the other way too. `GS560` is decisive lexically and vague to an
+embedder, because an identifier has no meaning to embed: the nearest thing in
+vector space to a label is another label.
+
+So neither index is a default and neither is a fallback. Both run, and their
+rankings are fused by reciprocal rank — by rank rather than by score, because a
+BM25 score of 46 and a cosine of 0.71 are not on one scale, and any constant
+that claims to put them there quietly makes the weighting depend on how many
+workbooks are indexed.
+
+```sh
+cargo run --release -p eg-index --example semantic -- index bad debt written off
+cargo run --release -p eg-index --example semantic -- index how old are the outstanding amounts
+```
+
+The example prints all three lists for one query, which is the only honest way
+to show what fusing bought.
+
+The model is `bge-small-en-v1.5`, run locally through ONNX. It is downloaded
+once per machine into `~/.cache/excelgrag/models`, about 130 MB — set
+`EG_MODEL_CACHE` to put it elsewhere. After that nothing about a workbook leaves
+the machine, which for the workbooks this is built for is not a preference.
+
+### Why there is no vector database
+
+The nodes worth embedding — sheets, tables, columns, defined names — are **732
+on the reference workbook**, which at 384 dimensions is **1.2 MiB**. Fifty such
+workbooks are 36,600 vectors and 56 MB. A full scan of the real corpus takes
+**0.11ms**, and it is exact. An approximate index would add a build step, a
+tuning parameter, a recall cliff and a second on-disk format in exchange for
+beating a number too small to see, so there is no HNSW here: an array of floats
+per workbook and a loop over it.
+
+Formula groups are not embedded. There are 463,570 of them — 713 MB of vectors
+and hours of model time to make near-identical formula text searchable by
+meaning, when a formula is exact-token text and the lexical index already
+covers it.
+
+Embedding the 732 nodes takes **5.3s**, and the batching is why: batches are
+padded to the longest text in them, so one wide table, whose document carries
+every column header it has, was paying for the 255 short labels batched beside
+it. Sorting by length before batching took it from 9.7s to 5.3s.
 
 ## Testing
 

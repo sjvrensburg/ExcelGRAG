@@ -53,6 +53,27 @@ pub struct NodeDoc {
     pub cells: u64,
 }
 
+impl NodeDoc {
+    /// The node as one line of prose, for an embedding model.
+    ///
+    /// The kind is spelled out and the fields are joined rather than weighed,
+    /// because a sentence embedder has no notion of fields — it reads the whole
+    /// string. "column Revenue in Q3 Sales" is a thing a person might have
+    /// written; the three fields side by side are not.
+    pub fn embedding_text(&self) -> String {
+        let mut out = format!("{} {}", self.kind.as_str(), self.label);
+        if !self.context.is_empty() {
+            out.push_str(" in ");
+            out.push_str(&self.context);
+        }
+        if !self.body.is_empty() {
+            out.push_str(": ");
+            out.push_str(&self.body);
+        }
+        out
+    }
+}
+
 /// Flatten every node of a graph.
 ///
 /// The order is the graph's own node order, so `node` is also the position.
@@ -289,6 +310,23 @@ mod tests {
         // Workbook-scoped: it belongs to no sheet, and saying it does would be
         // a filter that quietly excludes it.
         assert_eq!(name.sheet, None);
+    }
+
+    #[test]
+    fn a_node_reads_as_a_phrase_for_an_embedder() {
+        let built = build(&sample());
+        let docs = docs_for(&built.graph);
+        let revenue = of_kind(&docs, NodeKind::Column)
+            .into_iter()
+            .find(|d| d.label == "Revenue")
+            .unwrap();
+        assert_eq!(revenue.embedding_text(), "column Revenue in Q3 Sales");
+
+        let name = of_kind(&docs, NodeKind::DefinedName)[0];
+        assert_eq!(
+            name.embedding_text(),
+            "defined name TaxRate: 'Q3 Sales'!$B$1"
+        );
     }
 
     #[test]

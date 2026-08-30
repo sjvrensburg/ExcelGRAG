@@ -38,6 +38,10 @@ rustc-hash = "2"
 petgraph = { version = "0.8", features = ["serde-1"] }
 smallvec = { version = "1", features = ["serde"] }
 tantivy = "0.26"
+fastembed = { version = "6", default-features = false, features = [
+    "ort-download-binaries-rustls-tls",
+    "hf-hub-rustls-tls",
+] }
 
 [profile.release]
 opt-level = 3

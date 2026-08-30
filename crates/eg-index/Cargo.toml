@@ -8,10 +8,12 @@ rust-version.workspace = true
 
 [dependencies]
 eg-model.workspace = true
+fastembed.workspace = true
 petgraph.workspace = true
 eg-graph.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tantivy.workspace = true
 thiserror.workspace = true
 
