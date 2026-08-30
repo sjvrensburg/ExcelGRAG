@@ -190,6 +190,12 @@ pub struct RetrievedNode {
     pub score: Option<f32>,
 }
 
+impl RetrievedNode {
+    pub fn is_seed(&self) -> bool {
+        self.role == Role::Seed
+    }
+}
+
 /// What one workbook contributed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkbookContext {

@@ -11,9 +11,9 @@ all, and the only Python library that can, `pyxlsb`, does not surface formulas.
 
 Early, but a question now goes all the way from words to the part of a workbook
 that answers it. `eg-model`, `eg-ingest`, `eg-structure`, `eg-graph` and
-`eg-index` are implemented and tested, and `eg-retrieve` expands a hit into its
-context; rendering that as a passage, and the evaluation and MCP layers, are not
-yet built.
+`eg-index` and `eg-retrieve` are implemented and tested: a question in words
+comes back as a cited passage. The evaluation, MCP and CLI layers are not yet
+built.
 
 ## Workspace
 
@@ -24,7 +24,7 @@ yet built.
 | `eg-structure` | Region detection, header inference, formula grouping | implemented |
 | `eg-graph` | Graph build, reference lifting, invariants, store | implemented |
 | `eg-index` | Lexical (tantivy) and vector (fastembed) indexes | implemented |
-| `eg-retrieve` | Hybrid search, graph expansion, context rendering | expansion done |
+| `eg-retrieve` | Hybrid search, graph expansion, context rendering | implemented |
 | `eg-eval` | Formula evaluation and what-if | stub |
 | `eg-mcp` | MCP server | stub |
 | `eg-cli` | Command-line front-end | stub |
@@ -275,6 +275,39 @@ children are the whole file.
 Dependencies are followed in both directions, best-first by edge weight. Weight
 is the number of cell references behind the edge, so the heaviest first is what
 most of the workbook actually rests on.
+
+### Rendering it for an agent
+
+The expansion is a subgraph; an agent needs a passage. The constraint that
+shapes the rendering is not prose quality but *checkability* — a passage that
+reads well and cannot be verified invites an answer nobody can trace.
+
+```sh
+cargo run --release -p eg-retrieve --example retrieve -- index --passage bad debt provision
+```
+
+Each node is listed once with a number, and relations are given as numbers:
+
+```
+[1]  * region "Provision for debtors with:"   INDICATORS!A45:D47
+       in: INDICATORS
+       read by: [7] (115,003 refs, another sheet), [26] (390 refs, another sheet)
+[7]    region    'BP136-6-WORK DOC'!A1:BM115004
+       in: BP136-6-WORK DOC
+       reads: [9] (460,004 refs, another sheet), [11] (345,005 refs), [1] (115,003 refs, …)
+```
+
+Nesting each node under whatever reached it would repeat the same table once per
+path that found it, and an agent reading that cannot tell two mentions are one
+table. Numbering also gives it a handle: *"the figure comes from [4]"* is
+checkable against the list in a way that *"the figure comes from the rates
+table"* is not. On the real workbook, 30 nodes render to **3.6 KB in 0.04ms**,
+with the citations handed back as a list so a caller can check an answer's
+references against what it was actually given.
+
+No cell values appear. The workbook is 6 GB in memory and the ranges are one
+read away, so a passage that inlined values would be both enormous and stale.
+This says where to look; P6 is what looks.
 
 ### Where the granularity bites
 
