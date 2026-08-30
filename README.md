@@ -397,16 +397,23 @@ Sweeping the reference workbook is one pass, and it costs about as much as
 loading it:
 
 ```
-6,793,166 formulas in 25.6s (266,000 per second)
-  agreed         6,677,397 (98.3%)
-  differed               0 ( 0.0%)
-  unsupported      115,769 ( 1.7%)
+6,793,166 formulas in 25.1s (271,000 per second)
+  agreed         6,792,963 (100.0%)
+  differed             0 ( 0.0%)
+  unsupported        203 ( 0.0%)
 ```
 
 Zero disagreements. Every formula this crate can evaluate computes exactly what
-Excel stored, to the last digit, six and a half million times. The unsupported
-column is three honest gaps: 115,566 `PV()`, 191 `GETPIVOTDATA()`, and 12
-references into workbooks that are not open.
+Excel stored, to the last digit, six and three-quarter million times. What is
+left unsupported is two honest gaps: 191 `GETPIVOTDATA()`, which asks a pivot
+table rather than the grid, and 12 references into workbooks that are not open.
+
+The 115,566 that were unsupported until recently were all one function. `PV()`
+discounts an overdue amount by the days it has been outstanding, which is the
+arithmetic this workbook exists to do: the impairment on a debtor is the
+difference between what is owed and what that is worth now. Modelling one
+function moved the sweep from 98.3% of formulas evaluated to 100.0%, and every
+one of those 115,566 agrees with the value Excel stored beside it.
 
 It did not start out that way. The first sweep agreed with 71.9%, and the
 distance from there to here is four defects in the XLSB *reader* and one in
@@ -421,7 +428,8 @@ exactly like a right one.
 | relativity flags no longer read as part of a column | 83.8% |
 | the two flags read the right way round | 97.6% |
 | formula cells whose cached value is an error no longer skipped | 98.3% |
-| references into other workbooks no longer resolved against this one | **98.3%, and nothing left disagreeing** |
+| references into other workbooks no longer resolved against this one | 98.3%, and nothing left disagreeing |
+| `PV()` modelled rather than refused | **100.0%**, with 203 formulas left unevaluable |
 
 Two of those are worth the detail. An XLSB reference stores its column in 14
 bits and its relativity in the other two, and three of the four decoding paths

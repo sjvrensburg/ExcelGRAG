@@ -265,6 +265,48 @@ fn index_over_a_whole_column_is_refused() {
     ));
 }
 
+// ---- financial ----------------------------------------------------------
+
+/// Excel's own numbers, to the digit it shows them to.
+fn close(formula: &str, expected: f64) {
+    let got = number(formula);
+    assert!(
+        (got - expected).abs() < 1e-9,
+        "{formula} gave {got}, wanted {expected}"
+    );
+}
+
+#[test]
+fn present_value_discounts_the_way_excel_does() {
+    // A single amount due later, discounted back: the shape the reference
+    // workbook writes 115,566 times.
+    close("PV(0.05,10,0,-1000,0)", 613.913_253_540_759_1);
+    // An annuity, with fv and type left off entirely.
+    close("PV(0.05,10,-100)", 772.173_492_918_481_7);
+    // Paid at the start of each period instead of the end.
+    close("PV(0.05,10,-100,0,1)", 810.782_167_564_405_8);
+    // An empty slot is the default, not a reading of some cell.
+    close("PV(0.05,10,-100,,)", 772.173_492_918_481_7);
+    // A rate of zero has no discounting to do, and must not divide by it.
+    close("PV(0,10,-100,-50)", 1050.0);
+}
+
+#[test]
+fn present_value_takes_its_arguments_from_the_grid() {
+    // A1 is 1 and B1 is 2, so this is PV(1, 2, 0, -3): 3/4.
+    close("PV(A1,B1,0,-C1)", 0.75);
+    assert_eq!(error("PV(1/0,10,-100)"), ErrorKind::Div0);
+}
+
+#[test]
+fn present_value_refuses_what_excel_refuses() {
+    // Type is 0 or 1; Excel errors on anything else rather than rounding it.
+    assert_eq!(error("PV(0.05,10,-100,0,2)"), ErrorKind::Num);
+    // Everything is discounted to nothing, and dividing by it is #NUM!.
+    assert_eq!(error("PV(-1,10,-100)"), ErrorKind::Num);
+    assert_eq!(error("PV(0.05,10)"), ErrorKind::Value);
+}
+
 // ---- what is deliberately not modelled ----------------------------------
 
 #[test]
