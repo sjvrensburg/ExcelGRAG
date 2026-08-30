@@ -247,7 +247,9 @@ impl WorkbookContext {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Retrieved {
     pub workbooks: Vec<WorkbookContext>,
-    /// Seeds whose workbook is no longer in the corpus. Never silently dropped:
+    /// Content hashes of workbooks the search matched and the corpus no longer
+    /// holds — one per workbook, not one per hit, so several hits into the same
+    /// evicted file appear here once. Never silently dropped:
     /// an index that outlived its graphs is a real condition, and the fix is to
     /// reindex rather than to return fewer results without saying so.
     pub missing_workbooks: Vec<String>,

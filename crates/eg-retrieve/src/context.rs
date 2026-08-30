@@ -35,11 +35,25 @@ use crate::expand::{Retrieved, RetrievedNode, Role, WorkbookContext};
 /// How much text to produce.
 #[derive(Debug, Clone)]
 pub struct RenderOptions {
-    /// A ceiling on the passage, in characters.
+    /// A ceiling on the node entries, in characters.
     ///
     /// Characters and not tokens: this crate has no tokenizer and should not
     /// pretend to, and every tokenizer disagrees anyway. A caller fitting a
     /// context window should divide by three and leave room.
+    ///
+    /// Three things are written whatever this says, and nothing else is:
+    ///
+    /// - The first node of the passage. A preamble with nothing under it would
+    ///   be worse than one that overran.
+    /// - The notice that workbooks are missing from the corpus, shortened to a
+    ///   bare count if it has to be. A caller not told that data is absent will
+    ///   present what is left as everything there was.
+    /// - The closing line saying how much was cut, for the same reason.
+    ///
+    /// Together those are a few hundred characters at worst, and a caller
+    /// sizing a window should leave room for them rather than treat this as a
+    /// hard bound. `max_chars: 10` against a corpus full of stale hashes still
+    /// returns a few hundred characters, all of it saying so.
     pub max_chars: usize,
     /// Show how many cell references stand behind each relation. On by default:
     /// the difference between an edge of weight 1 and one of weight 115,003 is
@@ -192,41 +206,32 @@ fn render_workbook(
             workbook, &order, i, upto, &reads, &read_by, opts, pad, &indent,
         )
     };
-    // Measured against the longest heading this workbook could end up writing.
+    // The heading is one of two sentences and they are not the same length: a
+    // cut workbook writes "4 of 30 node(s), the rest cut to fit" where a whole
+    // one writes "30 node(s)", some twenty-six characters shorter.
     //
-    // Not against the uncut one: a smaller `shown` selects a *different and
-    // longer* sentence — "4 of 30 node(s), the rest cut to fit" against "30
-    // node(s)" — so measuring the uncut form and then writing the cut one
-    // overran the ceiling by the difference, about thirty characters. The
-    // previous comment here asserted the opposite and was wrong.
-    let widest_heading = [
-        self::heading(workbook, order.len(), order.len())
-            .chars()
-            .count(),
-        self::heading(workbook, order.len().saturating_sub(1), order.len())
-            .chars()
-            .count(),
-    ]
-    .into_iter()
-    .max()
-    .unwrap_or(0);
-    let mut fits = 0usize;
+    // So it is measured twice. Optimistically first, against the short form,
+    // because most workbooks fit whole and charging them for a sentence they
+    // will not write cuts passages that had room — a complete 616-character
+    // passage needed a 642 ceiling before this, and announced itself as cut.
+    // Only when that pass comes up short is the longer form charged, and then
+    // against the longest it could be, so the sentence finally written always
+    // fits the space measured for it.
+    let uncut = self::heading(workbook, order.len(), order.len())
+        .chars()
+        .count();
+    let longest_cut = self::heading(workbook, order.len().saturating_sub(1), order.len())
+        .chars()
+        .count();
+
+    let mut fits = count_fits(&order, uncut, *chars, *wrote_an_entry, opts, &entry);
+    if fits < order.len() {
+        fits = count_fits(&order, longest_cut, *chars, *wrote_an_entry, opts, &entry);
+    }
     // Entries are measured with every relation present, which is the largest
     // they can be; filtering them afterwards only shrinks the passage.
     // Plus the blank line that closes the workbook, which is written whether or
     // not anything was cut and so belongs in the measurement.
-    let mut used = *chars + widest_heading + 1;
-    for i in 0..order.len() {
-        let size = entry(i, order.len()).chars().count();
-        // The very first entry of the whole passage always goes in. A preamble
-        // with no nodes under it is not a smaller answer, it is no answer.
-        let unconditional = !*wrote_an_entry && i == 0;
-        if !unconditional && used + size > opts.max_chars {
-            break;
-        }
-        used += size;
-        fits += 1;
-    }
     if fits == 0 {
         // Everything this workbook offered is omitted, and the workbook itself
         // never appears. Both have to be counted: a reader can see that a
@@ -254,6 +259,35 @@ fn render_workbook(
     out.omitted += order.len() - fits;
     out.text.push('\n');
     *chars += 1;
+}
+
+/// How many entries fit under `opts.max_chars`, charged for a heading of
+/// `heading_chars` and for the blank line that closes the workbook.
+///
+/// Entries are measured with every relation present, which is the largest they
+/// can be; filtering them to what survives the cut only shrinks the passage.
+fn count_fits(
+    order: &[&RetrievedNode],
+    heading_chars: usize,
+    already: usize,
+    wrote_an_entry: bool,
+    opts: &RenderOptions,
+    entry: &dyn Fn(usize, usize) -> String,
+) -> usize {
+    let mut used = already + heading_chars + 1;
+    let mut fits = 0usize;
+    for i in 0..order.len() {
+        let size = entry(i, order.len()).chars().count();
+        // The very first entry of the whole passage always goes in. A preamble
+        // with no nodes under it is not a smaller answer, it is no answer.
+        let unconditional = !wrote_an_entry && i == 0;
+        if !unconditional && used + size > opts.max_chars {
+            break;
+        }
+        used += size;
+        fits += 1;
+    }
+    fits
 }
 
 fn heading(workbook: &WorkbookContext, shown: usize, total: usize) -> String {
