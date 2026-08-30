@@ -7,9 +7,13 @@ building ExcelGRAG.
 `xlsb-shared-formulas`, wired in through `[patch.crates-io]` in the workspace
 `Cargo.toml`. Both are fixed for `.xlsb` and `.xls`, in two commits — one per
 format — submitted as [tafia/calamine#712](https://github.com/tafia/calamine/pull/712).
-Issue 1 was our own bug and is fixed here. **Issue 4 is unfixed**, found later,
-while building the graph; see the note at the end for why it is not simply
-appended to the open PR.
+Issue 1 was our own bug and is fixed here. Issue 4 was found later, while
+building the graph, and is submitted separately as
+[#713](https://github.com/tafia/calamine/pull/713) — unrelated code, so it did
+not belong on a branch already under review.
+
+The workspace patches in an `excelgrag` branch carrying both fixes, since
+`[patch.crates-io]` takes a single source.
 
 They were found by the format-parity test — reading the same logical workbook as
 `.xlsx` and as `.xlsb` and requiring identical values and formulas — or by
@@ -268,10 +272,14 @@ regression, and is left alone here.
 
 ---
 
-## 4. A sheet name that needs quoting is written bare — **unfixed**
+## 4. A sheet name that needs quoting is written bare
 
-**Affects:** `.xlsb`, and `.xls` by the same code shape. Not `.xlsx`, whose
-formulas are stored as text Excel already wrote correctly.
+**Affects:** `.xlsb` and `.xls`. Not `.xlsx`, whose formulas are stored as text
+Excel already wrote correctly.
+
+**Fixed** in the fork and submitted as
+[tafia/calamine#713](https://github.com/tafia/calamine/pull/713), independently
+of #712 and branched from `master`, so the two can be taken in either order.
 
 Excel requires a sheet name containing a space, a hyphen, or other punctuation
 to be quoted inside a formula: `'BP136-6-WORK DOC'!A1`. calamine concatenates
@@ -319,14 +327,39 @@ There are two outcomes, and only the first is visible:
 
 The checker reports whether any fragment collides. On this workbook, none does.
 
-### Not appended to the open PR
+### The fix
 
-PR #712 is already submitted and awaiting a maintainer. This is an unrelated
-defect in different code, so it belongs in its own change rather than growing a
-branch under review. It also predates our work: unlike issues 2 and 3, nothing
-in the shared-formula fix touched these lines.
+`push_sheet_name` in `utils.rs`, beside the existing `push_column`, quotes when
+the name is not a plain identifier and doubles any interior apostrophe. It also
+quotes a name shaped like a cell reference — `Q1!A1` would otherwise read as
+cell `Q1` of the current sheet — and `R` or `C` alone, which collide with R1C1
+notation. The `#REF` marker the readers substitute for a missing sheet is an
+error marker rather than a name, so it stays unquoted.
 
-Until it is fixed, the graph counts the affected references as broken rather
-than mis-attributing them, which is the safe failure — but formula *text* from
-a binary workbook is not round-trippable, which matters for P4 (indexing it),
-P5 (showing it) and P6 (re-parsing it to evaluate).
+`.xls` is covered end to end by `tests/OOM_alloc.xls`, which has a sheet called
+`EIM New Deals` and formulas referring to it. **No `.xlsb` fixture exercises it
+and none can be authored**, since no open-source tool writes XLSB; that path
+rests on the helper's unit tests and on the call sites being identical in shape.
+
+### What it changed, measured
+
+Rebuilding the graph on the reference workbook:
+
+| | Before | After |
+|---|---|---|
+| Bare uses of a name needing quotes | 1,665 | **0** |
+| References to a sheet that does not exist | 1,663 | **0** |
+| `CROSS_SHEET_REF` edges | 53 | **95** |
+| References scanned | 23,626,201 | 23,624,729 |
+
+The last row is the part worth keeping. The count fell by **1,472 — exactly the
+number of bare uses of `BP136-6-WORK DOC`** — because `BP136` is itself a valid
+cell reference. The scanner was reading that prefix as a reference to cell
+`BP136` *on the source sheet*, and the remainder as `DOC!AK$12`. So the defect
+was not only losing 1,663 real references; it was **fabricating 1,472 that no
+formula ever wrote**, and they landed in the "empty target" bucket, whose count
+fell by the same 1,472.
+
+That is the silent-misattribution case actually occurring, reached through a
+prefix that parses as a cell rather than through a sheet-name collision. Nothing
+about the output looked wrong.

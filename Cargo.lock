@@ -67,7 +67,7 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 [[package]]
 name = "calamine"
 version = "0.36.1"
-source = "git+https://github.com/sjvrensburg/calamine.git?branch=xlsb-shared-formulas#e66bac95e967ed55b0aaf46d54a8f656fe55bca1"
+source = "git+https://github.com/sjvrensburg/calamine.git?branch=excelgrag#930555264466380b35ac1150dbbca2ac467652a0"
 dependencies = [
  "atoi_simd",
  "byteorder",
