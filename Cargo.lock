@@ -675,6 +675,17 @@ dependencies = [
 [[package]]
 name = "eg-mcp"
 version = "0.1.0"
+dependencies = [
+ "eg-eval",
+ "eg-graph",
+ "eg-index",
+ "eg-ingest",
+ "eg-model",
+ "eg-retrieve",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "eg-model"

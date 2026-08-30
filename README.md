@@ -17,8 +17,8 @@ Early, but a question now goes all the way from words to the part of a workbook
 that answers it. `eg-model`, `eg-ingest`, `eg-structure`, `eg-graph` and
 `eg-index` and `eg-retrieve` are implemented and tested: a question in words
 comes back as a cited passage, and `eg-eval` follows a citation down to the
-cells behind it and recomputes it from the cells under it. The MCP and CLI
-layers are not yet built.
+cells behind it and recomputes it from the cells under it. `eg-mcp` serves all
+of that to an agent over MCP. The CLI is not yet built.
 
 ## Workspace
 
@@ -31,7 +31,7 @@ layers are not yet built.
 | `eg-index` | Lexical (tantivy) and vector (fastembed) indexes | implemented |
 | `eg-retrieve` | Hybrid search, graph expansion, context rendering | implemented |
 | `eg-eval` | Cell-level provenance, formula evaluation, what-if | provenance and recompute done |
-| `eg-mcp` | MCP server | stub |
+| `eg-mcp` | MCP server | implemented |
 | `eg-cli` | Command-line front-end | stub |
 
 ## The calamine fork
@@ -450,6 +450,57 @@ local cell happening to hold what the foreign cell held.
 
 `docs/upstream-issues.md` has all seven, and the four found this way are in the
 calamine fork.
+
+## Serving it to an agent
+
+`eg-mcp` is an MCP server over the whole stack: a corpus in, seven tools out.
+
+```sh
+cargo run --release -p eg-graph --example corpus -- index private/book.xlsb
+cargo run --release -p eg-index --example semantic -- index warm up the indexes
+claude mcp add excelgrag -- "$PWD/target/release/eg-mcp" "$PWD/index"
+```
+
+| Tool | Answers |
+|---|---|
+| `workbooks` | what is in this corpus |
+| `search` | which parts of a workbook match a question, by word and by meaning |
+| `context` | that question, as a cited passage explaining what was found |
+| `read_cells` | the formulas and values of a range |
+| `precedents` | what a formula reads |
+| `dependents` | what reads a cell — the expensive direction, and it says so |
+| `recompute` | whether a formula still agrees with the value stored beside it |
+
+The surface is the pipeline: search, then read the context, then go down to
+cells when the answer needs a number. A passage carries no values — it says
+where to look — so an agent that wants one has to ask for it by citation, which
+is also what makes the answer checkable.
+
+Three resources with three costs sit behind that, which is why this is a server
+and not a command. The corpus and the lexical index are memory-mapped and
+cheap. The embedder is loaded on the first question that needs meaning rather
+than words. A workbook is the expensive one — ten seconds and six gigabytes for
+the reference file — so it is opened only when a tool needs cells, and then held:
+the second question about a workbook is far likelier than the first.
+
+```
+read_cells  INDICATORS!A45:D47   (opened private/book.xlsb in 9.7s)
+recompute   'TR450-6-WORK DOC'!AJ5   =V5*$AH5
+              agrees with the stored value 295.86915555555555
+                V5      589.12
+                $AH5    0.5022222222222222
+```
+
+Start it with `--redact-values` and every value becomes its kind — `<number>`,
+`<text>` — while formulas and structure still answer. The policy is set once, at
+startup, so a caller cannot talk its way past it.
+
+MCP's stdio transport is one JSON object per line, so the protocol is a
+`read_line` and a `serde_json::from_str`; it is written out rather than taken
+from an SDK because the rest of this workspace is synchronous, and an SDK would
+bring an async runtime along for something this size. A tool that fails comes
+back as a *result* with `isError`, not as a protocol error: the model can act on
+"no sheet called that, here are the ones there are" and cannot act on -32603.
 
 ## Testing
 
