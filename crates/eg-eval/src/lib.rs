@@ -5,9 +5,15 @@
 //! traverse and the wrong one to explain a number with. P6 is the other half:
 //! reading the workbook itself to say which cell fed which.
 //!
-//! [`trace`] is that, and it is where evaluation will stand — recomputing a
-//! formula needs the cells under it, and an evaluator that cannot say where a
-//! number came from is a second opinion rather than an explanation.
+//! [`trace`] is that. [`calc`] is the other half of P6: recomputing a formula
+//! from the values under it and comparing that with the number the workbook
+//! stored. The order matters — an evaluator that cannot say where a number came
+//! from is a second opinion rather than an explanation, so tracing came first
+//! and recomputing hands back the cells it read.
+//!
+//! Precedents are read as stored values and never recursively recomputed, so a
+//! disagreement is about one formula. What [`calc`] does not model it refuses
+//! by name rather than guessing.
 //!
 //! ```no_run
 //! # use eg_eval::{precedents_of, Target};
@@ -23,8 +29,12 @@
 //! # Ok::<(), eg_ingest::IngestError>(())
 //! ```
 
+pub mod calc;
+pub mod parse;
 pub mod trace;
 
+pub use calc::{check, evaluate, recompute, CheckReport, Input, Outcome, Recomputed, Unsupported};
+pub use parse::{parse, BinOp, Expr, ParseError, UnaryOp};
 pub use trace::{
     cell, cells_in, dependents_of, precedents_of, CellFact, Reference, ScanReport, Target,
 };

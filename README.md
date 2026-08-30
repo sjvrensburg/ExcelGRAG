@@ -7,14 +7,18 @@ Written in Rust, and the reason is XLSB. A 170 MB binary workbook with 43.5
 million populated cells loads in about 8 seconds. `openpyxl` cannot open XLSB at
 all, and the only Python library that can, `pyxlsb`, does not surface formulas.
 
+Every measurement below is against that workbook. It is confidential, so its
+sheet names appear here as pseudonyms — consistently, so a name that recurs is
+the same sheet.
+
 ## Status
 
 Early, but a question now goes all the way from words to the part of a workbook
 that answers it. `eg-model`, `eg-ingest`, `eg-structure`, `eg-graph` and
 `eg-index` and `eg-retrieve` are implemented and tested: a question in words
 comes back as a cited passage, and `eg-eval` follows a citation down to the
-cells behind it. Formula evaluation, and the MCP and CLI layers, are not yet
-built.
+cells behind it and recomputes it from the cells under it. The MCP and CLI
+layers are not yet built.
 
 ## Workspace
 
@@ -26,7 +30,7 @@ built.
 | `eg-graph` | Graph build, reference lifting, invariants, store | implemented |
 | `eg-index` | Lexical (tantivy) and vector (fastembed) indexes | implemented |
 | `eg-retrieve` | Hybrid search, graph expansion, context rendering | implemented |
-| `eg-eval` | Cell-level provenance, formula evaluation, what-if | provenance done |
+| `eg-eval` | Cell-level provenance, formula evaluation, what-if | provenance and recompute done |
 | `eg-mcp` | MCP server | stub |
 | `eg-cli` | Command-line front-end | stub |
 
@@ -46,7 +50,7 @@ A third fix, submitted separately as
 [#713](https://github.com/tafia/calamine/pull/713), quotes sheet names that need
 quoting: `'Q3 SALES'!A1` was arriving as `Q3 SALES!A1`, reading as a sheet named
 `SALES`. On the reference workbook that lost 1,663 real references and
-fabricated 1,472 more, because the discarded prefix `BP136` is itself a valid
+fabricated 1,472 more, because the discarded prefix `TR450` is itself a valid
 cell reference.
 
 Submitted upstream as [tafia/calamine#712](https://github.com/tafia/calamine/pull/712).
@@ -189,7 +193,7 @@ stemming — while the same query against embeddings returns the column headed
 `Indicators of impairment` and the one headed `DEBTOR CLASSIFICATION`. Neither
 shares a token with the question.
 
-It runs the other way too. `GS560` is decisive lexically and vague to an
+It runs the other way too. `HQ880` is decisive lexically and vague to an
 embedder, because an identifier has no meaning to embed: the nearest thing in
 vector space to a label is another label.
 
@@ -238,7 +242,7 @@ is really a measure of tantivy.
 
 ## Retrieval
 
-A hit is a door, not an answer. "The Revenue column of BP136" is the right node
+A hit is a door, not an answer. "The Revenue column of TR450" is the right node
 and still says nothing about which table it is in, what feeds it, or what breaks
 if it is wrong. `eg-retrieve` walks out from the hits to the nodes that explain
 them, and records for every node it brings back which node pulled it in and
@@ -253,7 +257,7 @@ cargo run --release -p eg-retrieve --example retrieve -- index --hops 3 --childr
 On the real workbook an expansion is **0.4ms** over the stored graph, and the
 chain it prints is the point: a note headed *Provision for debtors with…* is
 read by the 115,004-row working table, which in turn reads a dozen rate tables
-on the LOOKUP sheet, each edge labelled with how many cell references stand
+on the TABLES sheet, each edge labelled with how many cell references stand
 behind it.
 
 ### The measurement that shaped the walk
@@ -293,11 +297,11 @@ cargo run --release -p eg-retrieve --example retrieve -- index --passage bad deb
 Each node is listed once with a number, and relations are given as numbers:
 
 ```
-[1]  * region "Provision for debtors with:"   INDICATORS!A45:D47
-       in: INDICATORS
+[1]  * region "Provision for debtors with:"   SIGNALS!A45:D47
+       in: SIGNALS
        read by: [7] (115,003 refs, another sheet), [26] (390 refs, another sheet)
-[7]    region    'BP136-6-WORK DOC'!A1:BM115004
-       in: BP136-6-WORK DOC
+[7]    region    'TR450-6-WORK DOC'!A1:BM115004
+       in: TR450-6-WORK DOC
        reads: [9] (460,004 refs, another sheet), [11] (345,005 refs), [1] (115,003 refs, …)
 ```
 
@@ -336,8 +340,8 @@ is in its own text. What reads a cell is written down nowhere, so finding it
 means scanning every formula in the file.
 
 ```sh
-cargo run --release -p eg-eval --example trace -- private/book.xlsb "'BP136-6-WORK DOC'!AQ2:AQ4"
-cargo run --release -p eg-eval --example trace -- private/book.xlsb 'LOOKUP!AE53:AG89' --dependents
+cargo run --release -p eg-eval --example trace -- private/book.xlsb "'TR450-6-WORK DOC'!AQ2:AQ4"
+cargo run --release -p eg-eval --example trace -- private/book.xlsb 'TABLES!AE53:AG89' --dependents
 ```
 
 On the real workbook, after a 9.8s load: precedents come back in **0.08ms**;
@@ -345,12 +349,78 @@ dependents take **2.4s to scan 6,793,166 formulas** and find 115,566 references
 into that one lookup table.
 
 That closes the loop from the retrieval layer. Searching for "bad debt
-provision" surfaces `LOOKUP!AE53:AG89` as the RATES table; this says which cells
+provision" surfaces `TABLES!AE53:AG89` as the RATES table; this says which cells
 read it and what each of them reads in turn.
 
 The example prints addresses and formulas, and value *kinds* rather than values,
 unless `--show-values` says otherwise. A formula is structure; a value is the
 workbook's data.
+
+## Recomputing a number
+
+Provenance says which cells a formula stands on. The other half of P6 works out
+what they add up to, and compares that with the number the workbook stored —
+the one Excel last calculated.
+
+```sh
+cargo run --release -p eg-eval --example recompute -- private/book.xlsb 'JOURNAL_PROV!D7'
+cargo run --release -p eg-eval --example recompute -- private/book.xlsb --check
+```
+
+Precedents are read as *stored values* and never recursively recomputed. That
+is a limit and it is also the point: a disagreement is then about this one
+formula rather than about a chain of a thousand cells, and each precedent is
+itself a cell you can check the same way. It also means no dependency order to
+compute, no cycles to detect, and no stale value quietly poisoning everything
+downstream of it.
+
+A spreadsheet has hundreds of functions and this models about fifty. The rest
+are refused by name — an outcome, not a guess, because an evaluator that
+returned a plausible number for a function it does not implement would be worse
+than one that returns nothing. Volatile functions are refused too: `TODAY()`
+recomputed today is not what the workbook computed when it was saved, so
+"differs" would be the wrong verdict even when both numbers are right.
+
+Two places where a spreadsheet is not floating-point arithmetic, and both are
+load-bearing. Comparison is made on the number a sheet *shows* — 15 significant
+digits — so `10.13+6.75=16.88` is true, as it is in Excel and in no language
+with doubles; an ageing bucket picking its label depends on it. And `ROUND`
+rounds that same shown number, so `ROUND(2.675,2)` is 2.68 rather than 2.67.
+
+### What the workbook says about itself
+
+Sweeping the reference workbook is one pass, and it costs about as much as
+loading it:
+
+```
+6,793,166 formulas in 22.2s (306,000 per second)
+  agreed         4,886,337 (71.9%)
+  differed         935,435 (13.8%)
+  unsupported      971,394 (14.3%)
+```
+
+The unsupported column is the honest part, and it names what it could not do:
+`PV()` accounts for 115,566 of it and `GETPIVOTDATA()` for 191. The other
+855,637 are formulas that do not parse, and they are the interesting ones —
+they name columns that cannot exist:
+
+```
+=OVERVIEW!$BTRO$25
+=VLOOKUP(B2,HQ880_20240630!$XFF$1:$XFM$1048576,5,FALSE)
+```
+
+Excel's last column is `XFD`. `XFF` is two past it and `BTRO` is three times
+the width of a sheet, so no formula was ever written this way; the column
+offsets of these filled formulas are being translated wrongly somewhere below
+this layer. The disagreements point the same way: 725,917 of the 935,435 read a
+precedent the loader never populated, and the ones checked by hand read a
+header cell where the stored value implies a data cell two columns to the
+right. So the sweep's headline is not "72% of this workbook is arithmetic we
+agree with" but "there is a defect in shared-formula translation, and it is
+worth about a quarter of the file".
+
+Which is what a recompute is for. Every layer above this one has been reading
+those same formulas without any way to notice.
 
 ## Testing
 
