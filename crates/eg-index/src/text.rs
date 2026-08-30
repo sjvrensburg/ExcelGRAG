@@ -80,6 +80,11 @@ pub enum IndexError {
         #[source]
         source: io::Error,
     },
+    /// Anything the embedding model could not do. Its error type is not in
+    /// this crate's public interface, so it arrives as text: a caller can
+    /// report it, and there is nothing useful to match on.
+    #[error("{context}: {detail}")]
+    Embed { context: String, detail: String },
     #[error("{context}: {source}")]
     Tantivy {
         context: String,

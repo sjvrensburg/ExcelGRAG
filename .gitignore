@@ -9,3 +9,6 @@
 /private/
 *.private.xlsx
 *.private.xlsb
+
+# fastembed's default model cache, if anything ever falls back to it
+.fastembed_cache/
