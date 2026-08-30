@@ -19,7 +19,7 @@ are not yet built.
 |---|---|---|
 | `eg-model` | Addressing, cell values, workbook model | implemented |
 | `eg-ingest` | Loading xlsx/xlsm/xlsb/xls/ods via calamine | implemented |
-| `eg-structure` | Region detection, header inference, formula grouping | stub |
+| `eg-structure` | Region detection, header inference, formula grouping | formula grouping done |
 | `eg-graph` | Graph build and persistence | stub |
 | `eg-index` | Lexical (tantivy) and vector (fastembed) indexes | stub |
 | `eg-retrieve` | Hybrid search, graph expansion, context rendering | stub |
@@ -40,6 +40,20 @@ XLSB workbook go missing, and every comparison is inverted.
 Submitted upstream as [tafia/calamine#712](https://github.com/tafia/calamine/pull/712).
 Once it lands in a published release, delete the `[patch.crates-io]` section.
 See `docs/upstream-issues.md`, which also records what a pre-PR review caught.
+
+## Formula grouping
+
+A filled-down column is one idea written ten thousand times. `eg-structure`
+collapses it to a single node by normalising each formula to an R1C1 *shape*, so
+the graph is built over groups rather than cells.
+
+On a real 170 MB workbook: **6,793,166 formula cells become 464,131 groups**
+(14.6x), in 10s, with one group covering 575,005 cells. It also finds cells that
+break a pattern — the classic hand-edited row in an otherwise uniform column.
+
+```sh
+cargo run --release -p eg-structure --example group -- private/book.xlsb
+```
 
 ## Testing
 

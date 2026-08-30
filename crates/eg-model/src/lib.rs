@@ -5,6 +5,7 @@
 
 pub mod address;
 pub mod cell;
+pub mod formula;
 pub mod workbook;
 
 pub use address::{
@@ -12,6 +13,7 @@ pub use address::{
     R1C1Coord, R1C1Ref, RangeRef, SheetId, MAX_COL, MAX_ROW,
 };
 pub use cell::{Cell, CellFormat, CellValue, ErrorKind, ValueKind};
+pub use formula::{scan_references, to_r1c1_shape, ReferenceSpan};
 pub use workbook::{
     DefinedName, ExcelTable, Sheet, Visibility, Workbook, WorkbookFormat,
 };

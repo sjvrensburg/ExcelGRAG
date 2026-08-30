@@ -56,10 +56,9 @@ fn main() {
                 } else {
                     differed += 1;
                     if examples.len() < 8 {
-                        examples.push(format!(
-                            "{}",
-                            eg_model::CellRef::new(sheet.id, row + 1, col).to_a1()
-                        ));
+                        examples.push(
+                            eg_model::CellRef::new(sheet.id, row + 1, col).to_a1(),
+                        );
                     }
                 }
             }
