@@ -37,6 +37,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rustc-hash = "2"
 petgraph = { version = "0.8", features = ["serde-1"] }
 smallvec = { version = "1", features = ["serde"] }
+tantivy = "0.26"
 
 [profile.release]
 opt-level = 3
