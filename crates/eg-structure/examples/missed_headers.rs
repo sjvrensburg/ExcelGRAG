@@ -9,7 +9,10 @@ use eg_structure::{detect_regions, RegionKind};
 
 fn main() {
     let path = std::env::args().nth(1).unwrap();
-    let opts = LoadOptions { max_cells: None, ..Default::default() };
+    let opts = LoadOptions {
+        max_cells: None,
+        ..Default::default()
+    };
     let loaded = load_with(&path, &opts).unwrap();
     let (mut suspect, mut checked) = (0u64, 0u64);
     let mut examples = Vec::new();
@@ -34,7 +37,8 @@ fn main() {
             let body_any = body_nontext + count(r.range.top + 1, true);
             // At least two populated cells: a single one is a title, not a
             // header row, and treating it as a miss just produces noise.
-            if head_any >= 2 && body_any > 0
+            if head_any >= 2
+                && body_any > 0
                 && head_text as f64 / head_any as f64 > 0.6
                 && body_nontext as f64 / body_any as f64 > 0.6
             {
@@ -43,7 +47,11 @@ fn main() {
                     examples.push(format!(
                         "{}  ({} cols, first row {}/{} text, next row {}/{} non-text)",
                         loaded.workbook.cite_range(r.range),
-                        r.range.cols(), head_text, head_any, body_nontext, body_any
+                        r.range.cols(),
+                        head_text,
+                        head_any,
+                        body_nontext,
+                        body_any
                     ));
                 }
             }
@@ -51,5 +59,7 @@ fn main() {
     }
     println!("headerless multi-row regions checked: {checked}");
     println!("probably-missed headers:              {suspect}");
-    for e in examples { println!("   {e}") }
+    for e in examples {
+        println!("   {e}")
+    }
 }

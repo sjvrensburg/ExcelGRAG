@@ -71,9 +71,17 @@ pub struct Region {
 }
 
 impl Region {
-    /// Rows consumed by the title: one if there is a title, zero otherwise.
+    /// Rows of `range` consumed by the title.
+    ///
+    /// A detected title was read from the region's own first row, so it costs a
+    /// row. A declared table's title is the table's *name*, which lives in the
+    /// workbook rather than in a cell and costs nothing — counting it would push
+    /// [`Region::body`] past the table's first data row.
     pub fn title_rows(&self) -> u32 {
-        u32::from(self.title.is_some())
+        match self.source {
+            RegionSource::Declared => 0,
+            RegionSource::Detected => u32::from(self.title.is_some()),
+        }
     }
 
     /// The data rows, excluding any title and header.
@@ -164,18 +172,33 @@ pub fn detect_regions_with(sheet: &Sheet, opts: &RegionOptions) -> Vec<Region> {
         });
     }
 
-    let mut cells: Vec<(u32, u16)> = sheet
-        .iter()
-        .map(|(addr, _)| (addr.row, addr.col))
-        .filter(|&(row, col)| {
-            !regions
-                .iter()
-                .any(|r| r.range.contains(eg_model::CellRef::new(sheet.id, row, col)))
-        })
-        .collect();
+    // The declared-table filter is a linear scan per cell, so it is skipped
+    // entirely on the overwhelmingly common sheet that declares no tables.
+    let mut cells: Vec<(u32, u16)> = if regions.is_empty() {
+        sheet.iter().map(|(addr, _)| (addr.row, addr.col)).collect()
+    } else {
+        sheet
+            .iter()
+            .map(|(addr, _)| (addr.row, addr.col))
+            .filter(|&(row, col)| {
+                !regions
+                    .iter()
+                    .any(|r| r.range.contains(eg_model::CellRef::new(sheet.id, row, col)))
+            })
+            .collect()
+    };
 
+    let table_ranges: Vec<RangeRef> = sheet.tables.iter().map(|t| t.range).collect();
     let mut blocks = Vec::new();
-    partition(&mut cells, Axis::Row, 0, 0, opts, &mut blocks);
+    partition(
+        &mut cells,
+        &table_ranges,
+        Axis::Row,
+        0,
+        0,
+        opts,
+        &mut blocks,
+    );
 
     for (bounds, count) in blocks {
         let range = RangeRef::new(sheet.id, bounds.0, bounds.1, bounds.2, bounds.3);
@@ -211,6 +234,7 @@ type Block = ((u32, u16, u32, u16), u64);
 /// make it.
 fn partition(
     cells: &mut [(u32, u16)],
+    tables: &[RangeRef],
     axis: Axis,
     stalled: u8,
     depth: u8,
@@ -221,7 +245,7 @@ fn partition(
         return;
     }
     if stalled >= 2 || depth >= opts.max_depth {
-        out.push(bounds(cells));
+        push_clear_of_tables(cells, tables, Axis::Row, 0, out);
         return;
     }
 
@@ -230,16 +254,30 @@ fn partition(
     let cuts: Vec<usize> = match axis {
         Axis::Row => {
             cells.sort_unstable_by_key(|&(row, col)| (row, col));
-            gap_cuts(cells.iter().map(|&(row, _)| row as u64), opts.row_gap as u64)
+            gap_cuts(
+                cells.iter().map(|&(row, _)| row as u64),
+                opts.row_gap as u64,
+            )
         }
         Axis::Col => {
             cells.sort_unstable_by_key(|&(row, col)| (col, row));
-            gap_cuts(cells.iter().map(|&(_, col)| col as u64), opts.col_gap as u64)
+            gap_cuts(
+                cells.iter().map(|&(_, col)| col as u64),
+                opts.col_gap as u64,
+            )
         }
     };
 
     if cuts.is_empty() {
-        partition(cells, axis.other(), stalled + 1, depth + 1, opts, out);
+        partition(
+            cells,
+            tables,
+            axis.other(),
+            stalled + 1,
+            depth + 1,
+            opts,
+            out,
+        );
         return;
     }
 
@@ -247,11 +285,72 @@ fn partition(
     let mut consumed = 0;
     for cut in cuts {
         let (part, tail) = rest.split_at_mut(cut - consumed);
-        partition(part, axis.other(), 0, depth + 1, opts, out);
+        partition(part, tables, axis.other(), 0, depth + 1, opts, out);
         consumed = cut;
         rest = tail;
     }
-    partition(rest, axis.other(), 0, depth + 1, opts, out);
+    partition(rest, tables, axis.other(), 0, depth + 1, opts, out);
+}
+
+/// Push `cells` as blocks whose bounding boxes clear every declared table.
+///
+/// A detected block can *bound* a declared table without containing any of its
+/// cells: the table's cells were filtered out before partitioning, but the cells
+/// around it still span a rectangle that encloses it. Emitting that rectangle
+/// would put the same cell in two regions and break the documented "regions
+/// never overlap" invariant, so the block is cut at the table's own edges.
+///
+/// A cut always makes progress. If the row cut leaves the set whole then every
+/// cell lies inside the table's rows; if the column cut then leaves it whole
+/// too, every cell lies inside the table itself — impossible, since those cells
+/// were removed. `stalled` guards the invariant rather than relying on it.
+fn push_clear_of_tables(
+    cells: &mut [(u32, u16)],
+    tables: &[RangeRef],
+    axis: Axis,
+    stalled: u8,
+    out: &mut Vec<Block>,
+) {
+    if cells.is_empty() {
+        return;
+    }
+    let block = bounds(cells);
+    let (top, left, bottom, right) = block.0;
+    let clash = tables
+        .iter()
+        .find(|t| t.top <= bottom && t.bottom >= top && t.left <= right && t.right >= left);
+    let (Some(table), true) = (clash, stalled < 2) else {
+        out.push(block);
+        return;
+    };
+
+    // Cut into the lines before the table, the lines it spans, and the lines
+    // after it. Only the middle part can still overlap, but all three are
+    // re-checked: a part may clash with a *different* table.
+    let (first, second) = match axis {
+        Axis::Row => {
+            cells.sort_unstable_by_key(|&(row, col)| (row, col));
+            (
+                cells.partition_point(|&(row, _)| row < table.top),
+                cells.partition_point(|&(row, _)| row <= table.bottom),
+            )
+        }
+        Axis::Col => {
+            cells.sort_unstable_by_key(|&(row, col)| (col, row));
+            (
+                cells.partition_point(|&(_, col)| col < table.left),
+                cells.partition_point(|&(_, col)| col <= table.right),
+            )
+        }
+    };
+
+    let split = first > 0 || second < cells.len();
+    let next_stalled = if split { 0 } else { stalled + 1 };
+    let (head, tail) = cells.split_at_mut(second);
+    let (head, middle) = head.split_at_mut(first);
+    for part in [head, middle, tail] {
+        push_clear_of_tables(part, tables, axis.other(), next_stalled, out);
+    }
 }
 
 /// Indices where a sorted coordinate sequence jumps by more than `gap` blanks.
@@ -571,10 +670,7 @@ mod tests {
 
     #[test]
     fn a_blank_column_separates_side_by_side_tables() {
-        let sheet = grid(&[
-            "Region Q1 . Region Q2",
-            "North  10 . South  30",
-        ]);
+        let sheet = grid(&["Region Q1 . Region Q2", "North  10 . South  30"]);
         let regions = detect_regions(&sheet);
         assert_eq!(regions.len(), 2, "{regions:#?}");
         assert_eq!(regions[0].range.to_a1(), "A1:B2");
@@ -584,11 +680,7 @@ mod tests {
     #[test]
     fn blocks_stacked_and_side_by_side_all_separate() {
         // Alternating row/column splitting has to recurse to get all four.
-        let sheet = grid(&[
-            "a 1 . b 2",
-            ". . . . .",
-            "c 3 . d 4",
-        ]);
+        let sheet = grid(&["a 1 . b 2", ". . . . .", "c 3 . d 4"]);
         let regions = detect_regions(&sheet);
         assert_eq!(regions.len(), 4, "{regions:#?}");
         let mut spans: Vec<String> = regions.iter().map(|r| r.range.to_a1()).collect();
@@ -638,6 +730,33 @@ mod tests {
     }
 
     #[test]
+    fn detected_blocks_never_span_a_declared_table() {
+        // The table's own cells are filtered out before partitioning, but the
+        // cells around it still bound a rectangle that encloses it. Without the
+        // cut at the table's edges, `A1:C2` and the table at `B2` would both
+        // claim B2, and any answer citing it would have two header contexts.
+        let mut sheet = grid(&["x y z", "p . q"]);
+        sheet.tables.push(ExcelTable {
+            name: "Inner".into(),
+            range: RangeRef::parse_local("B2:B2", SheetId(0)).unwrap(),
+            columns: vec!["Inner".into()],
+            has_header_row: false,
+            has_totals_row: false,
+        });
+        let regions = detect_regions(&sheet);
+        for (i, a) in regions.iter().enumerate() {
+            for b in &regions[i + 1..] {
+                assert!(
+                    !a.range.intersects(&b.range),
+                    "{} overlaps {}",
+                    a.range.to_a1(),
+                    b.range.to_a1()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn declared_tables_are_used_verbatim() {
         let mut sheet = grid(&["Region Q1", "North 10", "South 20"]);
         sheet.tables.push(ExcelTable {
@@ -651,15 +770,14 @@ mod tests {
         assert_eq!(regions.len(), 1, "declared table must not be re-detected");
         assert_eq!(regions[0].source, RegionSource::Declared);
         assert_eq!(regions[0].headers, ["Region", "Q1"]);
+        // The table's name is not a row, so the body starts directly under the
+        // header row rather than one row further down.
+        assert_eq!(regions[0].body().unwrap().to_a1(), "A2:B3");
     }
 
     #[test]
     fn a_lone_text_cell_above_a_block_becomes_its_title() {
-        let sheet = grid(&[
-            "Impairment_summary . .",
-            "1 2 3",
-            "4 5 6",
-        ]);
+        let sheet = grid(&["Impairment_summary . .", "1 2 3", "4 5 6"]);
         let regions = detect_regions(&sheet);
         assert_eq!(regions.len(), 1, "{regions:#?}");
         assert_eq!(regions[0].title.as_deref(), Some("Impairment_summary"));
@@ -728,11 +846,7 @@ mod tests {
 
     #[test]
     fn regions_never_overlap() {
-        let sheet = grid(&[
-            "a 1 . b 2",
-            ". . . . .",
-            "c 3 . d 4",
-        ]);
+        let sheet = grid(&["a 1 . b 2", ". . . . .", "c 3 . d 4"]);
         let regions = detect_regions(&sheet);
         for (i, a) in regions.iter().enumerate() {
             for b in &regions[i + 1..] {

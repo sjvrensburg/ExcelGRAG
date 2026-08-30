@@ -104,7 +104,10 @@ fn main() {
     println!("header cells:         {total_headers}");
     println!("  blank:              {blank_headers}");
     println!("  duplicated:         {dup_headers}");
-    println!("tables with mostly blank or duplicated headers: {}", suspect_tables.len());
+    println!(
+        "tables with mostly blank or duplicated headers: {}",
+        suspect_tables.len()
+    );
     for e in &suspect_tables {
         println!("   {e}");
     }

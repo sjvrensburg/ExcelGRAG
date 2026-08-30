@@ -62,6 +62,7 @@ pub fn dimensions_to_range(d: &Dimensions, sheet: SheetId) -> Option<RangeRef> {
     let right = u16::try_from(d.end.1).ok()?;
     if d.start.0 > eg_model::MAX_ROW
         || d.end.0 > eg_model::MAX_ROW
+        || u32::from(left) > eg_model::MAX_COL
         || u32::from(right) > eg_model::MAX_COL
     {
         return None;
@@ -81,7 +82,8 @@ mod tests {
 
     #[test]
     fn dates_keep_their_serial_and_gain_a_flag() {
-        let dt = calamine::ExcelDateTime::new(45000.0, calamine::ExcelDateTimeType::DateTime, false);
+        let dt =
+            calamine::ExcelDateTime::new(45000.0, calamine::ExcelDateTimeType::DateTime, false);
         let (value, format) = convert_value(&Data::DateTime(dt));
         assert_eq!(value, CellValue::Number(45000.0));
         assert!(format.is_date, "date-ness must survive as a format flag");

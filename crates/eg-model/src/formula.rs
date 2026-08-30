@@ -302,7 +302,13 @@ pub fn write_r1c1_shape(
 
 /// Write just the `R…C…` part of a reference, relative to `anchor`.
 fn write_r1c1_coords(parsed: &ParsedRef, anchor: CellRef, out: &mut String) {
-    write_coord(out, parsed.top as i64, parsed.abs_top, anchor.row as i64, 'R');
+    write_coord(
+        out,
+        parsed.top as i64,
+        parsed.abs_top,
+        anchor.row as i64,
+        'R',
+    );
     write_coord(
         out,
         parsed.left as i64,

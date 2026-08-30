@@ -111,7 +111,10 @@ fn binary_formats_decode_comparison_operators_correctly() {
     // XLSX twin stores the authoritative text as XML, so it cannot drift.
     for ext in ["xlsx", "xlsb", "xls"] {
         let loaded = load(vendor(&format!("issues.{ext}"))).expect("load");
-        let sheet = loaded.workbook.sheet_by_name("datatypes").expect("datatypes");
+        let sheet = loaded
+            .workbook
+            .sheet_by_name("datatypes")
+            .expect("datatypes");
         let cell = sheet.get(3, 0).expect("datatypes!A4");
         assert_eq!(
             cell.formula.as_deref(),

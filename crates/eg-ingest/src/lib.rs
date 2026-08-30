@@ -51,7 +51,7 @@ pub enum IngestError {
     #[error("failed to read sheet {sheet:?}: {message}")]
     Sheet { sheet: String, message: String },
     #[error(
-        "workbook has {found} populated cells, exceeding the configured limit of {limit}; \
+        "stopped at {found} populated cells, over the configured limit of {limit}; \
          raise LoadOptions::max_cells to load it anyway"
     )]
     TooLarge { found: u64, limit: u64 },
@@ -236,6 +236,16 @@ pub fn load_with(path: impl AsRef<Path>, opts: &LoadOptions) -> Result<Loaded, I
             };
             if !cell.is_vacant() {
                 sheet.set(row, col, cell);
+                // Checked per cell, not per sheet: a single sheet can hold
+                // tens of millions of cells, and a limit that only fires
+                // between sheets does not stop us exhausting memory on one.
+                // `found` is therefore where we stopped, not the file's total.
+                if let Some(limit) = opts.max_cells {
+                    let found = total_cells + sheet.len() as u64;
+                    if found > limit {
+                        return Err(IngestError::TooLarge { found, limit });
+                    }
+                }
             }
         }
 
@@ -250,14 +260,6 @@ pub fn load_with(path: impl AsRef<Path>, opts: &LoadOptions) -> Result<Loaded, I
         sheet.tables = tables.get(index).cloned().unwrap_or_default();
 
         total_cells += sheet.len() as u64;
-        if let Some(limit) = opts.max_cells {
-            if total_cells > limit {
-                return Err(IngestError::TooLarge {
-                    found: total_cells,
-                    limit,
-                });
-            }
-        }
 
         loaded_sheets.push(sheet);
     }
@@ -291,10 +293,8 @@ fn attach_formulas(sheet: &mut Sheet, formulas: &calamine::Range<String>) {
         if text.is_empty() {
             continue;
         }
-        let (Some(row), Some(col)) = (
-            fit_row(row + row0 as usize),
-            fit_col(col + col0 as usize),
-        ) else {
+        let (Some(row), Some(col)) = (fit_row(row + row0 as usize), fit_col(col + col0 as usize))
+        else {
             continue;
         };
         // calamine strips the leading '='; normalise in case a backend keeps it.
@@ -341,8 +341,12 @@ where
     for (i, (name, _)) in metadata.iter().enumerate() {
         let sheet_id = SheetId(i as u16);
         let dims = match sheets {
-            Sheets::Xlsx(xlsx) => xlsx.merge_cells_by_sheet_name(name).map_err(|e| e.to_string()),
-            Sheets::Xls(xls) => xls.merge_cells_by_sheet_name(name).map_err(|e| e.to_string()),
+            Sheets::Xlsx(xlsx) => xlsx
+                .merge_cells_by_sheet_name(name)
+                .map_err(|e| e.to_string()),
+            Sheets::Xls(xls) => xls
+                .merge_cells_by_sheet_name(name)
+                .map_err(|e| e.to_string()),
             // Xlsb and Ods expose no merge information through calamine.
             Sheets::Xlsb(_) | Sheets::Ods(_) => continue,
         };
@@ -392,8 +396,7 @@ where
         let (Some(start), Some(end)) = (data.start(), data.end()) else {
             continue;
         };
-        let (Some(left), Some(right)) = (fit_col(start.1 as usize), fit_col(end.1 as usize))
-        else {
+        let (Some(left), Some(right)) = (fit_col(start.1 as usize), fit_col(end.1 as usize)) else {
             continue;
         };
         let (Some(body_top), Some(bottom)) = (fit_row(start.0 as usize), fit_row(end.0 as usize))

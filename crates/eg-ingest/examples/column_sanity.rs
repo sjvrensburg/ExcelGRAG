@@ -37,8 +37,7 @@ fn main() {
         }
     };
 
-    let (mut refs, mut beyond_sheet, mut beyond_used, mut names) =
-        (0usize, 0usize, 0usize, 0usize);
+    let (mut refs, mut beyond_sheet, mut beyond_used, mut names) = (0usize, 0usize, 0usize, 0usize);
     let mut examples: Vec<String> = Vec::new();
 
     for sheet in &loaded.workbook.sheets {
@@ -88,6 +87,15 @@ fn main() {
     if beyond_sheet == 0 && beyond_used == 0 {
         println!("\nAll references land within the addressable sheet.");
     }
+}
+
+/// The 0-based column index of one to three ASCII letters, unchecked.
+fn bijective_base26(letters: &str) -> u32 {
+    let mut n: u32 = 0;
+    for c in letters.bytes() {
+        n = n * 26 + u32::from(c.to_ascii_uppercase() - b'A') + 1;
+    }
+    n - 1
 }
 
 /// Extract the column index of each A1 reference in a formula.
@@ -142,9 +150,15 @@ fn local_reference_columns(formula: &str) -> Vec<(u32, bool)> {
                     let qualified = start > 0 && b[start - 1] == b'!';
                     match eg_model::letters_to_col(letters) {
                         Ok(col) => out.push((col as u32, qualified)),
-                        // Too many letters to be a column: treat as overflow,
-                        // which is exactly what a bad offset produces.
-                        Err(_) => out.push((u32::MAX, qualified)),
+                        // More than three letters cannot be a column at all, so
+                        // this is a defined name such as `Data2023`.
+                        Err(_) if letters.len() > 3 => out.push((u32::MAX, qualified)),
+                        // One to three letters that still overflow — `XFE`,
+                        // `ZZZ` — are exactly the signature this tool looks
+                        // for, so they must be reported, not discarded as
+                        // names. `letters_to_col` rejects them, so the index is
+                        // recomputed here without the range check.
+                        Err(_) => out.push((bijective_base26(letters), qualified)),
                     }
                 } else if i == start {
                     i += 1;

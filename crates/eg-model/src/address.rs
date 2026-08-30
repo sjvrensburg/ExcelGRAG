@@ -22,7 +22,9 @@ pub const MAX_ROW: u32 = 1_048_575;
 pub const MAX_COL: u32 = 16_383;
 
 /// Index of a sheet within its workbook, in workbook (tab) order.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub struct SheetId(pub u16);
 
 impl fmt::Display for SheetId {
@@ -173,15 +175,20 @@ impl RangeRef {
 
     /// Iterate cells in row-major order.
     pub fn iter_cells(&self) -> impl Iterator<Item = CellRef> + '_ {
-        (self.top..=self.bottom)
-            .flat_map(move |r| (self.left..=self.right).map(move |c| CellRef::new(self.sheet, r, c)))
+        (self.top..=self.bottom).flat_map(move |r| {
+            (self.left..=self.right).map(move |c| CellRef::new(self.sheet, r, c))
+        })
     }
 
     pub fn to_a1(&self) -> String {
         if self.top == self.bottom && self.left == self.right {
             self.top_left().to_a1()
         } else {
-            format!("{}:{}", self.top_left().to_a1(), self.bottom_right().to_a1())
+            format!(
+                "{}:{}",
+                self.top_left().to_a1(),
+                self.bottom_right().to_a1()
+            )
         }
     }
 
@@ -448,9 +455,15 @@ pub fn letters_to_col(letters: &str) -> Result<u16, AddressError> {
 }
 
 /// Convert a 0-based column index to letters. 0 -> `A`, 26 -> `AA`.
+///
+/// A valid column needs at most three letters (`XFD`), but the buffer is sized
+/// for any `u32` so that an out-of-range index — which reaches here from
+/// diagnostics and from `CellRef`s built by callers rather than by the parsers —
+/// renders nonsense instead of panicking.
 pub fn col_to_letters(col: u32) -> String {
-    let mut n = col + 1;
-    let mut buf = [0u8; 3];
+    // Widened so that `col == u32::MAX` does not overflow the +1.
+    let mut n = u64::from(col) + 1;
+    let mut buf = [0u8; 7];
     let mut len = 0;
     while n > 0 {
         let rem = (n - 1) % 26;
@@ -594,7 +607,11 @@ mod tests {
             (16383, "XFD"),
         ] {
             assert_eq!(col_to_letters(col), letters, "col {col}");
-            assert_eq!(letters_to_col(letters).unwrap() as u32, col, "letters {letters}");
+            assert_eq!(
+                letters_to_col(letters).unwrap() as u32,
+                col,
+                "letters {letters}"
+            );
         }
     }
 
@@ -604,6 +621,15 @@ mod tests {
         assert!(letters_to_col("AAAA").is_err());
         assert!(letters_to_col("").is_err());
         assert!(letters_to_col("A1").is_err());
+    }
+
+    #[test]
+    fn out_of_range_columns_render_rather_than_panic() {
+        // `col` is only bounded at the parse boundary, so a caller-built index
+        // past XFD must not blow up the renderer.
+        assert_eq!(col_to_letters(18_277), "ZZZ");
+        assert_eq!(col_to_letters(18_278), "AAAA");
+        assert!(!col_to_letters(u32::MAX).is_empty());
     }
 
     #[test]
