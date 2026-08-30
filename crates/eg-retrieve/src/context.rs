@@ -29,6 +29,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use eg_graph::{EdgeKind, NodeKind};
+use rustc_hash::FxHashMap;
 
 use crate::expand::{Retrieved, RetrievedNode, Role, WorkbookContext};
 
@@ -203,10 +204,15 @@ fn render_workbook(
 
     // The half of each entry that does not depend on how many entries survive:
     // its number, kind, label, citation and containment path. Built once,
-    // because the cut is found by trying sizes and this is the expensive half —
-    // `ancestry` walks the result list once per step of the path.
+    // because the cut is found by trying sizes and this is the expensive half.
+    //
+    // Through an index rather than `WorkbookContext::ancestry`, which resolves
+    // each step of a path by scanning the whole result. That is fine for one
+    // lookup and quadratic for one per node, which is what this is.
+    let by_index: FxHashMap<u32, &RetrievedNode> =
+        workbook.nodes.iter().map(|n| (n.node, n)).collect();
     let fixed: Vec<String> = (0..order.len())
-        .map(|i| entry_head(workbook, &order, i, pad, &indent))
+        .map(|i| entry_head(&by_index, &order, i, pad, &indent, workbook.nodes.len()))
         .collect();
 
     let assemble = |fits: usize| -> String {
@@ -238,16 +244,38 @@ fn render_workbook(
     // string pushes over a list bounded by the expansion budget, and it cannot
     // be wrong about its own size.
     //
-    // Sizes are not monotone across the whole range — the whole passage uses
-    // the shorter heading — so this walks down from the top rather than
-    // bisecting.
+    // The whole passage is the one size that can be smaller than the size below
+    // it, because only it gets the shorter heading. So it is tried on its own,
+    // and the rest — which grows with every entry added — is bisected.
+    //
+    // Walking down one entry at a time was correct and quadratic: an assemble
+    // per step over a list the caller sizes, which at a budget of 20,000 nodes
+    // was over a second. The comment here used to call that a few string
+    // pushes.
     let floor = usize::from(!*wrote_an_entry);
-    let mut fits = order.len();
-    let mut text = assemble(fits);
-    while fits > floor && *chars + text.chars().count() > opts.max_chars {
-        fits -= 1;
-        text = assemble(fits);
-    }
+    let fits_within = |text: &String| *chars + text.chars().count() <= opts.max_chars;
+
+    let whole = assemble(order.len());
+    let (fits, text) = if fits_within(&whole) {
+        (order.len(), whole)
+    } else {
+        let mut best = (floor, assemble(floor));
+        let mut lo = floor;
+        let mut hi = order.len() - 1;
+        while lo <= hi {
+            let mid = lo + (hi - lo) / 2;
+            let candidate = assemble(mid);
+            if fits_within(&candidate) {
+                best = (mid, candidate);
+                lo = mid + 1;
+            } else if mid == 0 {
+                break;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        best
+    };
 
     if fits == 0 {
         // Everything this workbook offered is omitted, and the workbook itself
@@ -295,11 +323,12 @@ fn heading(workbook: &WorkbookContext, shown: usize, total: usize) -> String {
 
 /// The part of an entry that is the same however many entries survive.
 fn entry_head(
-    workbook: &WorkbookContext,
+    by_index: &FxHashMap<u32, &RetrievedNode>,
     order: &[&RetrievedNode],
     i: usize,
     pad: usize,
     indent: &str,
+    limit: usize,
 ) -> String {
     let node = order[i];
     let number = i + 1;
@@ -321,12 +350,26 @@ fn entry_head(
 
     // The workbook root is the heading above all of this, so repeating it on
     // every line costs a line's width per node and says nothing.
-    let path: Vec<&str> = workbook
-        .ancestry(node.node)
-        .into_iter()
-        .filter(|n| n.kind != NodeKind::Workbook)
-        .map(|n| n.label.as_str())
-        .collect();
+    let mut path: Vec<&str> = Vec::new();
+    let mut at = node.parent;
+    let mut steps = 0;
+    while let Some(index) = at {
+        let Some(parent) = by_index.get(&index) else {
+            break;
+        };
+        // The same guard `WorkbookContext::ancestry` carries: a graph read off
+        // disk can have a containment cycle, and a renderer should give a short
+        // path rather than spin.
+        steps += 1;
+        if steps > limit {
+            break;
+        }
+        if parent.kind != NodeKind::Workbook {
+            path.push(parent.label.as_str());
+        }
+        at = parent.parent;
+    }
+    path.reverse();
     if !path.is_empty() {
         let _ = writeln!(entry, "{indent}in: {}", path.join(" > "));
     }

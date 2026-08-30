@@ -510,6 +510,29 @@ fn the_passage_is_as_full_as_the_ceiling_allows() {
             size_of[&best]
         );
     }
+
+    // The check above reads its answer out of the same sweep it is checking, so
+    // a renderer that undershot by one everywhere would simply never record the
+    // better size and would agree with itself. This one does not: how long a
+    // k-entry passage is, is a fact about the output format, and it stays true
+    // whichever k the renderer decides to return. So ask for exactly that many
+    // characters and require exactly that many entries back.
+    for (&k, &size) in &size_of {
+        let rendered = render(
+            &found,
+            &RenderOptions {
+                max_chars: size,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            entries(&rendered.text).len(),
+            k,
+            "a {k}-entry passage is {size} characters, and a ceiling of {size} \
+             returned {} entries",
+            entries(&rendered.text).len()
+        );
+    }
 }
 
 #[test]
