@@ -505,3 +505,52 @@ fn a_unary_plus_passes_its_operand_through() {
     assert_eq!(number("+1"), 1.0);
     assert_eq!(eval("+A3&\"!\""), CellValue::Text("text!".into()));
 }
+
+#[test]
+fn a_long_lookup_column_answers_the_same_as_a_short_one() {
+    // Past a threshold a lookup stops walking its column and indexes it, and
+    // the two paths have to agree — including on case, on which duplicate wins,
+    // and on a number stored as the double just above the one written.
+    let mut sheet = Sheet::new(SheetId(0), "Big");
+    for row in 0..2000u32 {
+        sheet.set(row, 0, Cell::literal(CellValue::Text(format!("k{row}"))));
+        sheet.set(row, 1, Cell::literal(CellValue::Number(row as f64)));
+    }
+    // A duplicate key far down the column: the first row must still win.
+    sheet.set(1999, 0, Cell::literal(CellValue::Text("k7".into())));
+    sheet.set(1500, 2, Cell::literal(CellValue::Number(10.13 + 6.75)));
+    let wb = Workbook {
+        path: "big.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash".into(),
+        sheets: vec![sheet],
+        defined_names: Vec::new(),
+        external_links: Vec::new(),
+    };
+    let at = CellRef::new(SheetId(0), 3000, 9);
+    let value = |formula: &str| evaluate(&wb, at, formula).expect("supported");
+
+    assert_eq!(
+        value("VLOOKUP(\"k7\",A1:B2000,2,FALSE)"),
+        CellValue::Number(7.0)
+    );
+    assert_eq!(
+        value("VLOOKUP(\"K7\",A1:B2000,2,FALSE)"),
+        CellValue::Number(7.0)
+    );
+    assert_eq!(
+        value("VLOOKUP(\"k7\",A1:B400,2,FALSE)"),
+        CellValue::Number(7.0)
+    );
+    assert_eq!(
+        value("MATCH(\"k1234\",A1:A2000,0)"),
+        CellValue::Number(1235.0)
+    );
+    assert_eq!(
+        value("VLOOKUP(\"nope\",A1:B2000,2,FALSE)"),
+        CellValue::Error(ErrorKind::NA)
+    );
+    assert_eq!(value("MATCH(16.88,C1:C2000,0)"), CellValue::Number(1501.0));
+    // The approximate form is not indexed, since it asks an ordering question.
+    assert_eq!(value("VLOOKUP(1234,B1:B2000,1)"), CellValue::Number(1234.0));
+}
