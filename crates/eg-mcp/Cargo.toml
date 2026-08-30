@@ -7,3 +7,14 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+eg-model.workspace = true
+eg-ingest.workspace = true
+eg-graph.workspace = true
+eg-index.workspace = true
+eg-retrieve.workspace = true
+eg-eval.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
