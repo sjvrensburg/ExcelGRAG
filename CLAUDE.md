@@ -24,7 +24,7 @@ cargo clippy --workspace --all-targets
 cargo fmt
 ```
 
-The front door is the `eg` binary (`crates/eg-cli`), eight verbs in the order a
+The front door is the `eg` binary (`crates/eg-cli`), nine verbs in the order a
 question travels:
 
 ```sh
@@ -34,6 +34,7 @@ cargo run --release -p eg-cli -- search corpus/ bad debt --limit 3
 cargo run --release -p eg-cli -- cells book.xlsb 'LOOKUP!AE53:AG89'
 cargo run --release -p eg-cli -- trace book.xlsb 'LOOKUP!AE53' --dependents
 cargo run --release -p eg-cli -- check book.xlsb           # sweep: do formulas still agree
+cargo run --release -p eg-cli -- what-if book.xlsb 'RATES!B4=0.15'
 cargo run --release -p eg-cli -- serve corpus/             # MCP over stdio
 ```
 
@@ -78,9 +79,11 @@ above it.
 - `eg-eval` — the cell layer the graph dropped, recovered on demand:
   `precedents_of` (cheap, in the formula's own text), `dependents_of` (expensive,
   scans every formula), and `recompute`/`check` which evaluate a formula and
-  compare with the value Excel stored.
+  compare with the value Excel stored. `whatif::what_if` substitutes values
+  through an `Overrides` overlay — the workbook is never mutated, since XLSB
+  cannot be written — and walks the closure a level per full formula scan.
 - `eg-mcp` — MCP server over the whole stack (`workbooks`, `search`, `context`,
-  `read_cells`, `precedents`, `dependents`, `recompute`). Hand-written stdio JSON
+  `read_cells`, `precedents`, `dependents`, `recompute`, `what_if`). Hand-written stdio JSON
   protocol, no SDK, because the workspace is synchronous. A failing tool returns a
   *result* with `isError`, never a protocol error.
 - `eg-cli` — `eg`.
@@ -94,6 +97,10 @@ above it.
 - **Recompute never recurses.** Precedents are read as stored values, so a
   disagreement is about one formula, not a chain. No dependency order, no cycle
   detection.
+- **A what-if never reports a cell it could not evaluate as unchanged.** A
+  blocked formula, and everything reading it, comes back as *no answer*; so does
+  a cycle, which is reported rather than iterated to a fixed point. Silently
+  keeping the stored value would understate the impact.
 - **Unsupported functions are refused by name, not guessed.** ~50 of Excel's
   functions are modelled; volatile functions (`TODAY()`) are refused too, because
   "differs" would be the wrong verdict.

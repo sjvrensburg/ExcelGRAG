@@ -15,6 +15,7 @@
 //! asked about structure. The policy lives at startup rather than per call:
 //! a caller cannot talk its way past it.
 
+use eg_eval::whatif::{what_if, Blocked, Change, WhatIfOptions};
 use eg_eval::{
     cell as cell_fact, cells_in, dependents_of, precedents_of, recompute, Outcome, Target,
 };
@@ -110,6 +111,39 @@ pub const TOOLS: &[Tool] = &[
                       name rather than guessing.",
         schema: || cell_schema("The cell or range to recompute, e.g. \"Sheet1!D7\"."),
     },
+    Tool {
+        name: "what_if",
+        description: "Change one or more cells and report every cell that moves because of it. \
+                      Nothing is written: the workbook is read-only and the substitution lives \
+                      in memory. Expensive in the same way `dependents` is — a full scan of the \
+                      workbook's formulas per level of the chain — and it says what it could \
+                      not answer rather than reporting those cells as unchanged.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "changes": {
+                        "type": "array",
+                        "description": "The substitutions to make.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "citation": { "type": "string", "description": "One cell, e.g. \"RATES!B4\"." },
+                                "value": { "description": "What to put there: a number, a string, or a boolean." }
+                            },
+                            "required": ["citation", "value"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "workbook": { "type": "string", "description": "Which workbook (content hash, path or file name). Optional when the corpus holds one." },
+                    "levels": { "type": "integer", "description": "Levels of the dependency chain to follow, default 8. Each is a full scan." },
+                    "limit": { "type": "integer", "description": "Most moved cells to list, default 40." }
+                },
+                "required": ["changes"],
+                "additionalProperties": false
+            })
+        },
+    },
 ];
 
 fn cell_schema(citation: &str) -> Value {
@@ -135,6 +169,7 @@ pub fn call(state: &mut State, name: &str, args: &Value) -> Result<String, Strin
         "precedents" => precedents(state, args),
         "dependents" => dependents(state, args),
         "recompute" => recompute_tool(state, args),
+        "what_if" => what_if_tool(state, args),
         other => Err(format!("no tool called {other:?}")),
     }
 }
@@ -489,6 +524,145 @@ fn recompute_tool(state: &mut State, args: &Value) -> Result<String, String> {
                 workbook.cite_range(range)
             ),
         });
+    }
+    Ok(out)
+}
+
+/// A JSON value as a cell would hold it. An agent writes what it means — a
+/// number, a string, a boolean — and anything else is refused rather than
+/// coerced into something the workbook would not have held.
+fn cell_value(value: &Value) -> Result<CellValue, String> {
+    match value {
+        Value::Number(n) => n
+            .as_f64()
+            .map(CellValue::Number)
+            .ok_or_else(|| format!("{n} is not a number a cell can hold")),
+        Value::String(s) => Ok(CellValue::Text(s.clone())),
+        Value::Bool(b) => Ok(CellValue::Bool(*b)),
+        Value::Null => Ok(CellValue::Empty),
+        other => Err(format!(
+            "a cell holds a number, a string, a boolean or nothing — not {other}"
+        )),
+    }
+}
+
+fn what_if_tool(state: &mut State, args: &Value) -> Result<String, String> {
+    let redact = state.redact_values;
+    let levels = opt_usize(args, "levels", 8).clamp(1, 32);
+    let limit = opt_usize(args, "limit", 40).clamp(1, 500);
+    let requested = args
+        .get("changes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "changes is required, as an array of {citation, value}".to_string())?;
+    if requested.is_empty() {
+        return Err("changes is empty — name at least one cell to change".to_string());
+    }
+
+    let (_, path) = state.resolve(opt_str(args, "workbook").as_deref())?;
+    let (loaded, load_seconds) = state.workbook(&path)?;
+    let workbook = &loaded.workbook;
+
+    let mut changes = Vec::new();
+    for change in requested {
+        let citation = want_str(change, "citation")?;
+        let range = resolve_range(workbook, &citation)?;
+        if range.cell_count() != 1 {
+            return Err(format!(
+                "{citation:?} is {} cells. A change names one.",
+                range.cell_count()
+            ));
+        }
+        let value = cell_value(
+            change
+                .get("value")
+                .ok_or_else(|| format!("{citation:?} has no value to put in it"))?,
+        )?;
+        changes.push(Change::new(range.top_left(), value));
+    }
+
+    let impact = what_if(
+        workbook,
+        &changes,
+        &WhatIfOptions {
+            max_levels: levels,
+            limit,
+            ..Default::default()
+        },
+    );
+    let report = &impact.report;
+
+    let mut out = match load_seconds {
+        Some(seconds) => format!("(opened {path} in {seconds:.1}s)\n"),
+        None => String::new(),
+    };
+    for applied in &impact.changes {
+        out.push_str(&format!(
+            "{:<24} {} → {}\n",
+            applied.a1,
+            show(&applied.before, redact),
+            show(&applied.after, redact)
+        ));
+        if let Some(formula) = &applied.replaced_formula {
+            out.push_str(&format!("  replacing ={formula}\n"));
+        }
+    }
+    out.push_str(&format!(
+        "\n{} cell(s) downstream over {} level(s): {} moved, {} unchanged, {} with no answer\n",
+        report.affected, report.levels, report.moved, report.unchanged, report.blocked
+    ));
+    if let Some(stopped) = report.stopped {
+        out.push_str(&format!(
+            "the walk stopped at {} — the change reaches further than this\n",
+            stopped.as_str()
+        ));
+    }
+
+    if !impact.moved.is_empty() {
+        out.push_str(&format!(
+            "\nmoved ({} of {})\n",
+            impact.moved.len(),
+            report.moved
+        ));
+        for moved in &impact.moved {
+            out.push_str(&format!("  {:<24} ={}\n", moved.a1, moved.formula));
+            out.push_str(&format!(
+                "    {} → {}   (level {}){}\n",
+                show(&moved.before, redact),
+                show(&moved.after, redact),
+                moved.level,
+                if moved.was_stale {
+                    "  — this cell already disagreed with its stored value"
+                } else {
+                    ""
+                }
+            ));
+        }
+        if report.moved_not_listed > 0 {
+            out.push_str(&format!(
+                "  … {} more, raise limit\n",
+                report.moved_not_listed
+            ));
+        }
+    }
+
+    if !impact.unanswered.is_empty() {
+        out.push_str(&format!(
+            "\nno answer ({} of {}) — the change reaches these and this cannot say where it \
+             leaves them\n",
+            impact.unanswered.len(),
+            report.blocked
+        ));
+        for blocked in &impact.unanswered {
+            let why = match &blocked.reason {
+                Blocked::Formula(reason) => reason.to_string(),
+                Blocked::Upstream(cause) => format!("reads {cause}, which has no answer"),
+                Blocked::Cycle => "circular reference".to_string(),
+            };
+            out.push_str(&format!("  {:<24} {why}\n", blocked.a1));
+        }
+    }
+    if report.affected == 0 {
+        out.push_str("\nnothing in this workbook reads it.\n");
     }
     Ok(out)
 }

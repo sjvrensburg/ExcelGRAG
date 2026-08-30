@@ -189,7 +189,7 @@ pub fn dependents_of(
 }
 
 /// Whether two ranges share a cell.
-fn overlaps(a: RangeRef, b: RangeRef) -> bool {
+pub(crate) fn overlaps(a: RangeRef, b: RangeRef) -> bool {
     a.sheet == b.sheet
         && a.top <= b.bottom
         && b.top <= a.bottom
@@ -198,7 +198,7 @@ fn overlaps(a: RangeRef, b: RangeRef) -> bool {
 }
 
 /// Resolve one scanned reference against the workbook.
-fn resolve(
+pub(crate) fn resolve(
     at: CellRef,
     span: &ReferenceSpan,
     formula: &str,
@@ -232,7 +232,7 @@ fn resolve(
 
 /// Sheet ids by upper-cased name, because Excel sheet names are
 /// case-insensitive and a formula may not spell one the way the tab does.
-fn sheet_ids(workbook: &Workbook) -> FxHashMap<String, SheetId> {
+pub(crate) fn sheet_ids(workbook: &Workbook) -> FxHashMap<String, SheetId> {
     workbook
         .sheets
         .iter()

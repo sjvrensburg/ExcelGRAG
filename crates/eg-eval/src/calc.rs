@@ -28,6 +28,7 @@
 //! recomputed today is not what the workbook computed when it was saved, so
 //! "differs" would be the wrong verdict even when both numbers are right.
 
+use std::borrow::Cow;
 use std::fmt;
 
 use eg_model::{CellRef, CellValue, ErrorKind, ParsedRef, RangeRef, SheetId, ValueKind, Workbook};
@@ -193,6 +194,20 @@ pub struct Recomputed {
 /// `None` when the cell is absent or holds no formula: a literal has nothing to
 /// recompute, and agreeing with itself would be a verdict about nothing.
 pub fn recompute(workbook: &Workbook, at: CellRef) -> Option<Recomputed> {
+    recompute_over(workbook, at, &Overrides::new())
+}
+
+/// Recompute one cell with some of the workbook's values substituted.
+///
+/// The comparison is still against the value the workbook stored, so an
+/// [`Outcome::Differs`] here says the substitution moved this cell — which is
+/// what a what-if is asking. [`crate::whatif`] is the same question asked of
+/// everything downstream rather than one cell.
+pub fn recompute_over(
+    workbook: &Workbook,
+    at: CellRef,
+    overrides: &Overrides,
+) -> Option<Recomputed> {
     let cell = workbook.sheet(at.sheet)?.get_ref(at)?;
     let formula = cell.formula.clone()?;
     Some(recompute_with(
@@ -202,6 +217,7 @@ pub fn recompute(workbook: &Workbook, at: CellRef) -> Option<Recomputed> {
         &cell.value,
         &sheet_ids(workbook),
         &mut LookupIndex::default(),
+        overrides,
     ))
 }
 
@@ -209,9 +225,19 @@ pub fn recompute(workbook: &Workbook, at: CellRef) -> Option<Recomputed> {
 /// to anything. This is the what-if entry point: relative references resolve
 /// against `at`, exactly as they would if the text were typed there.
 pub fn evaluate(workbook: &Workbook, at: CellRef, formula: &str) -> Result<CellValue, Unsupported> {
+    evaluate_over(workbook, at, formula, &Overrides::new())
+}
+
+/// Evaluate formula text with some of the workbook's values substituted.
+pub fn evaluate_over(
+    workbook: &Workbook,
+    at: CellRef,
+    formula: &str,
+    overrides: &Overrides,
+) -> Result<CellValue, Unsupported> {
     let sheets = sheet_ids(workbook);
     let mut index = LookupIndex::default();
-    let mut eval = Eval::new(workbook, at, &sheets, &mut index);
+    let mut eval = Eval::new(workbook, at, &sheets, &mut index, overrides);
     let expr = parse(formula).map_err(|e| Unsupported::Unparsed(e.to_string()))?;
     let value = eval.eval(&expr)?;
     Ok(eval.result(value))
@@ -224,8 +250,9 @@ fn recompute_with(
     stored: &CellValue,
     sheets: &FxHashMap<String, SheetId>,
     index: &mut LookupIndex,
+    overrides: &Overrides,
 ) -> Recomputed {
-    let mut eval = Eval::new(workbook, at, sheets, index);
+    let mut eval = Eval::new(workbook, at, sheets, index, overrides);
     let outcome = match parse(formula) {
         Err(e) => Outcome::Unsupported(Unsupported::Unparsed(e.to_string())),
         Ok(expr) => match eval.eval(&expr) {
@@ -335,7 +362,15 @@ pub fn check(
                 continue;
             };
             report.formulas += 1;
-            let result = recompute_with(workbook, at, formula, &cell.value, &ids, &mut index);
+            let result = recompute_with(
+                workbook,
+                at,
+                formula,
+                &cell.value,
+                &ids,
+                &mut index,
+                &Overrides::new(),
+            );
             match &result.outcome {
                 Outcome::Agrees(_) => report.agreed += 1,
                 Outcome::Unsupported(reason) => {
@@ -405,6 +440,67 @@ impl Key {
     }
 }
 
+/// Cell values standing in for the workbook's own.
+///
+/// This is what makes a what-if a question rather than an edit: the workbook is
+/// never modified — it cannot be, for XLSB, which no Rust crate can write — so
+/// a substituted value lives here and every read goes through it.
+///
+/// Empty in an ordinary recompute, and the evaluator checks that before it
+/// hashes anything, so the sweep pays a branch rather than a lookup per cell.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Overrides {
+    values: FxHashMap<CellRef, CellValue>,
+}
+
+impl Overrides {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Substitute `value` for whatever `at` holds.
+    pub fn set(&mut self, at: CellRef, value: CellValue) {
+        self.values.insert(at, value);
+    }
+
+    pub fn get(&self, at: CellRef) -> Option<&CellValue> {
+        if self.values.is_empty() {
+            return None;
+        }
+        self.values.get(&at)
+    }
+
+    pub fn contains(&self, at: CellRef) -> bool {
+        self.get(at).is_some()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn cells(&self) -> impl Iterator<Item = (CellRef, &CellValue)> + '_ {
+        self.values.iter().map(|(at, v)| (*at, v))
+    }
+
+    /// The substitutions inside `range`, for a read that walks cells rather
+    /// than naming one. Linear in the substitutions, which are few — a what-if
+    /// sets a handful of cells and asks about millions.
+    fn in_range(&self, range: RangeRef) -> impl Iterator<Item = (CellRef, &CellValue)> + '_ {
+        self.values
+            .iter()
+            .filter(move |(at, _)| {
+                at.sheet == range.sheet
+                    && (range.top..=range.bottom).contains(&at.row)
+                    && (range.left..=range.right).contains(&at.col)
+            })
+            .map(|(at, v)| (*at, v))
+    }
+}
+
 /// Exact-match lookup columns, built once and asked many times.
 ///
 /// A lookup walks its first column until it matches. One formula doing that is
@@ -417,7 +513,9 @@ impl Key {
 /// past the key, which is an ordering question a hash cannot answer.
 ///
 /// The index is valid only while the workbook does not change, which is the
-/// whole life of a sweep.
+/// whole life of a sweep — and, since it is built through whatever
+/// [`Overrides`] were in force, only for those. A what-if that substitutes a
+/// value into a lookup column must not reuse an index built without it.
 #[derive(Default)]
 pub struct LookupIndex {
     columns: FxHashMap<(SheetId, u16, u32, u32), FxHashMap<Key, u32>>,
@@ -428,26 +526,36 @@ impl LookupIndex {
     fn find(
         &mut self,
         workbook: &Workbook,
-        sheet: SheetId,
-        column: u16,
-        top: u32,
-        bottom: u32,
+        overrides: &Overrides,
+        column: RangeRef,
         key: &CellValue,
     ) -> Option<u32> {
         let key = Key::of(key)?;
+        let (top, left) = (column.top, column.left);
         let built = self
             .columns
-            .entry((sheet, column, top, bottom))
+            .entry((column.sheet, left, top, column.bottom))
             .or_insert_with(|| {
                 let mut map = FxHashMap::default();
-                let Some(sheet) = workbook.sheet(sheet) else {
+                let Some(sheet) = workbook.sheet(column.sheet) else {
                     return map;
                 };
-                let range = RangeRef::new(sheet.id, top, column, bottom, column);
+                let range = column;
                 for (at, cell) in sheet.iter_range(range) {
-                    if let Some(key) = Key::of(&cell.value) {
+                    let value = match overrides.get(at) {
+                        Some(v) => v,
+                        None => &cell.value,
+                    };
+                    if let Some(key) = Key::of(value) {
                         // First occurrence wins, as a lookup takes the first
                         // row that matches.
+                        map.entry(key).or_insert(at.row - top);
+                    }
+                }
+                // A substitution into a cell the sheet leaves empty is a row
+                // the loop above never saw.
+                for (at, value) in overrides.in_range(range) {
+                    if let Some(key) = Key::of(value) {
                         map.entry(key).or_insert(at.row - top);
                     }
                 }
@@ -462,6 +570,7 @@ struct Eval<'a> {
     at: CellRef,
     sheets: &'a FxHashMap<String, SheetId>,
     index: &'a mut LookupIndex,
+    overrides: &'a Overrides,
     inputs: Vec<Input>,
     depth: u32,
 }
@@ -472,12 +581,14 @@ impl<'a> Eval<'a> {
         at: CellRef,
         sheets: &'a FxHashMap<String, SheetId>,
         index: &'a mut LookupIndex,
+        overrides: &'a Overrides,
     ) -> Self {
         Self {
             workbook,
             at,
             sheets,
             index,
+            overrides,
             inputs: Vec::new(),
             depth: 0,
         }
@@ -613,6 +724,9 @@ impl<'a> Eval<'a> {
     }
 
     fn cell_value(&self, at: CellRef) -> CellValue {
+        if let Some(value) = self.overrides.get(at) {
+            return value.clone();
+        }
         self.workbook
             .sheet(at.sheet)
             .map(|s| s.value(at.row, at.col))
@@ -641,15 +755,26 @@ impl<'a> Eval<'a> {
     /// The cells of a range that can hold anything, clipped to what the sheet
     /// actually uses. A million-row reference costs its populated cells, not
     /// its geometry.
-    fn populated(&self, range: RangeRef) -> impl Iterator<Item = &CellValue> + '_ {
+    fn populated(&self, range: RangeRef) -> impl Iterator<Item = Cow<'_, CellValue>> + '_ {
         let sheet = self.workbook.sheet(range.sheet);
         let clipped = sheet
             .and_then(|s| s.used_range())
             .and_then(|used| intersect(range, used));
-        clipped
+        let overrides = self.overrides;
+        let stored = clipped
             .into_iter()
             .flat_map(move |r| sheet.expect("clipped implies a sheet").iter_range(r))
-            .map(|(_, cell)| &cell.value)
+            .map(move |(at, cell)| match overrides.get(at) {
+                Some(value) => Cow::Borrowed(value),
+                None => Cow::Borrowed(&cell.value),
+            });
+        // A substitution into a cell the sheet leaves empty is not in the grid
+        // to be walked over, and a range that addresses it still reads it.
+        let substituted = overrides
+            .in_range(range)
+            .filter(move |(at, _)| sheet.map(|s| s.get_ref(*at).is_none()).unwrap_or(true))
+            .map(|(_, value)| Cow::Borrowed(value));
+        stored.chain(substituted)
     }
 
     /// Every value an argument list contributes, flagged with whether it came
@@ -680,7 +805,7 @@ impl<'a> Eval<'a> {
                 Value::Range(r) => {
                     addressed += r.cell_count();
                     for v in self.populated(r) {
-                        visit(v, true);
+                        visit(&v, true);
                     }
                 }
             }
@@ -1433,14 +1558,8 @@ impl Eval<'_> {
 
         let last = self.last_row(table);
         if vertical && !approximate && last - table.top >= INDEX_LOOKUPS_OVER {
-            let found = self.index.find(
-                self.workbook,
-                table.sheet,
-                table.left,
-                table.top,
-                last,
-                &key,
-            );
+            let column = RangeRef::new(table.sheet, table.top, table.left, last, table.left);
+            let found = self.index.find(self.workbook, self.overrides, column, &key);
             return Ok(match found {
                 Some(row) => Value::Scalar(self.cell_at(table, row, index as u16)),
                 None => err(ErrorKind::NA),
@@ -1502,14 +1621,8 @@ impl Eval<'_> {
         let vertical = vector.right == vector.left;
         let last = self.last_row(vector);
         if vertical && mode == 0.0 && last - vector.top >= INDEX_LOOKUPS_OVER {
-            let found = self.index.find(
-                self.workbook,
-                vector.sheet,
-                vector.left,
-                vector.top,
-                last,
-                &key,
-            );
+            let column = RangeRef::new(vector.sheet, vector.top, vector.left, last, vector.left);
+            let found = self.index.find(self.workbook, self.overrides, column, &key);
             return Ok(match found {
                 Some(row) => num(row as f64 + 1.0),
                 None => err(ErrorKind::NA),

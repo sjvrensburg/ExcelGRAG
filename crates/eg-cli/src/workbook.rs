@@ -1,5 +1,6 @@
 //! The verbs that work on a workbook directly, below the graph: cells,
-//! provenance, and whether the arithmetic still holds.
+//! provenance, whether the arithmetic still holds, and what moves if a number
+//! changes.
 //!
 //! All three open the file, which on a large workbook is seconds and gigabytes.
 //! That is the price of asking about cells rather than about structure, and it
@@ -7,6 +8,7 @@
 
 use std::time::Instant;
 
+use eg_eval::whatif::{what_if, Blocked, Change, WhatIfOptions};
 use eg_eval::{cells_in, check as check_formulas, dependents_of, precedents_of, Outcome, Target};
 use eg_ingest::{load_with, LoadOptions};
 use eg_model::{parse_a1, CellValue, RangeRef, Workbook};
@@ -211,6 +213,143 @@ pub fn check(path: &str, scope: Option<&str>, limit: usize, redact: bool) -> Res
     Ok(())
 }
 
+/// One `Sheet!A1=value` assignment, as a change to a single cell.
+///
+/// The value is read the way a spreadsheet reads what you type: a number if it
+/// parses as one, TRUE or FALSE as a boolean, nothing at all as an empty cell,
+/// and anything else as text. Quotes force text, so `A1="12"` is the string.
+fn assignment(workbook: &Workbook, text: &str) -> Result<Change, String> {
+    let (citation, value) = text
+        .split_once('=')
+        .ok_or_else(|| format!("{text:?} is not a change. Write one as \"Sheet1!B2=0.15\"."))?;
+    let range = locate(workbook, citation.trim())?;
+    if range.cell_count() != 1 {
+        return Err(format!(
+            "{citation:?} is {} cells. A change names one.",
+            range.cell_count()
+        ));
+    }
+    Ok(Change::new(range.top_left(), parse_literal(value.trim())))
+}
+
+fn parse_literal(text: &str) -> CellValue {
+    if let Some(quoted) = text
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    {
+        return CellValue::Text(quoted.to_string());
+    }
+    if text.is_empty() {
+        return CellValue::Empty;
+    }
+    if let Ok(number) = text.parse::<f64>() {
+        return CellValue::Number(number);
+    }
+    match text.to_ascii_uppercase().as_str() {
+        "TRUE" => CellValue::Bool(true),
+        "FALSE" => CellValue::Bool(false),
+        _ => CellValue::Text(text.to_string()),
+    }
+}
+
+pub fn whatif(
+    path: &str,
+    changes: &[String],
+    levels: usize,
+    max_cells: usize,
+    limit: usize,
+    redact: bool,
+) -> Result<(), String> {
+    let workbook = open(path)?;
+    let changes: Vec<Change> = changes
+        .iter()
+        .map(|text| assignment(&workbook, text))
+        .collect::<Result<_, _>>()?;
+
+    let at = Instant::now();
+    let impact = what_if(
+        &workbook,
+        &changes,
+        &WhatIfOptions {
+            max_levels: levels,
+            max_cells,
+            limit,
+        },
+    );
+    let elapsed = at.elapsed().as_secs_f64();
+    let report = &impact.report;
+
+    for applied in &impact.changes {
+        println!(
+            "{:<28} {} → {}",
+            applied.a1,
+            show(&applied.before, redact),
+            show(&applied.after, redact)
+        );
+        if let Some(formula) = &applied.replaced_formula {
+            println!("  replacing ={formula}");
+        }
+    }
+
+    println!(
+        "\n{} cell(s) downstream over {} level(s), {} scan(s) of {} formulas in {elapsed:.1}s",
+        report.affected, report.levels, report.scans, report.formulas_scanned
+    );
+    println!("  moved       {:>10}", report.moved);
+    println!("  unchanged   {:>10}", report.unchanged);
+    println!("  blocked     {:>10}", report.blocked);
+    if let Some(stopped) = report.stopped {
+        println!(
+            "  stopped at {} — the change reaches further than this",
+            stopped.as_str()
+        );
+    }
+
+    if !impact.moved.is_empty() {
+        println!("\nmoved ({} of {})", impact.moved.len(), report.moved);
+        for moved in &impact.moved {
+            println!("  {:<28} ={}", moved.a1, moved.formula);
+            println!(
+                "    {} → {}   (level {}){}",
+                show(&moved.before, redact),
+                show(&moved.after, redact),
+                moved.level,
+                if moved.was_stale {
+                    "  — and it already disagreed with its stored value"
+                } else {
+                    ""
+                }
+            );
+        }
+        if report.moved_not_listed > 0 {
+            println!("  … {} more, raise --limit", report.moved_not_listed);
+        }
+    }
+
+    if !impact.unanswered.is_empty() {
+        // These are the ones a caller must not read as "unchanged": the change
+        // reaches them and this cannot say where it leaves them.
+        println!(
+            "\nno answer ({} of {})",
+            impact.unanswered.len(),
+            report.blocked
+        );
+        for blocked in &impact.unanswered {
+            let why = match &blocked.reason {
+                Blocked::Formula(reason) => reason.to_string(),
+                Blocked::Upstream(cause) => format!("reads {cause}, which has no answer"),
+                Blocked::Cycle => "circular reference".to_string(),
+            };
+            println!("  {:<28} {why}", blocked.a1);
+        }
+    }
+
+    if report.affected == 0 {
+        println!("\nnothing in this workbook reads it.");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,6 +392,30 @@ mod tests {
             error.contains("Q3 Sales") && error.contains("Rates"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_change_is_read_the_way_a_sheet_reads_what_you_type() {
+        let wb = workbook();
+        let change = assignment(&wb, "'Q3 Sales'!A1=0.15").expect("a change");
+        assert_eq!(change.cell.sheet, SheetId(0));
+        assert_eq!(change.value, CellValue::Number(0.15));
+
+        assert_eq!(parse_literal("42"), CellValue::Number(42.0));
+        assert_eq!(parse_literal("TRUE"), CellValue::Bool(true));
+        assert_eq!(parse_literal(""), CellValue::Empty);
+        assert_eq!(parse_literal("overdue"), CellValue::Text("overdue".into()));
+        // Quotes are how you say the digits are a label, not a number.
+        assert_eq!(parse_literal("\"12\""), CellValue::Text("12".into()));
+    }
+
+    #[test]
+    fn a_change_names_one_cell_and_says_so_when_it_does_not() {
+        let wb = workbook();
+        let error = assignment(&wb, "'Q3 Sales'!A1:B9=1").expect_err("a range");
+        assert!(error.contains("names one"), "{error}");
+        let error = assignment(&wb, "'Q3 Sales'!A1").expect_err("no value");
+        assert!(error.contains("not a change"), "{error}");
     }
 
     #[test]
