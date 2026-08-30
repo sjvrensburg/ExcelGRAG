@@ -12,7 +12,8 @@ all, and the only Python library that can, `pyxlsb`, does not surface formulas.
 Early, but a question now goes all the way from words to the part of a workbook
 that answers it. `eg-model`, `eg-ingest`, `eg-structure`, `eg-graph` and
 `eg-index` and `eg-retrieve` are implemented and tested: a question in words
-comes back as a cited passage. The evaluation, MCP and CLI layers are not yet
+comes back as a cited passage, and `eg-eval` follows a citation down to the
+cells behind it. Formula evaluation, and the MCP and CLI layers, are not yet
 built.
 
 ## Workspace
@@ -25,7 +26,7 @@ built.
 | `eg-graph` | Graph build, reference lifting, invariants, store | implemented |
 | `eg-index` | Lexical (tantivy) and vector (fastembed) indexes | implemented |
 | `eg-retrieve` | Hybrid search, graph expansion, context rendering | implemented |
-| `eg-eval` | Formula evaluation and what-if | stub |
+| `eg-eval` | Cell-level provenance, formula evaluation, what-if | provenance done |
 | `eg-mcp` | MCP server | stub |
 | `eg-cli` | Command-line front-end | stub |
 
@@ -321,6 +322,35 @@ from the regions a node overlaps: upwards for a column, and one level down for a
 sheet. A column's inputs are its table's inputs, which is as fine as the graph
 kept. Recovering which cell fed which is P6, done on demand against the
 workbook.
+
+## Cell-level provenance
+
+The graph lifts every reference to the region containing it, which is the right
+granularity to traverse and the wrong one to explain a number with. So the cell
+layer is not stored — it is recovered from the workbook on demand, which is what
+the node ranges exist for.
+
+The two directions do not cost the same, and that is why they are separate
+functions rather than one call that hides which you asked for. What a cell reads
+is in its own text. What reads a cell is written down nowhere, so finding it
+means scanning every formula in the file.
+
+```sh
+cargo run --release -p eg-eval --example trace -- private/book.xlsb "'BP136-6-WORK DOC'!AQ2:AQ4"
+cargo run --release -p eg-eval --example trace -- private/book.xlsb 'LOOKUP!AE53:AG89' --dependents
+```
+
+On the real workbook, after a 9.8s load: precedents come back in **0.08ms**;
+dependents take **2.4s to scan 6,793,166 formulas** and find 115,566 references
+into that one lookup table.
+
+That closes the loop from the retrieval layer. Searching for "bad debt
+provision" surfaces `LOOKUP!AE53:AG89` as the RATES table; this says which cells
+read it and what each of them reads in turn.
+
+The example prints addresses and formulas, and value *kinds* rather than values,
+unless `--show-values` says otherwise. A formula is structure; a value is the
+workbook's data.
 
 ## Testing
 

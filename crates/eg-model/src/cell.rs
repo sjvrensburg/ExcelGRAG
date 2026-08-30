@@ -145,6 +145,17 @@ impl ValueKind {
     pub fn is_blank(&self) -> bool {
         matches!(self, ValueKind::Empty)
     }
+
+    /// The kind as a word, for naming a cell without disclosing what is in it.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ValueKind::Empty => "empty",
+            ValueKind::Number => "number",
+            ValueKind::Text => "text",
+            ValueKind::Bool => "bool",
+            ValueKind::Error => "error",
+        }
+    }
 }
 
 /// Presentation attributes that carry structural signal.
