@@ -184,7 +184,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 [[package]]
 name = "calamine"
 version = "0.36.1"
-source = "git+https://github.com/sjvrensburg/calamine.git?branch=excelgrag#23225ba175ef939979787f2dab4d60359bad2ad3"
+source = "git+https://github.com/sjvrensburg/calamine.git?branch=excelgrag#db4eeaaa1fe5278e02c42254af144ee828541af5"
 dependencies = [
  "atoi_simd",
  "byteorder",
