@@ -39,7 +39,8 @@ git clone https://github.com/tafia/calamine.git ../calamine
 cd ../calamine && git checkout xlsb-shared-formulas
 ```
 
-The fix is ready to upstream; see `docs/upstream-issues.md`.
+The fix is ready to upstream, in two commits, one per format; see
+`docs/upstream-issues.md`, which also records what a pre-PR review caught.
 
 ## Testing
 
