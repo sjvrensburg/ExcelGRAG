@@ -47,6 +47,13 @@ pub const TOLERANCE: f64 = 1e-9;
 /// How deep an expression may nest before it is refused rather than recursed.
 const MAX_DEPTH: u32 = 128;
 
+/// How long a lookup column has to be before indexing it beats walking it.
+///
+/// Below this a linear scan wins outright: it stops at the first match and
+/// hashes nothing. Above it, one workbook holds one lookup table and millions
+/// of formulas asking it questions, which is a different problem.
+const INDEX_LOOKUPS_OVER: u32 = 512;
+
 /// What an evaluated expression is: a value, or a reference to cells.
 #[derive(Debug, Clone, PartialEq)]
 enum Value {
@@ -194,6 +201,7 @@ pub fn recompute(workbook: &Workbook, at: CellRef) -> Option<Recomputed> {
         &formula,
         &cell.value,
         &sheet_ids(workbook),
+        &mut LookupIndex::default(),
     ))
 }
 
@@ -202,7 +210,8 @@ pub fn recompute(workbook: &Workbook, at: CellRef) -> Option<Recomputed> {
 /// against `at`, exactly as they would if the text were typed there.
 pub fn evaluate(workbook: &Workbook, at: CellRef, formula: &str) -> Result<CellValue, Unsupported> {
     let sheets = sheet_ids(workbook);
-    let mut eval = Eval::new(workbook, at, &sheets);
+    let mut index = LookupIndex::default();
+    let mut eval = Eval::new(workbook, at, &sheets, &mut index);
     let expr = parse(formula).map_err(|e| Unsupported::Unparsed(e.to_string()))?;
     let value = eval.eval(&expr)?;
     Ok(eval.result(value))
@@ -214,8 +223,9 @@ fn recompute_with(
     formula: &str,
     stored: &CellValue,
     sheets: &FxHashMap<String, SheetId>,
+    index: &mut LookupIndex,
 ) -> Recomputed {
-    let mut eval = Eval::new(workbook, at, sheets);
+    let mut eval = Eval::new(workbook, at, sheets, index);
     let outcome = match parse(formula) {
         Err(e) => Outcome::Unsupported(Unsupported::Unparsed(e.to_string())),
         Ok(expr) => match eval.eval(&expr) {
@@ -301,6 +311,9 @@ pub fn check(
     limit: usize,
 ) -> (Vec<Recomputed>, CheckReport) {
     let ids = sheet_ids(workbook);
+    // One index for the whole sweep: the tables a workbook looks things up in
+    // are the same tables for every formula that asks.
+    let mut index = LookupIndex::default();
     let mut out = Vec::new();
     let mut report = CheckReport::default();
     let mut reasons: FxHashMap<String, u64> = FxHashMap::default();
@@ -322,7 +335,7 @@ pub fn check(
                 continue;
             };
             report.formulas += 1;
-            let result = recompute_with(workbook, at, formula, &cell.value, &ids);
+            let result = recompute_with(workbook, at, formula, &cell.value, &ids, &mut index);
             match &result.outcome {
                 Outcome::Agrees(_) => report.agreed += 1,
                 Outcome::Unsupported(reason) => {
@@ -359,20 +372,112 @@ fn sheet_ids(workbook: &Workbook) -> FxHashMap<String, SheetId> {
         .collect()
 }
 
+/// A spreadsheet value as something hashable.
+///
+/// Built to match what [`compare_for_lookup`] would say: a number never equals
+/// text however it reads, text ignores case, and a number is keyed on the 15
+/// digits a sheet shows rather than on its bits, so a lookup finds 16.88 when
+/// the cell holds the double just above it.
+#[derive(PartialEq, Eq, Hash)]
+enum Key {
+    Number(u64),
+    Text(String),
+    Bool(bool),
+}
+
+impl Key {
+    fn of(value: &CellValue) -> Option<Key> {
+        Some(match value {
+            CellValue::Number(n) => {
+                let n = shown(*n);
+                // -0.0 and 0.0 are the same cell to a spreadsheet and different
+                // bit patterns to a hash.
+                Key::Number(if n == 0.0 {
+                    0f64.to_bits()
+                } else {
+                    n.to_bits()
+                })
+            }
+            CellValue::Text(s) => Key::Text(s.to_uppercase()),
+            CellValue::Bool(b) => Key::Bool(*b),
+            CellValue::Empty | CellValue::Error(_) => return None,
+        })
+    }
+}
+
+/// Exact-match lookup columns, built once and asked many times.
+///
+/// A lookup walks its first column until it matches. One formula doing that is
+/// nothing; 115,004 of them into the same 100,000-row table is a quarter of a
+/// trillion probes, and that is an ordinary shape for a workbook — one table of
+/// rates, one formula per debtor. So the column is turned into a map the first
+/// time it is asked and answered from the map after that.
+///
+/// Only exact matches are indexed. An approximate lookup wants the last row not
+/// past the key, which is an ordering question a hash cannot answer.
+///
+/// The index is valid only while the workbook does not change, which is the
+/// whole life of a sweep.
+#[derive(Default)]
+pub struct LookupIndex {
+    columns: FxHashMap<(SheetId, u16, u32, u32), FxHashMap<Key, u32>>,
+}
+
+impl LookupIndex {
+    /// The first row offset in `column` holding `key`, or `None`.
+    fn find(
+        &mut self,
+        workbook: &Workbook,
+        sheet: SheetId,
+        column: u16,
+        top: u32,
+        bottom: u32,
+        key: &CellValue,
+    ) -> Option<u32> {
+        let key = Key::of(key)?;
+        let built = self
+            .columns
+            .entry((sheet, column, top, bottom))
+            .or_insert_with(|| {
+                let mut map = FxHashMap::default();
+                let Some(sheet) = workbook.sheet(sheet) else {
+                    return map;
+                };
+                let range = RangeRef::new(sheet.id, top, column, bottom, column);
+                for (at, cell) in sheet.iter_range(range) {
+                    if let Some(key) = Key::of(&cell.value) {
+                        // First occurrence wins, as a lookup takes the first
+                        // row that matches.
+                        map.entry(key).or_insert(at.row - top);
+                    }
+                }
+                map
+            });
+        built.get(&key).copied()
+    }
+}
+
 struct Eval<'a> {
     workbook: &'a Workbook,
     at: CellRef,
     sheets: &'a FxHashMap<String, SheetId>,
+    index: &'a mut LookupIndex,
     inputs: Vec<Input>,
     depth: u32,
 }
 
 impl<'a> Eval<'a> {
-    fn new(workbook: &'a Workbook, at: CellRef, sheets: &'a FxHashMap<String, SheetId>) -> Self {
+    fn new(
+        workbook: &'a Workbook,
+        at: CellRef,
+        sheets: &'a FxHashMap<String, SheetId>,
+        index: &'a mut LookupIndex,
+    ) -> Self {
         Self {
             workbook,
             at,
             sheets,
+            index,
             inputs: Vec::new(),
             depth: 0,
         }
@@ -1236,8 +1341,24 @@ impl Eval<'_> {
             return Ok(err(ErrorKind::Ref));
         }
 
+        let last = self.last_row(table);
+        if vertical && !approximate && last - table.top >= INDEX_LOOKUPS_OVER {
+            let found = self.index.find(
+                self.workbook,
+                table.sheet,
+                table.left,
+                table.top,
+                last,
+                &key,
+            );
+            return Ok(match found {
+                Some(row) => Value::Scalar(self.cell_at(table, row, index as u16)),
+                None => err(ErrorKind::NA),
+            });
+        }
+
         let steps = if vertical {
-            u64::from(self.last_row(table) - table.top)
+            u64::from(last - table.top)
         } else {
             u64::from(table.right - table.left)
         };
@@ -1289,8 +1410,24 @@ impl Eval<'_> {
             },
         };
         let vertical = vector.right == vector.left;
+        let last = self.last_row(vector);
+        if vertical && mode == 0.0 && last - vector.top >= INDEX_LOOKUPS_OVER {
+            let found = self.index.find(
+                self.workbook,
+                vector.sheet,
+                vector.left,
+                vector.top,
+                last,
+                &key,
+            );
+            return Ok(match found {
+                Some(row) => num(row as f64 + 1.0),
+                None => err(ErrorKind::NA),
+            });
+        }
+
         let steps = if vertical {
-            u64::from(self.last_row(vector) - vector.top)
+            u64::from(last - vector.top)
         } else {
             u64::from(vector.right - vector.left)
         };
