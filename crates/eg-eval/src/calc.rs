@@ -842,8 +842,8 @@ fn binary(op: BinOp, lhs: &CellValue, rhs: &CellValue) -> CellValue {
                 (Err(e), _) | (_, Err(e)) => return CellValue::Error(e),
             };
             match op {
-                BinOp::Add => CellValue::Number(a + b),
-                BinOp::Sub => CellValue::Number(a - b),
+                BinOp::Add => CellValue::Number(cancelling(a, -b, a + b)),
+                BinOp::Sub => CellValue::Number(cancelling(a, b, a - b)),
                 BinOp::Mul => CellValue::Number(a * b),
                 BinOp::Div if b == 0.0 => CellValue::Error(ErrorKind::Div0),
                 BinOp::Div => CellValue::Number(a / b),
@@ -851,6 +851,23 @@ fn binary(op: BinOp, lhs: &CellValue, rhs: &CellValue) -> CellValue {
                 _ => unreachable!("comparison and concat handled above"),
             }
         }
+    }
+}
+
+/// Excel's answer for an addition or subtraction whose operands cancel.
+///
+/// A sheet carries 15 significant digits, so two numbers equal in all of them
+/// are the same number and their difference is zero — not the 1.49e-8 that the
+/// doubles behind them differ by. Excel forces that result to zero, and a
+/// column of differences that should read as empty otherwise fills with
+/// fifteen-zero dust.
+///
+/// The same 15 digits decide [`compare`], for the same reason.
+fn cancelling(lhs: f64, rhs: f64, result: f64) -> f64 {
+    if result != 0.0 && shown(lhs) == shown(rhs) {
+        0.0
+    } else {
+        result
     }
 }
 
