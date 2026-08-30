@@ -7,6 +7,9 @@
 //!   --children <n>   contained children to show per node, default 0
 //!   --seeds <n>      how many hits to expand from, default 5
 //!   --lexical        skip the embedding model and search by word only
+//!   --passage        render the context as a passage for an agent, rather
+//!                    than as a tree for a person
+//!   --chars <n>      ceiling on the passage, in characters, default 8000
 //!
 //! ```sh
 //! cargo run --release -p eg-graph --example corpus -- index private/book.xlsb
@@ -26,7 +29,7 @@ use std::time::Instant;
 use eg_graph::store::Corpus;
 use eg_index::vector::VectorIndex;
 use eg_index::{fuse, Embedder, Hit, SearchOptions, TextIndex};
-use eg_retrieve::{expand, ExpandOptions, Role, WorkbookContext};
+use eg_retrieve::{expand, render, ExpandOptions, RenderOptions, Role, WorkbookContext};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -38,6 +41,8 @@ fn main() {
     let mut opts = ExpandOptions::default();
     let mut seeds = 5usize;
     let mut lexical_only = false;
+    let mut passage = false;
+    let mut render_opts = RenderOptions::default();
     let mut words: Vec<String> = Vec::new();
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
@@ -54,6 +59,8 @@ fn main() {
             "--children" => opts.children = number("--children"),
             "--seeds" => seeds = number("--seeds").max(1),
             "--lexical" => lexical_only = true,
+            "--passage" => passage = true,
+            "--chars" => render_opts.max_chars = number("--chars").max(1),
             _ => words.push(arg),
         }
     }
@@ -115,6 +122,26 @@ fn main() {
         }
     };
     let expand_time = expanding.elapsed();
+
+    if passage {
+        let rendering = Instant::now();
+        let rendered = render(&found, &render_opts);
+        let render_time = rendering.elapsed();
+        print!("{}", rendered.text);
+        println!(
+            "\n---\n{} node(s) into {} characters in {:.2}ms, {} citation(s){}",
+            found.total_nodes(),
+            rendered.text.len(),
+            render_time.as_secs_f64() * 1000.0,
+            rendered.citations.len(),
+            if rendered.omitted > 0 {
+                format!(", {} omitted to fit", rendered.omitted)
+            } else {
+                String::new()
+            }
+        );
+        return;
+    }
 
     println!("{query:?}");
     println!(

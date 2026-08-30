@@ -27,8 +27,10 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+pub mod context;
 pub mod expand;
 
+pub use context::{render, RenderOptions, Rendered};
 pub use expand::{
     expand, ExpandOptions, RetrieveError, Retrieved, RetrievedNode, Role, WorkbookContext,
 };
