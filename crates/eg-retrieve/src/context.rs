@@ -74,18 +74,24 @@ pub struct Rendered {
 /// Render an expansion.
 pub fn render(found: &Retrieved, opts: &RenderOptions) -> Rendered {
     let mut out = Rendered::default();
+    // Counted rather than measured off the string: `String::len` is bytes, the
+    // ceiling is documented in characters, and a workbook with non-ASCII sheet
+    // names would quietly get a smaller allowance than it asked for.
+    let mut chars = 0usize;
+    let mut wrote_an_entry = false;
 
     for hash in &found.missing_workbooks {
-        let _ = writeln!(
-            out.text,
+        let notice = format!(
             "A result matched workbook {} which is no longer in the corpus; \
-             its context is missing. Reindex to recover it.\n",
+             its context is missing. Reindex to recover it.\n\n",
             hash.chars().take(8).collect::<String>()
         );
+        chars += notice.chars().count();
+        out.text.push_str(&notice);
     }
 
     for workbook in &found.workbooks {
-        render_workbook(workbook, opts, &mut out);
+        render_workbook(workbook, opts, &mut out, &mut chars, &mut wrote_an_entry);
     }
 
     if out.omitted > 0 {
@@ -106,12 +112,21 @@ struct Relation {
     kind: EdgeKind,
 }
 
-fn render_workbook(workbook: &WorkbookContext, opts: &RenderOptions, out: &mut Rendered) {
+fn render_workbook(
+    workbook: &WorkbookContext,
+    opts: &RenderOptions,
+    out: &mut Rendered,
+    chars: &mut usize,
+    wrote_an_entry: &mut bool,
+) {
     // Seeds first and in rank order, then everything else in the order the walk
-    // found it, which is heaviest-edge first. So the numbering itself carries
+    // found it, which is nearest-then-heaviest. So the numbering itself carries
     // the ranking, and an agent reading top-down reads most-relevant-first.
     let mut order: Vec<&RetrievedNode> = workbook.nodes.iter().filter(|n| n.is_seed()).collect();
     order.extend(workbook.nodes.iter().filter(|n| !n.is_seed()));
+    if order.is_empty() {
+        return;
+    }
 
     // Node index in the graph -> position in this passage, one-based.
     let numbers: BTreeMap<u32, usize> = order
@@ -119,83 +134,125 @@ fn render_workbook(workbook: &WorkbookContext, opts: &RenderOptions, out: &mut R
         .enumerate()
         .map(|(i, n)| (n.node, i + 1))
         .collect();
-
     let (reads, read_by) = relations(workbook, &numbers);
-
-    let _ = writeln!(out.text, "# {}", workbook.path);
-    if workbook.truncated {
-        let _ = writeln!(
-            out.text,
-            "\nThe walk hit its budget: this is part of the context around the \
-             match, not all of it."
-        );
-    }
-    let _ = writeln!(
-        out.text,
-        "\n{} node(s). A `*` marks something the search matched; the rest were \
-         reached from it. Every range below is a live location in this \
-         workbook, not a value.\n",
-        order.len()
-    );
 
     // Numbers line up, so a column of them reads as a column.
     let pad = order.len().to_string().len();
     let indent = " ".repeat(pad + 5);
 
-    for (i, node) in order.iter().enumerate() {
-        let number = i + 1;
-        let mut entry = String::new();
-
-        let _ = writeln!(
-            entry,
-            "[{number}]{:width$}{} {} {}{}",
-            "",
-            if node.is_seed() { "*" } else { " " },
-            node.kind.as_str(),
-            quoted(&node.label),
-            node.a1
-                .as_deref()
-                .map(|a1| format!("   {a1}"))
-                .unwrap_or_default(),
-            width = pad - number.to_string().len() + 1
-        );
-
-        // The workbook root is the heading above all of this, so repeating it
-        // on every line costs a line's width per node and says nothing.
-        let path: Vec<&str> = workbook
-            .ancestry(node.node)
-            .into_iter()
-            .filter(|n| n.kind != NodeKind::Workbook)
-            .map(|n| n.label.as_str())
-            .collect();
-        if !path.is_empty() {
-            let _ = writeln!(entry, "{indent}in: {}", path.join(" > "));
-        }
-        if let Some(line) = relation_line("reads", reads.get(&number), opts) {
-            let _ = writeln!(entry, "{indent}{line}");
-        }
-        if let Some(line) = relation_line("read by", read_by.get(&number), opts) {
-            let _ = writeln!(entry, "{indent}{line}");
-        }
-
-        // Whole entries are dropped, never half of one. A passage cut mid-way
-        // through a citation is a passage that cites a range that does not
-        // exist.
-        //
-        // The first entry always goes in, whatever the budget. A preamble with
-        // no nodes under it is not a smaller answer, it is no answer, and a
-        // caller who set the ceiling too low should get the best hit and a
-        // count of what would not fit.
-        if i > 0 && out.text.len() + entry.len() > opts.max_chars {
-            out.omitted += order.len() - i;
+    // How many entries fit, decided before any of them is written. Relations
+    // are then rendered against that count, so a surviving entry can never
+    // point at a number the passage does not list — the whole reason to know
+    // the cut in advance.
+    let entry = |i: usize, upto: usize| -> String {
+        build_entry(
+            workbook, &order, i, upto, &reads, &read_by, opts, pad, &indent,
+        )
+    };
+    let heading = self::heading(workbook, order.len());
+    let mut fits = 0usize;
+    // Entries are measured with every relation present, which is the largest
+    // they can be; filtering them afterwards only shrinks the passage.
+    let mut used = *chars + heading.chars().count();
+    for i in 0..order.len() {
+        let size = entry(i, order.len()).chars().count();
+        // The very first entry of the whole passage always goes in. A preamble
+        // with no nodes under it is not a smaller answer, it is no answer.
+        let unconditional = !*wrote_an_entry && i == 0;
+        if !unconditional && used + size > opts.max_chars {
             break;
         }
-        out.text.push_str(&entry);
+        used += size;
+        fits += 1;
+    }
+    if fits == 0 {
+        return;
+    }
+
+    out.text.push_str(&heading);
+    *chars += heading.chars().count();
+    for (i, node) in order.iter().enumerate().take(fits) {
+        let text = entry(i, fits);
+        *chars += text.chars().count();
+        out.text.push_str(&text);
+        *wrote_an_entry = true;
         if let Some(a1) = &node.a1 {
             out.citations.push(a1.clone());
         }
     }
+    out.omitted += order.len() - fits;
     out.text.push('\n');
+    *chars += 1;
+}
+
+fn heading(workbook: &WorkbookContext, nodes: usize) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# {}", workbook.path);
+    if workbook.truncated {
+        let _ = writeln!(
+            out,
+            "\nThe walk hit its budget: this is part of the context around the \
+             match, not all of it."
+        );
+    }
+    let _ = writeln!(
+        out,
+        "\n{nodes} node(s). A `*` marks something the search matched; the rest \
+         were reached from it. Every range below is a live location in this \
+         workbook, not a value.\n"
+    );
+    out
+}
+
+/// One entry, with its relations limited to entries numbered `upto` or lower.
+#[allow(clippy::too_many_arguments)]
+fn build_entry(
+    workbook: &WorkbookContext,
+    order: &[&RetrievedNode],
+    i: usize,
+    upto: usize,
+    reads: &BTreeMap<usize, Vec<Relation>>,
+    read_by: &BTreeMap<usize, Vec<Relation>>,
+    opts: &RenderOptions,
+    pad: usize,
+    indent: &str,
+) -> String {
+    let node = order[i];
+    let number = i + 1;
+    let mut entry = String::new();
+
+    let _ = writeln!(
+        entry,
+        "[{number}]{:width$}{} {} {}{}",
+        "",
+        if node.is_seed() { "*" } else { " " },
+        node.kind.as_str(),
+        quoted(&node.label, node.a1.as_deref()),
+        node.a1
+            .as_deref()
+            .map(|a1| format!("   {a1}"))
+            .unwrap_or_default(),
+        width = pad - number.to_string().len() + 1
+    );
+
+    // The workbook root is the heading above all of this, so repeating it on
+    // every line costs a line's width per node and says nothing.
+    let path: Vec<&str> = workbook
+        .ancestry(node.node)
+        .into_iter()
+        .filter(|n| n.kind != NodeKind::Workbook)
+        .map(|n| n.label.as_str())
+        .collect();
+    if !path.is_empty() {
+        let _ = writeln!(entry, "{indent}in: {}", path.join(" > "));
+    }
+    if let Some(line) = relation_line("reads", reads.get(&number), upto, opts) {
+        let _ = writeln!(entry, "{indent}{line}");
+    }
+    if let Some(line) = relation_line("read by", read_by.get(&number), upto, opts) {
+        let _ = writeln!(entry, "{indent}{line}");
+    }
+    entry
 }
 
 /// Both directions of every dependency the expansion recorded, by passage
@@ -252,13 +309,19 @@ fn relations(
     (reads, read_by)
 }
 
-fn relation_line(verb: &str, list: Option<&Vec<Relation>>, opts: &RenderOptions) -> Option<String> {
+fn relation_line(
+    verb: &str,
+    list: Option<&Vec<Relation>>,
+    upto: usize,
+    opts: &RenderOptions,
+) -> Option<String> {
     let list = list?;
-    if list.is_empty() {
-        return None;
-    }
     let parts: Vec<String> = list
         .iter()
+        // A relation to an entry the ceiling cut is dropped rather than
+        // printed. A dangling `[37]` is worse than a missing one: the agent
+        // will cite it.
+        .filter(|r| r.other <= upto)
         .map(|r| {
             if opts.weights {
                 format!(
@@ -272,6 +335,9 @@ fn relation_line(verb: &str, list: Option<&Vec<Relation>>, opts: &RenderOptions)
             }
         })
         .collect();
+    if parts.is_empty() {
+        return None;
+    }
     Some(format!("{verb}: {}", parts.join(", ")))
 }
 
@@ -285,24 +351,30 @@ fn across(kind: EdgeKind) -> &'static str {
     }
 }
 
-/// A label in quotes, unless it is a bare A1 range, which is already the
+/// A label in quotes, unless it is the node's own range, which is already the
 /// citation on the same line and reads as noise repeated.
-fn quoted(label: &str) -> String {
+///
+/// Compared against the citation rather than guessed at from the shape. A
+/// header reading `FY2024` is a perfectly good A1 reference — column FY, row
+/// 2024 — so no test on the string can tell a range from a name, and the
+/// version that tried blanked `Q1`, `H2` and `2024` off their own nodes.
+fn quoted(label: &str, a1: Option<&str>) -> String {
     if label.is_empty() {
         return String::new();
     }
-    if looks_like_a_range(label) {
+    if is_the_citation(label, a1) {
         return String::new();
     }
     format!("{label:?}")
 }
 
-fn looks_like_a_range(label: &str) -> bool {
-    !label.is_empty()
-        && label
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == ':' || c == '$')
-        && label.chars().any(|c| c.is_ascii_digit())
+/// Whether the label is exactly the local part of the citation beside it.
+fn is_the_citation(label: &str, a1: Option<&str>) -> bool {
+    let Some(a1) = a1 else { return false };
+    match a1.rsplit_once('!') {
+        Some((_, local)) => local == label,
+        None => a1 == label,
+    }
 }
 
 /// 115003 reads as a different number at a glance than 115,003 does, and the
@@ -333,11 +405,23 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_range_is_not_repeated_as_a_label() {
-        assert!(looks_like_a_range("A1:BM115004"));
-        assert!(looks_like_a_range("B7"));
-        assert!(!looks_like_a_range("RATES"));
-        assert!(!looks_like_a_range("Total Debt"));
-        assert!(!looks_like_a_range(""));
+    fn a_label_that_is_its_own_citation_is_not_printed_twice() {
+        assert!(is_the_citation("A1:BM115004", Some("Sheet1!A1:BM115004")));
+        assert!(is_the_citation("B7", Some("\'Q3 Sales\'!B7")));
+        assert!(!is_the_citation("RATES", Some("LOOKUP!AE53:AG89")));
+        assert!(!is_the_citation("A1:B2", None));
+    }
+
+    #[test]
+    fn a_header_shaped_like_a_reference_keeps_its_name() {
+        // Column FY, row 2024 is a real address, so no test on the string can
+        // tell this from a range. Only the citation beside it can.
+        for header in ["FY2024", "Q1", "H2", "2024"] {
+            assert_eq!(
+                quoted(header, Some("Sales!C2:C99")),
+                format!("{header:?}"),
+                "{header} lost its name"
+            );
+        }
     }
 }

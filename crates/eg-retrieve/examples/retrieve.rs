@@ -255,7 +255,7 @@ fn show(workbook: &WorkbookContext) {
             node.kind.as_str(),
             node.label,
             node.a1.as_deref().unwrap_or_default(),
-            relation(node).unwrap_or_else(|| node.role.as_str().to_string()),
+            from_its_own_side(node),
         );
     }
 }
@@ -273,6 +273,23 @@ fn related_to(workbook: &WorkbookContext, of: u32) -> Vec<&eg_retrieve::Retrieve
         _ => std::cmp::Reverse(0),
     });
     out
+}
+
+/// How a node relates to the one that pulled it in, phrased from the node's
+/// own side.
+///
+/// `relation` reads correctly where the verb comes before its target — "reads:
+/// X" under the node doing the reading. Here the target comes first, so the
+/// same words would assert the opposite: a `Role::Input` means the *origin*
+/// reads this node, and printing "(reads origin)" beside it says the reverse.
+fn from_its_own_side(node: &eg_retrieve::RetrievedNode) -> String {
+    match &node.role {
+        Role::Input { .. } => "read by".to_string(),
+        Role::Dependent { .. } => "reads".to_string(),
+        Role::Child { .. } => "within".to_string(),
+        Role::Ancestor { .. } => "contains".to_string(),
+        Role::Seed => "matched".to_string(),
+    }
 }
 
 /// How a node relates to the one that pulled it in, in words.

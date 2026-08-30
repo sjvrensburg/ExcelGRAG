@@ -203,6 +203,106 @@ fn a_relation_survives_only_if_both_its_ends_do() {
 }
 
 #[test]
+fn a_cut_passage_drops_the_relations_that_point_into_what_was_cut() {
+    // The failure this guards is a rendered entry reading `reads: [37]` when
+    // the passage stops at [12]. An agent will cite [37].
+    let found = retrieved(
+        "dropped",
+        "Net",
+        NodeKind::Column,
+        &ExpandOptions::default(),
+    );
+    let full = render(&found, &RenderOptions::default());
+    assert!(
+        full.text.contains("reads") || full.text.contains("read by"),
+        "the fixture must have relations for this test to mean anything"
+    );
+
+    for ceiling in [200, 260, 320, 400, 500, 700] {
+        let rendered = render(
+            &found,
+            &RenderOptions {
+                max_chars: ceiling,
+                ..Default::default()
+            },
+        );
+        let highest = entries(&rendered.text).len();
+        for n in referenced(&rendered.text) {
+            assert!(
+                n <= highest,
+                "at a ceiling of {ceiling} the passage refers to [{n}] and \
+                 lists only {highest} entries:\n{}",
+                rendered.text
+            );
+        }
+    }
+}
+
+#[test]
+fn the_ceiling_holds_across_several_workbooks() {
+    // The budget used to be applied only to entries, and only after the first
+    // of each workbook — so ten workbooks meant ten headings, ten preambles and
+    // ten unconditional entries, whatever the caller asked for.
+    let one = retrieved("many", "Net", NodeKind::Column, &ExpandOptions::default());
+    let mut many = Retrieved::default();
+    for i in 0..10 {
+        let mut copy = one.workbooks[0].clone();
+        copy.content_hash = format!("hash-{i}");
+        copy.path = format!("book{i}.xlsx");
+        many.workbooks.push(copy);
+    }
+
+    let ceiling = 1_200;
+    let rendered = render(
+        &many,
+        &RenderOptions {
+            max_chars: ceiling,
+            ..Default::default()
+        },
+    );
+
+    // The trailing "left out to fit" notice is written after the ceiling on
+    // purpose — a passage has to be able to say it was cut.
+    let body = rendered
+        .text
+        .split("further node(s) were retrieved")
+        .next()
+        .unwrap();
+    assert!(
+        body.chars().count() <= ceiling,
+        "asked for {ceiling} characters and got {}",
+        body.chars().count()
+    );
+    assert!(rendered.omitted > 0);
+    assert!(!rendered.text.is_empty());
+}
+
+#[test]
+fn the_ceiling_counts_characters_and_not_bytes() {
+    let one = retrieved("utf8", "Net", NodeKind::Column, &ExpandOptions::default());
+    let mut wide = Retrieved::default();
+    let mut copy = one.workbooks[0].clone();
+    // A sheet name in a script where a character is three bytes.
+    copy.path = "決算書_2024.xlsx".into();
+    wide.workbooks.push(copy);
+
+    let rendered = render(
+        &wide,
+        &RenderOptions {
+            max_chars: 400,
+            ..Default::default()
+        },
+    );
+    let body = rendered
+        .text
+        .split("further node(s) were retrieved")
+        .next()
+        .unwrap();
+    assert!(body.chars().count() <= 400 || entries(&rendered.text).len() == 1);
+    assert!(rendered.text.contains("決算書"));
+}
+
+#[test]
 fn a_cut_passage_says_it_was_cut_and_by_how_much() {
     let found = retrieved("cut", "Net", NodeKind::Column, &ExpandOptions::default());
     let rendered = render(
@@ -243,6 +343,39 @@ fn the_citations_handed_back_are_the_ones_in_the_text() {
     for citation in &rendered.citations {
         assert!(known.contains(&citation.as_str()));
     }
+}
+
+#[test]
+fn a_header_shaped_like_a_cell_reference_keeps_its_name() {
+    // `FY2024` is column FY row 2024, so no test on the string can tell a
+    // header from a range. Blanking it left the node with no name at all.
+    let found = retrieved("names", "Net", NodeKind::Column, &ExpandOptions::default());
+    let mut renamed = found.clone();
+    renamed.workbooks[0].nodes[0].label = "FY2024".into();
+    renamed.workbooks[0].nodes[0].a1 = Some("Sales!C2:C99".into());
+
+    let rendered = render(&renamed, &RenderOptions::default());
+    assert!(
+        rendered.text.contains("FY2024"),
+        "the header was blanked:\n{}",
+        rendered.text
+    );
+}
+
+#[test]
+fn a_label_that_is_just_its_own_range_is_not_printed_twice() {
+    let found = retrieved("dupe", "Net", NodeKind::Column, &ExpandOptions::default());
+    let mut same = found.clone();
+    same.workbooks[0].nodes[0].label = "C2:C99".into();
+    same.workbooks[0].nodes[0].a1 = Some("Sales!C2:C99".into());
+
+    let rendered = render(&same, &RenderOptions::default());
+    let first = rendered.text.lines().find(|l| l.starts_with('[')).unwrap();
+    assert_eq!(
+        first.matches("C2:C99").count(),
+        1,
+        "the range is printed as both label and citation: {first}"
+    );
 }
 
 #[test]
