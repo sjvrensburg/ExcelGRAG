@@ -34,69 +34,90 @@ fn values_agree(a: &CellValue, b: &CellValue) -> bool {
     }
 }
 
+/// Compare two loads of the same logical workbook, sheet by sheet.
+///
+/// Sheets are matched by name, not position: calamine reports XLSB sheets in a
+/// different order than XLSX for the same workbook, so comparing positionally
+/// would report spurious mismatches. Only sheets present in both are compared,
+/// because the vendored fixtures do not all carry the same sheet set.
+fn assert_agree(label: &str, a: &eg_ingest::Loaded, b: &eg_ingest::Loaded) {
+    let mut compared = 0usize;
+    let mut mismatches = Vec::new();
+
+    for sheet_a in &a.workbook.sheets {
+        let Some(sheet_b) = b.workbook.sheet_by_name(&sheet_a.name) else {
+            continue;
+        };
+        compared += 1;
+
+        let mut coords: Vec<(u32, u16)> = sheet_a
+            .iter()
+            .chain(sheet_b.iter())
+            .map(|(r, _)| (r.row, r.col))
+            .collect();
+        coords.sort_unstable();
+        coords.dedup();
+
+        for (row, col) in coords {
+            let a1 = eg_model::CellRef::new(sheet_a.id, row, col).to_a1();
+
+            let va = sheet_a.value(row, col);
+            let vb = sheet_b.value(row, col);
+            if !values_agree(&va, &vb) {
+                mismatches.push(format!("{}!{a1} value: {va:?} vs {vb:?}", sheet_a.name));
+            }
+
+            // Formula parity is the load-bearing assertion. The binary formats
+            // store formulas as token streams, and both losing them and
+            // mis-decoding an operator are silent failures that leave the
+            // cached values looking perfectly correct.
+            let fa = sheet_a.get(row, col).and_then(|c| c.formula.as_deref());
+            let fb = sheet_b.get(row, col).and_then(|c| c.formula.as_deref());
+            if fa != fb {
+                mismatches.push(format!("{}!{a1} formula: {fa:?} vs {fb:?}", sheet_a.name));
+            }
+        }
+    }
+
+    assert!(compared > 0, "{label}: no sheets in common to compare");
+    assert!(
+        mismatches.is_empty(),
+        "{label}: {} mismatches across {compared} sheets:\n  {}",
+        mismatches.len(),
+        mismatches.join("\n  ")
+    );
+}
+
 #[test]
-fn xlsb_and_xlsx_agree_on_values_and_formulas() {
+fn all_formats_agree_on_values_and_formulas() {
+    // issues.* exists in all three formats; the other two pair xlsx with xlsb.
     for base in ["issues", "any_sheets", "issue_419"] {
         let xlsx = load(vendor(&format!("{base}.xlsx"))).expect("load xlsx");
         let xlsb = load(vendor(&format!("{base}.xlsb"))).expect("load xlsb");
+        assert_agree(&format!("{base}: xlsx vs xlsb"), &xlsx, &xlsb);
 
-        let names_a: Vec<&str> = xlsx.workbook.sheets.iter().map(|s| s.name.as_str()).collect();
-        let mut sorted_a = names_a.clone();
-        let mut sorted_b: Vec<&str> = xlsb.workbook.sheets.iter().map(|s| s.name.as_str()).collect();
-        sorted_a.sort_unstable();
-        sorted_b.sort_unstable();
-        assert_eq!(sorted_a, sorted_b, "{base}: sheet sets differ");
-
-        // Sheets are matched by name, not position: calamine reports XLSB sheets
-        // in a different order than XLSX for the same workbook, so a positional
-        // comparison would report spurious mismatches.
-        for sheet_a in &xlsx.workbook.sheets {
-            let sheet_b = xlsb
-                .workbook
-                .sheet_by_name(&sheet_a.name)
-                .expect("matched by name above");
-
-            let mut coords: Vec<(u32, u16)> = sheet_a
-                .iter()
-                .chain(sheet_b.iter())
-                .map(|(r, _)| (r.row, r.col))
-                .collect();
-            coords.sort_unstable();
-            coords.dedup();
-
-            let mut mismatches = Vec::new();
-            for (row, col) in coords {
-                let a1 = eg_model::CellRef::new(sheet_a.id, row, col).to_a1();
-
-                let va = sheet_a.value(row, col);
-                let vb = sheet_b.value(row, col);
-                if !values_agree(&va, &vb) {
-                    mismatches.push(format!(
-                        "{}!{a1} value: xlsx={va:?} xlsb={vb:?}",
-                        sheet_a.name
-                    ));
-                }
-
-                // Formula parity is the load-bearing assertion: XLSB stores
-                // formulas as binary RPN tokens, and losing them would silently
-                // gut the dependency graph on exactly the large files that
-                // motivated choosing XLSB support in the first place.
-                let fa = sheet_a.get(row, col).and_then(|c| c.formula.as_deref());
-                let fb = sheet_b.get(row, col).and_then(|c| c.formula.as_deref());
-                if fa != fb {
-                    mismatches.push(format!(
-                        "{}!{a1} formula: xlsx={fa:?} xlsb={fb:?}",
-                        sheet_a.name
-                    ));
-                }
-            }
-            assert!(
-                mismatches.is_empty(),
-                "{base}: {} mismatches:\n  {}",
-                mismatches.len(),
-                mismatches.join("\n  ")
-            );
+        let xls_path = vendor(&format!("{base}.xls"));
+        if xls_path.exists() {
+            let xls = load(&xls_path).expect("load xls");
+            assert_agree(&format!("{base}: xlsx vs xls"), &xlsx, &xls);
         }
+    }
+}
+
+#[test]
+fn binary_formats_decode_comparison_operators_correctly() {
+    // The BIFF token tables had PtgGe and PtgGt transposed, inverting every
+    // comparison read from .xlsb and .xls. `datatypes!A4` is the guard: the
+    // XLSX twin stores the authoritative text as XML, so it cannot drift.
+    for ext in ["xlsx", "xlsb", "xls"] {
+        let loaded = load(vendor(&format!("issues.{ext}"))).expect("load");
+        let sheet = loaded.workbook.sheet_by_name("datatypes").expect("datatypes");
+        let cell = sheet.get(3, 0).expect("datatypes!A4");
+        assert_eq!(
+            cell.formula.as_deref(),
+            Some("A1>A2"),
+            "{ext}: A4 must decode as a strict greater-than"
+        );
     }
 }
 

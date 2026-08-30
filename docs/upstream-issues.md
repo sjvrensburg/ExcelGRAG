@@ -5,8 +5,8 @@ building `eg-ingest`.
 
 **Status:** issues 2 and 3 are fixed in a fork at `../calamine`, branch
 `xlsb-shared-formulas`, wired in through `[patch.crates-io]` in the workspace
-`Cargo.toml`. The fix is ready to upstream as a pull request. Issue 1 was our
-own bug and is fixed here.
+`Cargo.toml`. Both are fixed for `.xlsb` and `.xls`, in three commits — one per
+format plus a performance fix — ready to upstream as a pull request. Issue 1 was our own bug and is fixed here.
 
 All three were found by the format-parity test — reading the same logical
 workbook as `.xlsx` and as `.xlsb` and requiring identical values and formulas —
@@ -63,20 +63,22 @@ same workbook yields `A1>=A2`.
 binary workbook is inverted at the boundary — `>=` becomes `>` and vice versa.
 Any threshold logic built on it is wrong, with no error raised.
 
-**Fixed** in the fork for `.xlsb`.
+**Fixed** in the fork, for both `.xlsb` and `.xls`.
 
-`.xls` carries the same transposed table in `src/xls.rs` and is left alone in
-the fork, to keep the pull request to a single format. It is handled here
-instead by `fix_binary_comparison_operators` in
-`crates/eg-ingest/src/convert.rs`, which is applied to `.xls` only — applying it
-to `.xlsb` as well would transpose the operators straight back, a mistake the
-parity test caught immediately.
+ExcelGRAG previously carried a local `fix_binary_comparison_operators`
+workaround. It has been removed: with the fork fixing the decoder at source,
+applying the swap on top would transpose the operators straight back — a mistake
+the parity test caught the moment the fork was wired in.
+
+`binary_formats_decode_comparison_operators_correctly` in `parity.rs` guards it
+now, asserting `datatypes!A4` decodes as `A1>A2` in all three formats. The XLSX
+twin stores that text as XML, so the expected value cannot drift.
 
 ---
 
 ## 3. `PtgExp` is discarded, losing shared and array formulas — **blocker**
 
-**Affects:** `.xlsb` and `.xls`.
+**Affects:** `.xlsb` and `.xls`. Both are fixed in the fork.
 
 `parse_formula` treats `PtgExp` (0x01) as a no-op:
 
@@ -178,3 +180,52 @@ adjacent member pairs compared:          4,779,791
 All 276 of calamine's own tests still pass, and the fork adds fixture-free unit
 tests for the N-class reference decoding, anchor shifting, the operator
 assignments, and `PtgExp` recognition.
+
+---
+
+## The same defect in `.xls`
+
+`src/xls.rs` had both problems independently, and they are fixed in a second
+commit on the same branch.
+
+The BIFF8/BIFF5 shape differs in three ways worth recording, since each one
+produced a wrong answer before it was pinned down:
+
+- Definitions live in `ShrFmla` (0x04BC) and `Array` (0x0221) records, whose
+  range header is a **`RefU`** — `rwFirst(2) rwLast(2) colFirst(1) colLast(1)` —
+  with **single-byte columns**. Reading it as the wider `Ref8U` yields plausible
+  rows and nonsense columns, so nothing matches and every member silently stays
+  unresolved. The formula begins at offset 8 for `ShrFmla` and 12 for `Array`.
+- `PtgRefN` is 4 bytes in BIFF8 but 3 before it, and the two layouts **swap the
+  relative-flag bits**: BIFF8 uses `fColRel = 0x8000` and `fRwRel = 0x4000` on
+  the column field, while BIFF2-5 uses `fRwRel = 0x8000` and `fColRel = 0x4000`
+  on the row field.
+- `parse_dimensions` cannot be reused for these ranges. It accepts only the
+  10- and 14-byte `Dimensions` record and returns an error otherwise — an error
+  that propagates out of the sheet read and drops every formula on the sheet.
+
+### Verification
+
+Across calamine's own `.xls` fixtures, formulas recovered went from **496 to
+869**, with **none of the previously decoded formulas lost** and exactly two
+changed — both the operator fix, both now agreeing with the `issues.xlsx` twin.
+
+Of the 373 newly resolved cells, the vertically adjacent ones advance by exactly
+one row in 303 of 310 pairs. The seven exceptions are genuine group boundaries
+where the formula changes shape; the long runs are uniform throughout, which is
+what correct decoding looks like.
+
+---
+
+## Performance note
+
+Resolving members needs care about how the definition is found. Excel splits a
+filled-down column into groups of about 64 rows, so a large sheet holds
+thousands of definitions and millions of members; scanning every definition per
+member made the sample workbook take **43.7s** to load, against 7.9s when
+shared formulas were not resolved at all.
+
+Definitions are now indexed by column and located by binary search, which is
+sound because groups within a column cannot overlap. That brings the same
+workbook to **10.1s** while decoding 3.4x as many formulas — with identical
+output.

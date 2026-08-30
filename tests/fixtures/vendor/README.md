@@ -10,5 +10,7 @@ Rust or Python library. Hand-rolling one for tests would encode our own reading
 of the binary format rather than testing against what Excel actually emits, so
 genuine Excel output is the only trustworthy input.
 
-Each basename here exists as both `.xlsx` and `.xlsb`, which is what makes them
-usable as format-parity pairs.
+Each basename here exists as both `.xlsx` and `.xlsb`, and `issues` exists as
+`.xls` as well, which is what makes them usable as format-parity fixtures. The
+`.xlsx` member of each set is the reference: it stores values and formulas as
+XML text, so it is the one whose expected content cannot silently drift.

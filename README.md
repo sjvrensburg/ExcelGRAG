@@ -30,9 +30,9 @@ are not yet built.
 ## The calamine fork
 
 `eg-ingest` depends on a forked calamine at `../calamine`, wired in via
-`[patch.crates-io]`. It fixes two silent XLSB bugs — dropped shared and array
-formulas, and transposed `>=` / `>` — without which 70% of the formulas in a
-real workbook go missing. Clone it alongside this repo:
+`[patch.crates-io]`. It fixes two silent bugs in both binary formats —
+dropped shared and array formulas, and transposed `>=` / `>` — without which 70%
+of the formulas in a real XLSB workbook go missing. Clone it alongside this repo:
 
 ```sh
 git clone https://github.com/tafia/calamine.git ../calamine

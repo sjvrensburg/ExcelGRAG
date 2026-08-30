@@ -33,7 +33,7 @@ use eg_model::{
     Cell, DefinedName, ExcelTable, RangeRef, Sheet, SheetId, Visibility, Workbook, WorkbookFormat,
 };
 
-pub use convert::{convert_error, convert_value, fix_binary_comparison_operators};
+pub use convert::{convert_error, convert_value};
 
 /// Errors raised while loading a workbook.
 #[derive(Debug, thiserror::Error)]
@@ -160,10 +160,6 @@ pub fn load_with(path: impl AsRef<Path>, opts: &LoadOptions) -> Result<Loaded, I
 
     let mut warnings = Vec::new();
     let capabilities = Capabilities::for_format(format);
-    // `.xls` still needs the `>` / `>=` transposition repaired in this process.
-    // `.xlsb` does not: our calamine fork fixes it at the source, and applying
-    // the swap on top of that would invert the operators right back again.
-    let needs_operator_fix = matches!(format, WorkbookFormat::Xls);
 
     let metadata: Vec<(String, Visibility)> = sheets
         .sheets_metadata()
@@ -245,8 +241,7 @@ pub fn load_with(path: impl AsRef<Path>, opts: &LoadOptions) -> Result<Loaded, I
 
         if opts.read_formulas {
             match sheets.worksheet_formula(name) {
-                // See `needs_operator_fix` above.
-                Ok(formulas) => attach_formulas(&mut sheet, &formulas, needs_operator_fix),
+                Ok(formulas) => attach_formulas(&mut sheet, &formulas),
                 Err(e) => warnings.push(format!("no formulas for sheet {name:?}: {e}")),
             }
         }
@@ -288,7 +283,7 @@ pub fn load_with(path: impl AsRef<Path>, opts: &LoadOptions) -> Result<Loaded, I
 /// blank — a formula evaluating to the empty string, for instance. Those cells
 /// are created here rather than dropped, because a blank-valued formula is still
 /// a node in the dependency graph.
-fn attach_formulas(sheet: &mut Sheet, formulas: &calamine::Range<String>, fix_operators: bool) {
+fn attach_formulas(sheet: &mut Sheet, formulas: &calamine::Range<String>) {
     // As with values, these coordinates are relative to the formula range's own
     // origin, which is generally *not* the same as the value range's origin.
     let (row0, col0) = formulas.start().unwrap_or((0, 0));
@@ -303,12 +298,7 @@ fn attach_formulas(sheet: &mut Sheet, formulas: &calamine::Range<String>, fix_op
             continue;
         };
         // calamine strips the leading '='; normalise in case a backend keeps it.
-        let text = text.strip_prefix('=').unwrap_or(text);
-        let formula = if fix_operators {
-            convert::fix_binary_comparison_operators(text)
-        } else {
-            text.to_string()
-        };
+        let formula = text.strip_prefix('=').unwrap_or(text).to_string();
         match sheet.get(row, col) {
             Some(existing) => {
                 let mut cell = existing.clone();
