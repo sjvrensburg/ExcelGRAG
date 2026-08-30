@@ -124,7 +124,7 @@ mod tests {
 /// Repair `>` / `>=` in formulas decoded from the binary formats.
 ///
 /// calamine's BIFF token tables map the two greater-than operators the wrong way
-/// round. The spec assigns `PtgGe = 0x0C` and `PtgGt = 0x0D`, but calamine
+/// round in `src/xls.rs`. The spec assigns `PtgGe = 0x0C` and `PtgGt = 0x0D`, but calamine
 /// renders `0x0C` as `>` and `0x0D` as `>=`, so every `>` it emits from an
 /// `.xlsb` or `.xls` file actually means `>=`, and vice versa. The two are
 /// exactly transposed, so swapping them back is a complete fix rather than a
@@ -134,8 +134,9 @@ mod tests {
 /// The swap is token-aware: `<>` and `<=` must survive untouched, and text
 /// inside string literals or quoted sheet names is never rewritten.
 ///
-/// XLSX is unaffected — it stores formulas as text — so this is applied only to
-/// the binary formats.
+/// Applied only to `.xls`. XLSX stores formulas as text and is unaffected, and
+/// XLSB is repaired at the source by our calamine fork, so applying this to it
+/// as well would transpose the operators straight back.
 pub fn fix_binary_comparison_operators(formula: &str) -> String {
     if !formula.contains('>') {
         return formula.to_string();

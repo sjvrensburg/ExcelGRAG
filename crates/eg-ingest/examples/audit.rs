@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use eg_ingest::{load_with, LoadOptions};
-use eg_model::{Sheet, ValueKind};
+use eg_model::ValueKind;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -67,7 +67,6 @@ fn main() {
     }
 
     let mut total_formulas = 0usize;
-    let mut total_gaps = 0usize;
     let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
 
     println!();
@@ -94,9 +93,6 @@ fn main() {
                 .or_default() += 1;
         }
 
-        let gaps = shared_formula_gaps(sheet);
-        total_gaps += gaps.len();
-
         println!(
             "- {label}: {} cells, {formulas} formulas, used={}, merges={}, tables={}, visible={}",
             sheet.len(),
@@ -108,17 +104,6 @@ fn main() {
             sheet.tables.len(),
             sheet.visibility.is_visible(),
         );
-        if !gaps.is_empty() {
-            println!(
-                "    - suspected dropped shared formulas: {} (e.g. {})",
-                gaps.len(),
-                gaps.iter()
-                    .take(5)
-                    .map(String::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
     }
 
     println!();
@@ -126,48 +111,4 @@ fn main() {
     println!();
     println!("- formulas: {total_formulas}");
     println!("- value kinds: {kinds:?}");
-    println!("- suspected dropped shared formulas: {total_gaps}");
-    if total_gaps > 0 {
-        let denom = total_formulas + total_gaps;
-        println!(
-            "- estimated formula coverage: {:.1}%",
-            100.0 * total_formulas as f64 / denom.max(1) as f64
-        );
-        println!();
-        println!(
-            "  A gap is a numeric cell with no formula that sits directly below a\n  \
-             formula cell in the same column, with a numeric cell above it too.\n  \
-             In the binary formats calamine discards `PtgExp` tokens, which is how\n  \
-             Excel encodes shared formulas, so those cells lose their formula while\n  \
-             keeping their cached value. This estimate is a heuristic, not a proof."
-        );
-    }
-}
-
-/// Find cells that look like they lost a shared formula.
-///
-/// In XLSB and XLS, Excel commonly stores a run of identical column formulas as
-/// one master plus `PtgExp` back-references. calamine ignores `PtgExp`, so those
-/// cells arrive with a cached value but no formula text. The signature is a
-/// column where a formula cell is followed by numeric cells that have none.
-fn shared_formula_gaps(sheet: &Sheet) -> Vec<String> {
-    let Some(used) = sheet.used_range() else {
-        return Vec::new();
-    };
-
-    let mut gaps = Vec::new();
-    for col in used.left..=used.right {
-        let mut seen_formula_above = false;
-        for row in used.top..=used.bottom {
-            match sheet.get(row, col) {
-                Some(cell) if cell.is_formula() => seen_formula_above = true,
-                Some(cell) if seen_formula_above && cell.value.kind() == ValueKind::Number => {
-                    gaps.push(eg_model::CellRef::new(sheet.id, row, col).to_a1());
-                }
-                // A blank or text cell ends the run; the next formula starts a new one.
-                _ => seen_formula_above = false,
-            }
-        }
-    }
-    gaps
 }

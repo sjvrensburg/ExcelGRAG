@@ -160,7 +160,10 @@ pub fn load_with(path: impl AsRef<Path>, opts: &LoadOptions) -> Result<Loaded, I
 
     let mut warnings = Vec::new();
     let capabilities = Capabilities::for_format(format);
-    let needs_operator_fix = matches!(format, WorkbookFormat::Xlsb | WorkbookFormat::Xls);
+    // `.xls` still needs the `>` / `>=` transposition repaired in this process.
+    // `.xlsb` does not: our calamine fork fixes it at the source, and applying
+    // the swap on top of that would invert the operators right back again.
+    let needs_operator_fix = matches!(format, WorkbookFormat::Xls);
 
     let metadata: Vec<(String, Visibility)> = sheets
         .sheets_metadata()
@@ -242,8 +245,7 @@ pub fn load_with(path: impl AsRef<Path>, opts: &LoadOptions) -> Result<Loaded, I
 
         if opts.read_formulas {
             match sheets.worksheet_formula(name) {
-                // The BIFF formula decoder transposes `>` and `>=`, so text
-                // from the binary formats needs repairing; XLSX is unaffected.
+                // See `needs_operator_fix` above.
                 Ok(formulas) => attach_formulas(&mut sheet, &formulas, needs_operator_fix),
                 Err(e) => warnings.push(format!("no formulas for sheet {name:?}: {e}")),
             }
