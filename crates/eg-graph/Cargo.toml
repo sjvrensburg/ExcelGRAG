@@ -7,3 +7,15 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+eg-model = { workspace = true }
+eg-structure = { workspace = true }
+petgraph = { workspace = true }
+rustc-hash = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+eg-ingest = { workspace = true }
+
+[[example]]
+name = "graph"
+path = "examples/graph.rs"

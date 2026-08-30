@@ -129,12 +129,23 @@ pub fn scan_references_into(formula: &str, out: &mut Vec<ReferenceSpan>) {
                 let preceded_by_ident = start > 0 && is_ident_byte(b[start - 1]);
                 if !is_call && !preceded_by_ident {
                     if let Some(parsed) = parse_cell_token(&formula[start..end]) {
+                        // `A1:A4` is one range. Taken as two cells it would
+                        // claim to depend on the endpoints and not the middle.
+                        let (end, parsed) = match extend_to_range(formula, b, end) {
+                            Some(extended) => match parse_a1(&formula[start..extended]) {
+                                Ok(range) => (extended, range),
+                                Err(_) => (end, parsed),
+                            },
+                            None => (end, parsed),
+                        };
                         out.push(ReferenceSpan {
                             span: start..end,
                             local: start..end,
                             parsed,
                             qualified: false,
                         });
+                        i = end;
+                        continue;
                     }
                 }
                 i = end;
@@ -172,6 +183,156 @@ pub fn scan_references_into(formula: &str, out: &mut Vec<ReferenceSpan>) {
     }
 }
 
+/// A defined-name reference found in formula text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameSpan {
+    /// Byte range of the name itself, excluding any sheet qualifier.
+    pub span: Range<usize>,
+    /// The sheet that qualified it, as written, for a sheet-scoped name.
+    pub sheet_name: Option<String>,
+}
+
+impl NameSpan {
+    /// The name exactly as it was written.
+    pub fn text<'a>(&self, formula: &'a str) -> &'a str {
+        &formula[self.span.clone()]
+    }
+}
+
+/// Find every token in a formula that could name something.
+///
+/// The complement of [`scan_references`]: this returns the identifiers that
+/// scanning deliberately throws away, so a caller holding the workbook's list
+/// of defined names can decide which of them are real. It cannot decide that
+/// itself — `Tax_Rate` and `SUM` are the same shape of token, and only the
+/// workbook knows which one is defined.
+///
+/// Excluded here, because they are never a defined name:
+///
+/// - anything that parses as a cell reference, which Excel forbids as a name;
+/// - a token immediately followed by `(`, which is a function call;
+/// - text inside string literals and quoted sheet names;
+/// - the sheet part of a qualified reference, which names a sheet, not a value.
+///
+/// A structured-table reference such as `Table1[Amount]` yields `Table1`, since
+/// a table name is resolved the same way by the caller.
+pub fn scan_names(formula: &str) -> Vec<NameSpan> {
+    let mut out = Vec::new();
+    scan_names_into(formula, &mut out);
+    out
+}
+
+/// [`scan_names`] into a caller-owned buffer, which is cleared first.
+pub fn scan_names_into(formula: &str, out: &mut Vec<NameSpan>) {
+    out.clear();
+    let b = formula.as_bytes();
+    let mut i = 0;
+
+    while i < b.len() {
+        match b[i] {
+            b'"' => i = skip_quoted(b, i, b'"'),
+            // A quoted sheet name. If a reference follows, both parts are
+            // consumed; otherwise only the quoted span is, since a name cannot
+            // be quoted.
+            b'\'' => {
+                let start = i;
+                let after_name = skip_quoted(b, i, b'\'');
+                i = match reference_after_qualifier(formula, b, after_name, start) {
+                    Some((span, _, _)) => span.end,
+                    None => {
+                        // `'My Sheet'!Tax_Rate` — a sheet-scoped name.
+                        match qualified_name(formula, b, after_name) {
+                            Some(span) => {
+                                let end = span.end;
+                                let sheet = unquote_sheet_name(&formula[start..after_name]);
+                                out.push(NameSpan {
+                                    span,
+                                    sheet_name: Some(sheet),
+                                });
+                                end
+                            }
+                            None => after_name,
+                        }
+                    }
+                };
+            }
+            // An external workbook qualifier. Its contents name a workbook, and
+            // whatever follows is qualified by it, so neither is a bare name.
+            b'[' => {
+                i = match b[i..].iter().position(|&c| c == b']') {
+                    Some(p) => i + p + 1,
+                    None => i + 1,
+                };
+            }
+            c if c.is_ascii_alphabetic() || c == b'_' || c == b'\\' => {
+                let start = i;
+                let end = scan_ident(b, i);
+
+                if end < b.len() && b[end] == b'!' {
+                    let sheet = formula[start..end].to_string();
+                    i = match reference_after_qualifier(formula, b, end, start) {
+                        Some((span, _, _)) => span.end,
+                        None => match qualified_name(formula, b, end) {
+                            Some(span) => {
+                                let e = span.end;
+                                out.push(NameSpan {
+                                    span,
+                                    sheet_name: Some(sheet),
+                                });
+                                e
+                            }
+                            None => end + 1,
+                        },
+                    };
+                    continue;
+                }
+
+                let is_call = end < b.len() && b[end] == b'(';
+                let preceded_by_ident = start > 0 && is_ident_byte(b[start - 1]);
+                let is_reference = parse_cell_token(&formula[start..end]).is_some();
+                if !is_call && !preceded_by_ident && !is_reference {
+                    out.push(NameSpan {
+                        span: start..end,
+                        sheet_name: None,
+                    });
+                }
+                i = end;
+            }
+            _ => i += 1,
+        }
+    }
+}
+
+/// Strip the surrounding quotes from a sheet name, undoubling any inside it.
+fn unquote_sheet_name(written: &str) -> String {
+    match written
+        .strip_prefix('\'')
+        .and_then(|r| r.strip_suffix('\''))
+    {
+        Some(inner) => inner.replace("''", "'"),
+        None => written.to_string(),
+    }
+}
+
+/// Parse the name following a sheet qualifier whose `!` sits at `bang`.
+///
+/// Returns the name's own span. `None` when what follows is a reference, a
+/// function call, or nothing at all.
+fn qualified_name(formula: &str, b: &[u8], bang: usize) -> Option<Range<usize>> {
+    if bang >= b.len() || b[bang] != b'!' {
+        return None;
+    }
+    let start = bang + 1;
+    let end = scan_ident(b, start);
+    if end == start || (end < b.len() && b[end] == b'(') {
+        return None;
+    }
+    if parse_cell_token(&formula[start..end]).is_some() {
+        return None;
+    }
+    Some(start..end)
+}
+
 /// Consume a quoted span starting at `i`, honouring `qq` as an escaped quote.
 fn skip_quoted(b: &[u8], mut i: usize, q: u8) -> usize {
     debug_assert_eq!(b[i], q);
@@ -196,6 +357,29 @@ fn scan_ident(b: &[u8], mut i: usize) -> usize {
         i += 1;
     }
     i
+}
+
+/// Extend a reference that turns out to be the first half of a range.
+///
+/// `scan_ident` stops at the `:`, so `Rates!B2:B100` first parses as the single
+/// cell `Rates!B2`. Left there, the second endpoint is then scanned as a bare
+/// `B100` on whatever sheet the formula lives on — a reference to a real cell
+/// that the workbook never mentioned. Ranges are most of what formulas refer
+/// to, so this is not an edge case.
+///
+/// Returns the byte after the second endpoint, or `None` when what follows the
+/// colon is not a plain cell (`A1:INDEX(...)` and the like are left alone).
+fn extend_to_range(formula: &str, b: &[u8], end: usize) -> Option<usize> {
+    if end >= b.len() || b[end] != b':' {
+        return None;
+    }
+    let second_start = end + 1;
+    let second_end = scan_ident(b, second_start);
+    if second_end == second_start {
+        return None;
+    }
+    parse_cell_token(&formula[second_start..second_end])?;
+    Some(second_end)
 }
 
 /// Parse the reference that follows a sheet qualifier ending at `bang`.
@@ -223,6 +407,11 @@ fn reference_after_qualifier(
     // Validate the local part on its own before parsing the whole thing, so a
     // qualifier followed by a defined name is not mistaken for a reference.
     parse_cell_token(&formula[local_start..local_end])?;
+    // `Sheet1!A1:A4` is one reference, not `Sheet1!A1` and a stray `A4`.
+    let local_end = match extend_to_range(formula, b, local_end) {
+        Some(extended) if parse_a1(&formula[start..extended]).is_ok() => extended,
+        _ => local_end,
+    };
     let span = start..local_end;
     let parsed = parse_a1(&formula[span.clone()]).ok()?;
     Some((span, local_start..local_end, parsed))
@@ -367,7 +556,7 @@ mod tests {
     #[test]
     fn finds_plain_references() {
         assert_eq!(texts("A1+B2"), ["A1", "B2"]);
-        assert_eq!(texts("SUM(A1:A9)"), ["A1", "A9"]);
+        assert_eq!(texts("SUM(A1:A9)"), ["A1:A9"]);
         assert_eq!(texts("$A$1"), ["$A$1"]);
         assert_eq!(texts("42"), Vec::<&str>::new());
     }
@@ -509,5 +698,99 @@ mod tests {
         let f = "IF(A1,\"café — ok\",B1)";
         let out = to_r1c1_shape(f, CellRef::new(S, 0, 2));
         assert!(out.contains("café — ok"), "{out}");
+    }
+
+    fn names(formula: &str) -> Vec<String> {
+        scan_names(formula)
+            .iter()
+            .map(|n| n.text(formula).to_string())
+            .collect()
+    }
+
+    #[test]
+    fn names_are_what_reference_scanning_discards() {
+        assert_eq!(names("Tax_Rate*A1"), ["Tax_Rate"]);
+        // A function is not a name, and neither is anything that would parse
+        // as a reference.
+        assert_eq!(names("SUM(A1:A9)"), Vec::<String>::new());
+        assert_eq!(names("SUM(Sales)*Rate"), ["Sales", "Rate"]);
+    }
+
+    #[test]
+    fn names_inside_literals_are_not_names() {
+        assert_eq!(names("IF(A1=\"Tax_Rate\",Tax_Rate,0)"), ["Tax_Rate"]);
+    }
+
+    #[test]
+    fn a_sheet_scoped_name_keeps_its_sheet() {
+        let f = "Sheet1!Tax_Rate+1";
+        let found = scan_names(f);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert_eq!(found[0].text(f), "Tax_Rate");
+        assert_eq!(found[0].sheet_name.as_deref(), Some("Sheet1"));
+
+        let f = "'My Sheet'!Tax_Rate";
+        let found = scan_names(f);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert_eq!(found[0].text(f), "Tax_Rate");
+        assert_eq!(found[0].sheet_name.as_deref(), Some("My Sheet"));
+    }
+
+    #[test]
+    fn a_qualified_reference_names_nothing() {
+        // The sheet part names a sheet, not a value, and the cell part is a
+        // reference. Neither is a defined name.
+        assert_eq!(names("Sheet1!A1+'My Sheet'!B2"), Vec::<String>::new());
+        assert_eq!(names("[1]Sheet1!A1"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_table_reference_yields_the_table_name() {
+        assert_eq!(names("SUM(Table1[Amount])"), ["Table1"]);
+    }
+
+    #[test]
+    fn scientific_notation_is_not_a_name() {
+        // `1E5` is one number. The reference scanner has the same trap.
+        assert_eq!(names("1E5+2"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_range_is_one_reference_not_two_cells() {
+        // Taken as two cells, `SUM(Rates!B2:B100)` yields a reference to
+        // `Rates!B2` and a bare `B100` — a cell on the formula's own sheet
+        // that the workbook never mentioned, and a dependency that does not
+        // exist. It also loses every row between the endpoints.
+        let f = "SUM(Rates!B2:B100)";
+        let refs = scan_references(f);
+        assert_eq!(refs.len(), 1, "{refs:#?}");
+        assert_eq!(refs[0].text(f), "Rates!B2:B100");
+        assert_eq!(refs[0].parsed.sheet_name.as_deref(), Some("Rates"));
+        assert_eq!((refs[0].parsed.top, refs[0].parsed.bottom), (1, 99));
+
+        let f = "A1:A4";
+        let refs = scan_references(f);
+        assert_eq!(refs.len(), 1, "{refs:#?}");
+        assert_eq!((refs[0].parsed.top, refs[0].parsed.bottom), (0, 3));
+    }
+
+    #[test]
+    fn a_colon_not_followed_by_a_cell_ends_the_reference() {
+        // The intersection and function forms must not swallow what follows.
+        let f = "A1:INDEX(B:B,2)";
+        let refs = scan_references(f);
+        assert_eq!(refs[0].text(f), "A1");
+    }
+
+    #[test]
+    fn a_range_keeps_its_shape_when_normalised() {
+        // The shape path was correct even while ranges scanned as two cells,
+        // because both endpoints were rewritten independently. That is why
+        // this defect survived grouping: it is invisible here.
+        let anchor = CellRef::new(SheetId(0), 4, 3);
+        assert_eq!(
+            to_r1c1_shape("SUM(D1:D4)", anchor),
+            to_r1c1_shape("SUM(D2:D5)", CellRef::new(SheetId(0), 5, 3))
+        );
     }
 }

@@ -1,16 +1,19 @@
 # Upstream issues in calamine
 
-Three defects found in [calamine](https://github.com/tafia/calamine) 0.36.1 while
-building `eg-ingest`.
+Four defects found in [calamine](https://github.com/tafia/calamine) 0.36.1 while
+building ExcelGRAG.
 
 **Status:** issues 2 and 3 are fixed in a fork at `../calamine`, branch
 `xlsb-shared-formulas`, wired in through `[patch.crates-io]` in the workspace
 `Cargo.toml`. Both are fixed for `.xlsb` and `.xls`, in two commits — one per
-format — ready to upstream as a pull request. Issue 1 was our own bug and is fixed here.
+format — submitted as [tafia/calamine#712](https://github.com/tafia/calamine/pull/712).
+Issue 1 was our own bug and is fixed here. **Issue 4 is unfixed**, found later,
+while building the graph; see the note at the end for why it is not simply
+appended to the open PR.
 
-All three were found by the format-parity test — reading the same logical
-workbook as `.xlsx` and as `.xlsb` and requiring identical values and formulas —
-or by auditing a real 170 MB XLSB workbook.
+They were found by the format-parity test — reading the same logical workbook as
+`.xlsx` and as `.xlsb` and requiring identical values and formulas — or by
+auditing a real 170 MB XLSB workbook.
 
 ---
 
@@ -262,3 +265,68 @@ found that unpatched calamine already emits out-of-range references at a higher
 rate than the patched build (14.5% against 2.8%), including a column `USO` on a
 sheet using `A..I`. That is pre-existing behaviour on other token types, not a
 regression, and is left alone here.
+
+---
+
+## 4. A sheet name that needs quoting is written bare — **unfixed**
+
+**Affects:** `.xlsb`, and `.xls` by the same code shape. Not `.xlsx`, whose
+formulas are stored as text Excel already wrote correctly.
+
+Excel requires a sheet name containing a space, a hyphen, or other punctuation
+to be quoted inside a formula: `'BP136-6-WORK DOC'!A1`. calamine concatenates
+the name unquoted:
+
+```rust
+formula.push_str(&sheets[ixti as usize]);
+formula.push('!');
+```
+
+(`src/xlsb/mod.rs`, four sites around lines 865–906.)
+
+So the formula text we receive is `BP136-6-WORK DOC!A1`, which Excel would
+reject and which no parser can read back correctly. A scanner sees a reference
+to a sheet called `DOC`.
+
+### Measured on the reference workbook
+
+10 of its 25 sheets have names needing quotes, and 1,665 formula references use
+one of them:
+
+| Sheet | Bare uses | Read instead as |
+|---|---|---|
+| `BP136-6-WORK DOC` | 1,472 | `DOC` |
+| `PIVOT CLASSIFIC` | 48 | `CLASSIFIC` |
+| `IMPAIR_PROV_DEBT CLASS` | 45 | `CLASS` |
+| `PIVOT PER SERVICE PER DAY` | 72 | `DAY` |
+| `PIVOT PER SERVICE` | 13 | `SERVICE` |
+| `PIVOT SERVICE IMPAIR` | 12 | `IMPAIR` |
+| `PIVOT_SERVICE AND TYPE` | 3 | `TYPE` |
+
+`crates/eg-ingest/examples/unquoted_sheets.rs` produces this table.
+
+### Why the severity depends on luck
+
+There are two outcomes, and only the first is visible:
+
+- The fragment names no sheet, so the reference is counted as broken. That is
+  what happens on this workbook: all 1,665 land in the graph's
+  "references to sheets the workbook does not have" bucket.
+- **The fragment matches a different real sheet**, and the dependency is
+  attributed to it silently. A workbook with sheets `Q3 SALES` and `SALES` —
+  an entirely ordinary pair — would wire every reference to the first into the
+  second, with nothing to see. No count moves, no error is raised.
+
+The checker reports whether any fragment collides. On this workbook, none does.
+
+### Not appended to the open PR
+
+PR #712 is already submitted and awaiting a maintainer. This is an unrelated
+defect in different code, so it belongs in its own change rather than growing a
+branch under review. It also predates our work: unlike issues 2 and 3, nothing
+in the shared-formula fix touched these lines.
+
+Until it is fixed, the graph counts the affected references as broken rather
+than mis-attributing them, which is the safe failure — but formula *text* from
+a binary workbook is not round-trippable, which matters for P4 (indexing it),
+P5 (showing it) and P6 (re-parsing it to evaluate).
