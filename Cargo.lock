@@ -643,6 +643,15 @@ dependencies = [
 [[package]]
 name = "eg-retrieve"
 version = "0.1.0"
+dependencies = [
+ "eg-graph",
+ "eg-index",
+ "eg-model",
+ "petgraph",
+ "rustc-hash",
+ "serde",
+ "thiserror",
+]
 
 [[package]]
 name = "eg-structure"

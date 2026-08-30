@@ -9,10 +9,11 @@ all, and the only Python library that can, `pyxlsb`, does not surface formulas.
 
 ## Status
 
-Early, but a workbook now goes all the way to a graph you can search, by word
-and by meaning. `eg-model`, `eg-ingest`, `eg-structure`, `eg-graph` and
-`eg-index` are implemented and tested; the retrieval, evaluation and MCP layers
-are not yet built.
+Early, but a question now goes all the way from words to the part of a workbook
+that answers it. `eg-model`, `eg-ingest`, `eg-structure`, `eg-graph` and
+`eg-index` are implemented and tested, and `eg-retrieve` expands a hit into its
+context; rendering that as a passage, and the evaluation and MCP layers, are not
+yet built.
 
 ## Workspace
 
@@ -23,7 +24,7 @@ are not yet built.
 | `eg-structure` | Region detection, header inference, formula grouping | implemented |
 | `eg-graph` | Graph build, reference lifting, invariants, store | implemented |
 | `eg-index` | Lexical (tantivy) and vector (fastembed) indexes | implemented |
-| `eg-retrieve` | Hybrid search, graph expansion, context rendering | stub |
+| `eg-retrieve` | Hybrid search, graph expansion, context rendering | expansion done |
 | `eg-eval` | Formula evaluation and what-if | stub |
 | `eg-mcp` | MCP server | stub |
 | `eg-cli` | Command-line front-end | stub |
@@ -233,6 +234,57 @@ it. Sorting by length before batching took it from **9.5s to 5.2s**, measured
 around the model call alone — loading the graph and building the lexical index
 are another 0.04s together, and folding them in would report a throughput that
 is really a measure of tantivy.
+
+## Retrieval
+
+A hit is a door, not an answer. "The Revenue column of BP136" is the right node
+and still says nothing about which table it is in, what feeds it, or what breaks
+if it is wrong. `eg-retrieve` walks out from the hits to the nodes that explain
+them, and records for every node it brings back which node pulled it in and
+along which edge — an expansion nobody can check is an expansion nobody should
+trust.
+
+```sh
+cargo run --release -p eg-retrieve --example retrieve -- index bad debt provision
+cargo run --release -p eg-retrieve --example retrieve -- index --hops 3 --children 6 lookup rates
+```
+
+On the real workbook an expansion is **0.4ms** over the stored graph, and the
+chain it prints is the point: a note headed *Provision for debtors with…* is
+read by the 115,004-row working table, which in turn reads a dozen rate tables
+on the LOOKUP sheet, each edge labelled with how many cell references stand
+behind it.
+
+### The measurement that shaped the walk
+
+The graph's degree distribution decides whether a bounded k-hop expansion is
+cheap or explosive, which is why `eg-graph` has been collecting it since P3a.
+On the reference workbook the dependency layer is **161 edges across 732 nodes**
+— sparse, with a maximum in-degree of 13. But the most connected nodes have
+out-degrees of **136, 83, 82, 74 and 71**, and every one of them is a region
+pointing at its own columns.
+
+So the explosion is real and lives entirely in `CONTAINS`. A plain k-hop walk
+from a column reaches its region in one hop and that region's 136 columns in
+two: 19% of the workbook, none of it asked for. Containment is therefore
+followed *inwards* — a column's table, its sheet, the workbook, a path of at
+most three that costs no hop, because naming a node is not travelling away from
+it — and outwards only when asked, and never from the workbook root, whose
+children are the whole file.
+
+Dependencies are followed in both directions, best-first by edge weight. Weight
+is the number of cell references behind the edge, so the heaviest first is what
+most of the workbook actually rests on.
+
+### Where the granularity bites
+
+Lifting attached every reference to the *region* containing it, so the
+dependency layer connects regions and nothing else — a column node has no
+dependency edges, and neither does a sheet. The walk therefore collects edges
+from the regions a node overlaps: upwards for a column, and one level down for a
+sheet. A column's inputs are its table's inputs, which is as fine as the graph
+kept. Recovering which cell fed which is P6, done on demand against the
+workbook.
 
 ## Testing
 
