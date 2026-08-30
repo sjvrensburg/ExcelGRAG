@@ -272,6 +272,65 @@ fn a_vector_of_the_wrong_width_is_refused_rather_than_stored() {
 }
 
 #[test]
+fn vectors_are_stored_unit_length_however_they_arrive() {
+    let root = dir("norm");
+    let wb = sales();
+    let built = build(&wb);
+    let docs = embeddable(&built.graph);
+
+    // Raw model output that nobody normalised: every row the same direction,
+    // but scaled differently. A dot product against these would rank by
+    // magnitude, so the biggest vector would win every query.
+    let unscaled: Vec<Vec<f32>> = docs
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let mut v = vec![0.0f32; DIM];
+            v[0] = 1.0 + i as f32 * 10.0;
+            v
+        })
+        .collect();
+
+    let mut index = VectorIndex::open(&root, MODEL, DIM).unwrap();
+    index
+        .put(&wb.content_hash, &wb.path, &docs, &unscaled)
+        .unwrap();
+
+    let mut q = vec![0.0f32; DIM];
+    q[0] = 1.0;
+    let hits = index.search(
+        &q,
+        &SearchOptions {
+            limit: 50,
+            ..Default::default()
+        },
+    );
+    assert_eq!(hits.len(), docs.len());
+    for hit in &hits {
+        // All the same direction, so all score 1 — not 1, 11, 21, …
+        assert!(
+            (hit.score - 1.0).abs() < 1e-5,
+            "{} scored {}",
+            hit.label,
+            hit.score
+        );
+    }
+}
+
+#[test]
+fn a_failed_write_leaves_no_temporary_file_behind() {
+    let (root, mut index, _docs) = indexed("tmp");
+    index.forget("hash-sales").unwrap();
+
+    let left: Vec<String> = std::fs::read_dir(root.join("vectors"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(left.is_empty(), "files left behind: {left:?}");
+}
+
+#[test]
 fn a_query_of_the_wrong_width_returns_nothing_rather_than_garbage() {
     let (_root, index, _docs) = indexed("qwidth");
     assert!(index

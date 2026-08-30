@@ -213,9 +213,10 @@ the machine, which for the workbooks this is built for is not a preference.
 ### Why there is no vector database
 
 The nodes worth embedding — sheets, tables, columns, defined names — are **732
-on the reference workbook**, which at 384 dimensions is **1.2 MiB**. Fifty such
-workbooks are 36,600 vectors and 56 MB. A full scan of the real corpus takes
-**0.11ms**, and it is exact. An approximate index would add a build step, a
+on the reference workbook**, which at 384 dimensions is 1.07 MiB of `f32`, or
+**1.2 MiB on disk** with the metadata beside it. Fifty such workbooks are 36,600
+vectors and 56 MB. A full scan of the real corpus takes **0.11ms**, and it is
+exact. An approximate index would add a build step, a
 tuning parameter, a recall cliff and a second on-disk format in exchange for
 beating a number too small to see, so there is no HNSW here: an array of floats
 per workbook and a loop over it.
@@ -225,10 +226,13 @@ and hours of model time to make near-identical formula text searchable by
 meaning, when a formula is exact-token text and the lexical index already
 covers it.
 
-Embedding the 732 nodes takes **5.3s**, and the batching is why: batches are
+Embedding the 732 nodes takes **5.2s**, and the batching is why: batches are
 padded to the longest text in them, so one wide table, whose document carries
 every column header it has, was paying for the 255 short labels batched beside
-it. Sorting by length before batching took it from 9.7s to 5.3s.
+it. Sorting by length before batching took it from **9.5s to 5.2s**, measured
+around the model call alone — loading the graph and building the lexical index
+are another 0.04s together, and folding them in would report a throughput that
+is really a measure of tantivy.
 
 ## Testing
 

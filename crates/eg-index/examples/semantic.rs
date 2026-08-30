@@ -54,7 +54,15 @@ fn main() {
                 }
             },
             "--sheet" => opts.sheet = args.next(),
-            "--limit" => opts.limit = args.next().and_then(|n| n.parse().ok()).unwrap_or(8),
+            "--limit" => match args.next().as_deref().and_then(|n| n.parse::<usize>().ok()) {
+                // At least one: both searches clamp to one internally, so a
+                // limit of zero would print two hits and an empty hybrid list.
+                Some(n) => opts.limit = n.max(1),
+                None => {
+                    eprintln!("--limit wants a number");
+                    std::process::exit(2);
+                }
+            },
             _ => words.push(arg),
         }
     }
@@ -108,47 +116,72 @@ fn main() {
     let hashes: Vec<String> = corpus.entries().map(|(h, _)| h.to_string()).collect();
     let mut embedded = 0usize;
     let mut lexical_docs = 0usize;
-    let indexing = Instant::now();
+    // Timed apart from everything around it. Loading a graph and building the
+    // lexical index are not embedding, and folding them into one number would
+    // report a model throughput that is really a measure of tantivy.
+    let mut embed_time = std::time::Duration::ZERO;
+    let mut lexical_time = std::time::Duration::ZERO;
+
     for hash in &hashes {
-        if !reindex && vectors.contains(hash) {
+        // The two indexes are asked separately. The lexical one rebuilds itself
+        // empty on a schema change, so inferring its contents from the vector
+        // index would mean silently searching nothing.
+        let want_text = reindex || !text.contains(hash).unwrap_or(false);
+        let want_vectors = reindex || !vectors.contains(hash);
+        if !want_text && !want_vectors {
             continue;
         }
         let stored = match corpus.get(hash) {
             Ok(Some(s)) => s,
             Ok(None) => continue,
             Err(e) => {
-                eprintln!("{}: {e}", &hash[..8]);
+                eprintln!("{}: {e}", short(hash));
                 continue;
             }
         };
-        match text.index_stored(&stored) {
-            Ok(n) => lexical_docs += n,
-            Err(e) => eprintln!("{}: {e}", &hash[..8]),
+
+        if want_text {
+            let at = Instant::now();
+            match text.index_stored(&stored) {
+                Ok(n) => lexical_docs += n,
+                Err(e) => eprintln!("{}: {e}", short(hash)),
+            }
+            lexical_time += at.elapsed();
         }
 
-        let docs = embeddable(&stored.graph);
-        let made = match embedder.embed_documents(&docs) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("{}: {e}", &hash[..8]);
-                continue;
+        if want_vectors {
+            let docs = embeddable(&stored.graph);
+            let at = Instant::now();
+            let made = match embedder.embed_documents(&docs) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("{}: {e}", short(hash));
+                    continue;
+                }
+            };
+            embed_time += at.elapsed();
+            match vectors.put(hash, &stored.path, &docs, &made) {
+                Ok(n) => embedded += n,
+                Err(e) => eprintln!("{}: {e}", short(hash)),
             }
-        };
-        match vectors.put(hash, &stored.path, &docs, &made) {
-            Ok(n) => embedded += n,
-            Err(e) => eprintln!("{}: {e}", &hash[..8]),
         }
     }
-    let index_time = indexing.elapsed();
 
+    if lexical_docs > 0 {
+        println!(
+            "  indexed {lexical_docs} lexical documents in {:.2}s",
+            lexical_time.as_secs_f64()
+        );
+    }
     if embedded > 0 {
         println!(
-            "  embedded {embedded} nodes ({lexical_docs} lexical documents) in {:.2}s — {:.0} nodes/s",
-            index_time.as_secs_f64(),
-            embedded as f64 / index_time.as_secs_f64().max(1e-9)
+            "  embedded {embedded} nodes in {:.2}s — {:.0} nodes/s",
+            embed_time.as_secs_f64(),
+            embedded as f64 / embed_time.as_secs_f64().max(1e-9)
         );
-    } else {
-        println!("  already embedded — pass --reindex to rebuild");
+    }
+    if embedded == 0 && lexical_docs == 0 {
+        println!("  already indexed — pass --reindex to rebuild");
     }
     println!(
         "  {} vectors over {} workbook(s), {:.1} MiB at {}",
@@ -168,7 +201,7 @@ fn main() {
         eprintln!("lexical search failed: {e}");
         Vec::new()
     });
-    let lexical_time = lexical_at.elapsed();
+    let lexical_search = lexical_at.elapsed();
 
     let embed_at = Instant::now();
     let q = match embedder.embed_query(&query) {
@@ -188,7 +221,7 @@ fn main() {
 
     println!("\n{query:?}");
     show(
-        &format!("lexical ({:.2}ms)", lexical_time.as_secs_f64() * 1000.0),
+        &format!("lexical ({:.2}ms)", lexical_search.as_secs_f64() * 1000.0),
         &lexical,
     );
     show(
@@ -218,6 +251,15 @@ fn show(title: &str, hits: &[Hit]) {
             hit.a1.as_deref().unwrap_or_default()
         );
     }
+}
+
+/// The first few characters of a hash, for an error line.
+///
+/// By character and not by byte: the manifest is a file on disk, and slicing a
+/// string from one at a fixed byte offset is a panic waiting for the first
+/// entry that is not what we assumed.
+fn short(hash: &str) -> String {
+    hash.chars().take(8).collect()
 }
 
 fn parse_kind(arg: &str) -> Option<NodeKind> {

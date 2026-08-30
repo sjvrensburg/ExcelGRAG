@@ -2,7 +2,7 @@
 //!
 //! The measurement decides this, as it did for the graph store. The nodes worth
 //! embedding — sheets, tables, columns, defined names — are **732 on the
-//! reference workbook**, and at 384 dimensions that is 1.1 MB of `f32`. Fifty
+//! reference workbook**, and at 384 dimensions that is 1.07 MiB of `f32`. Fifty
 //! such workbooks are 36,600 vectors and 56 MB: a full scan is 14 million
 //! multiply-adds, well under a millisecond, and it is exact. An approximate
 //! index would add a build step, a tuning parameter, a recall cliff and a
@@ -34,7 +34,7 @@ use eg_graph::{Graph, NodeKind};
 use serde::{Deserialize, Serialize};
 
 use crate::doc::{docs_for, NodeDoc};
-use crate::embed::similarity;
+use crate::embed::{normalize, similarity};
 use crate::text::{Hit, IndexError, SearchOptions};
 
 /// Bumped when the stored shape changes. A set from another version is dropped
@@ -227,9 +227,16 @@ impl VectorIndex {
                 label: d.label.clone(),
             })
             .collect();
+        // Normalised here rather than trusted. `search` is a dot product, which
+        // is a cosine only for unit-length rows, and a caller who hands over
+        // raw model output from some other path would get a scan that ranks
+        // by vector magnitude with nothing to say it had. Scaling is a no-op
+        // for a vector that was already unit length.
         let mut data = Vec::with_capacity(entries.len() * self.dim);
         for v in vectors {
+            let at = data.len();
             data.extend_from_slice(v);
+            normalize(&mut data[at..]);
         }
 
         let meta = Meta {
@@ -264,10 +271,14 @@ impl VectorIndex {
     }
 
     /// Drop a workbook's vectors. Returns whether it had any.
+    ///
+    /// The temporary files go too. A rename that failed leaves one behind, and
+    /// nothing else would ever remove it — it would sit in the directory being
+    /// counted as index size for as long as the corpus lived.
     pub fn forget(&mut self, content_hash: &str) -> Result<bool, IndexError> {
         let had = self.sets.remove(content_hash).is_some();
         let stem = self.stem(content_hash);
-        for ext in ["json", "f32"] {
+        for ext in ["json", "f32", "json.tmp", "f32.tmp"] {
             let path = self.dir.join(format!("{stem}.{ext}"));
             match fs::remove_file(&path) {
                 Ok(()) => {}
@@ -373,10 +384,27 @@ fn io_err(context: impl Into<String>) -> impl FnOnce(io::Error) -> IndexError {
     move |source| IndexError::Io { context, source }
 }
 
+/// Write through a temporary file and rename, so an interrupted write leaves
+/// the previous version rather than a truncated one.
+///
+/// The temporary name extends the final one rather than replacing its
+/// extension: a workbook's `.json` and `.f32` share a stem, so replacing it
+/// would give both writes the same temporary path.
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), IndexError> {
-    let tmp = path.with_extension("tmp");
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
     fs::write(&tmp, bytes).map_err(io_err(format!("writing {}", tmp.display())))?;
-    fs::rename(&tmp, path).map_err(io_err(format!("renaming into {}", path.display())))
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // The rename is what makes the write visible, so a failure here
+            // means the temporary file is dead weight rather than a partial
+            // result worth keeping.
+            let _ = fs::remove_file(&tmp);
+            Err(io_err(format!("renaming into {}", path.display()))(e))
+        }
+    }
 }
 
 #[cfg(test)]

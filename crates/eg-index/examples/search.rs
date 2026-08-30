@@ -94,11 +94,11 @@ fn main() {
             let stored = match corpus.get(hash) {
                 Ok(Some(s)) => s,
                 Ok(None) => {
-                    eprintln!("{}: listed in the manifest but not stored", &hash[..8]);
+                    eprintln!("{}: listed in the manifest but not stored", short(hash));
                     continue;
                 }
                 Err(e) => {
-                    eprintln!("{}: {e}", &hash[..8]);
+                    eprintln!("{}: {e}", short(hash));
                     continue;
                 }
             };
@@ -107,7 +107,7 @@ fn main() {
                     documents += n;
                     indexed += 1;
                 }
-                Err(e) => eprintln!("{}: {e}", &hash[..8]),
+                Err(e) => eprintln!("{}: {e}", short(hash)),
             }
         }
     }
@@ -164,6 +164,12 @@ fn main() {
     if hits.is_empty() {
         println!("  nothing matched");
     }
+}
+
+/// The first few characters of a hash, by character and not by byte, so an
+/// unexpected manifest key cannot panic the error path that reports it.
+fn short(hash: &str) -> String {
+    hash.chars().take(8).collect()
 }
 
 fn parse_kind(arg: &str) -> Option<NodeKind> {
