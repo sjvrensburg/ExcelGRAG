@@ -393,16 +393,19 @@ Sweeping the reference workbook is one pass, and it costs about as much as
 loading it:
 
 ```
-6,793,166 formulas in 22.2s (306,000 per second)
-  agreed         4,886,337 (71.9%)
-  differed         935,435 (13.8%)
-  unsupported      971,394 (14.3%)
+6,793,166 formulas in 24.0s (283,000 per second)
+  agreed         5,695,274 (83.8%)
+  differed         982,135 (14.5%)
+  unsupported      115,757 ( 1.7%)
 ```
 
-The unsupported column is the honest part, and it names what it could not do:
-`PV()` accounts for 115,566 of it and `GETPIVOTDATA()` for 191. The other
-855,637 are formulas that do not parse, and they are the interesting ones —
-they name columns that cannot exist:
+The unsupported column is the honest one, and it names what it could not do:
+`PV()` accounts for 115,566 of it and `GETPIVOTDATA()` for 191. That is the
+whole of it — two functions nobody has written yet, and nothing else.
+
+It did not start out that way. The first sweep put 14.3% in that column, and
+855,637 of those formulas failed to parse because they named columns that
+cannot exist:
 
 ```
 =OVERVIEW!$BTRO$25
@@ -410,17 +413,27 @@ they name columns that cannot exist:
 ```
 
 Excel's last column is `XFD`. `XFF` is two past it and `BTRO` is three times
-the width of a sheet, so no formula was ever written this way; the column
-offsets of these filled formulas are being translated wrongly somewhere below
-this layer. The disagreements point the same way: 725,917 of the 935,435 read a
-precedent the loader never populated, and the ones checked by hand read a
-header cell where the stored value implies a data cell two columns to the
-right. So the sweep's headline is not "72% of this workbook is arithmetic we
-agree with" but "there is a defect in shared-formula translation, and it is
-worth about a quarter of the file".
+the width of a worksheet, so no formula was ever written this way. The cause
+was two bits: an XLSB reference stores its column in 14 bits and its
+relativity in the other two, and three of the four decoding paths were reading
+the field whole, so a relative column 2 arrived as column 16,386. Those two
+formulas are really `=OVERVIEW!C25` and
+`=VLOOKUP(B2,HQ880_20240630!$B1:$I1048576,5,FALSE)`. Fixed in the calamine
+fork — see `docs/upstream-issues.md` — and the counts above are from after
+that fix.
 
-Which is what a recompute is for. Every layer above this one has been reading
-those same formulas without any way to notice.
+Nothing had failed. A formula that is wrong still looks like a formula, and
+12.6% of this workbook had been read that way by the graph, the index and the
+retrieval layer, none of which can tell a column that exists from one that
+does not. The first thing to notice was the first thing that evaluated a
+formula instead of parsing it, and it noticed the way a recompute is supposed
+to: by disagreeing with Excel about a number.
+
+Which leaves 14.5% still disagreeing, and that is a separate question rather
+than a conclusion. Some of it is precedents the loader never populated,
+which is another defect below this layer. Some of it is a stored value of blank
+where the formula computes `#N/A`. A sweep that came back clean
+would only have meant it was not looking.
 
 ## Testing
 

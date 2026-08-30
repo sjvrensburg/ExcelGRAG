@@ -1,6 +1,6 @@
 # Upstream issues in calamine
 
-Four defects found in [calamine](https://github.com/tafia/calamine) 0.36.1 while
+Five defects found in [calamine](https://github.com/tafia/calamine) 0.36.1 while
 building ExcelGRAG.
 
 **Status:** issues 2 and 3 are fixed in a fork at `../calamine`, branch
@@ -10,14 +10,18 @@ format — submitted as [tafia/calamine#712](https://github.com/tafia/calamine/p
 Issue 1 was our own bug and is fixed here. Issue 4 was found later, while
 building the graph, and is submitted separately as
 [#713](https://github.com/tafia/calamine/pull/713) — unrelated code, so it did
-not belong on a branch already under review.
+not belong on a branch already under review. Issue 5 was found later still, by
+recomputing formulas rather than reading them, and sits on its own branch
+`xlsb-relative-columns` for the same reason; it is pushed to the fork but not
+yet opened upstream.
 
 The workspace patches in an `excelgrag` branch carrying both fixes, since
 `[patch.crates-io]` takes a single source.
 
 They were found by the format-parity test — reading the same logical workbook as
-`.xlsx` and as `.xlsb` and requiring identical values and formulas — or by
-auditing a real 170 MB XLSB workbook.
+`.xlsx` and as `.xlsb` and requiring identical values and formulas — by auditing
+a real 170 MB XLSB workbook, or, for issue 5, by recomputing that workbook's
+formulas and comparing the answers with the values Excel had stored.
 
 ---
 
@@ -363,3 +367,71 @@ fell by the same 1,472.
 That is the silent-misattribution case actually occurring, reached through a
 prefix that parses as a cell rather than through a sheet-name collision. Nothing
 about the output looked wrong.
+
+## 5. Relativity flags are read as part of a reference's column
+
+**Affects:** `.xlsb`. Pre-existing upstream, in code untouched by #712.
+
+**Fixed** in the fork on branch `xlsb-relative-columns`, branched from `master`
+and independent of #712 and #713. Not yet opened upstream.
+
+An `RgceLoc` column field is 14 bits of column and two of relativity: `0x8000`
+marks the column relative, `0x4000` the row. `PtgRef` masks them off.
+`PtgArea`, `PtgRef3d` and `PtgArea3d` read the field whole and print both
+components as absolute, under a `// TODO: check with relative columns`:
+
+```rust
+formula.push('$');
+push_column(read_u16(&rgce[10..12]) as u32, &mut formula);
+```
+
+A relative column 2 is stored as `0x4002`, which taken as a column index is
+16,386 — two past `XFD`, the last column a worksheet has — and `push_column`
+renders it as a four-letter column no formula can name. Sheet names below are
+neutralised; the rest is verbatim:
+
+| Decoded | Actually |
+|---|---|
+| `=SUM($BTRO$4:$BTRT$4)` | `=SUM(C4:H4)` |
+| `=Summary!$BTRO$25` | `=Summary!C25` |
+| `=VLOOKUP(B2,Data!$XFF$1:$XFM$1048576,5,0)` | `=VLOOKUP(B2,Data!$B1:$I1048576,5,0)` |
+
+The first is a row total in column I over the six columns to its left, which is
+how you know the mask is right and not merely in range.
+
+### Measured on the reference workbook
+
+**855,637 of its 6,793,166 formulas — 12.6% — named a column that cannot
+exist.** Nothing failed. A formula that is displayed still looks like a formula;
+only something that reads it finds the reference points nowhere, which is why
+this survived the graph, the index and the retrieval layer and was caught by the
+first component to evaluate a formula rather than parse it.
+
+### The fix
+
+One `read_loc_col` splits the field, so a single place knows the layout, and
+each component is marked `$` by its own flag through `push_a1`. `PtgRef` is
+routed through both — a refactor, not a change: its masking and its flags
+already matched, and `formula_xlsb` covers it, `issues.xlsb` decoding to
+`B1+OneRange` before and after.
+
+The bit assignment is the one the XLS reader already documents and tests for
+BIFF8, where `RgceLocRel` has fColRel = `0x8000` and fRwRel = `0x4000`.
+
+No fixture in either repository exercises a relative area or a 3-D reference,
+and none can be authored for `.xlsb`. The branch carries unit tests for the
+field split, for each of the four `$` combinations, for both corners of an area
+and for the two 3-D forms; the end-to-end path rests on the reference workbook.
+
+### What it changed, measured
+
+Recomputing every formula and comparing with the value Excel stored:
+
+| | Before | After |
+|---|---|---|
+| Agreed with the stored value | 71.9% | **83.8%** |
+| Not recomputable | 14.3% | **1.7%** |
+| Failed to parse | 855,637 | **0** |
+
+What is left of the second row is two functions `eg-eval` does not implement,
+`PV()` and `GETPIVOTDATA()`. Nothing left in it is a decoding failure.
