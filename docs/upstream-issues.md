@@ -128,17 +128,53 @@ plausible.
 It cannot be worked around from outside calamine: once `PtgExp` is dropped,
 there is no way to tell which cells had one.
 
-### Options
+### The fix
 
-1. **Patch calamine to resolve `PtgExp`.** Surface the master cell's `(row, col)`
-   from the token, then expand the master's formula at the member's offset.
-   calamine already has the expansion logic — `expand_shared_formula` is public
-   in the XLSX module and does exactly this job for XLSX's shared formulas. This
-   is the smallest correct fix, and worth upstreaming.
-2. **Write our own XLSB formula reader.** Full control, but re-implements a large
-   amount of BIFF12 parsing that calamine otherwise does well.
-3. **Convert XLSB to XLSX before ingest.** LibreOffice imports XLSB and exports
-   XLSX, so this sidesteps the issue — but it is slow and memory-hungry on a
-   170 MB workbook, and makes LibreOffice's formula fidelity our problem instead.
+`PtgExp` is 5 bytes: the token plus a 4-byte row naming the group's first row.
+The group's real token stream lives in a `BrtShrFmla` (0x01AB) or `BrtArrFmla`
+(0x01AA) record, whose payload is a 16-byte range — `rwFirst, rwLast, colFirst,
+colLast` — followed by the token length and the tokens. `BrtArrFmla` carries an
+extra flags byte before the length.
 
-Option 1 is recommended.
+Two details made this more than a lookup:
+
+- **A definition can appear after the members that use it**, so a single pass
+  cannot resolve them. `XlsbCellsReader::formulas` collects members and
+  definitions, then resolves at the end. `worksheet_formula` uses it, while
+  `next_formula` keeps its old behaviour so the public API is unchanged.
+- **Definitions use the relative `PtgRefN` and `PtgAreaN` tokens**, which
+  calamine did not handle at all. They store signed offsets from the cell being
+  evaluated, so `parse_formula` now takes an anchor cell and each member decodes
+  the shared token stream at its own position. That is what makes every row of a
+  filled-down column come out with its own references.
+
+Excel chunks shared formula groups at about 64 rows, which is why one sheet of
+the sample workbook has 6,106 definitions covering 390,728 member cells.
+
+### Verification
+
+On the same 170 MB workbook, through `worksheet_formula`:
+
+| | Formula cells |
+|---|---|
+| Present in the file | 6,793,166 |
+| Recovered after the fix | **6,793,166 (100%)** |
+
+The count alone would not prove correctness — a mis-applied anchor gives the
+same count with every row pointing at the wrong cells. So
+`crates/eg-ingest/examples/shared_group_check.rs` checks the invariant that
+actually matters: two vertically adjacent members of a group must differ by
+exactly one row.
+
+```
+shared/array formula members found:      4,780,416
+  left unresolved by the two-pass read:          0
+adjacent member pairs compared:          4,779,791
+  advance by exactly one row:            4,779,791
+  WRONG:                                         0
+  correctness: 100.0000%
+```
+
+All 276 of calamine's own tests still pass, and the fork adds fixture-free unit
+tests for the N-class reference decoding, anchor shifting, the operator
+assignments, and `PtgExp` recognition.
