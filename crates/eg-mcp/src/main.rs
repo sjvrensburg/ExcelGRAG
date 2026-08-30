@@ -23,16 +23,7 @@
 //! stray `println!` would put a line the client cannot parse into the middle of
 //! a JSON-RPC stream.
 
-mod rpc;
-mod server;
-mod state;
-mod tools;
-
-use std::io::{BufRead, Write};
-
-use rpc::{code, Request, Response};
-use server::Server;
-use state::State;
+use eg_mcp::{serve, Server, State};
 
 const USAGE: &str = "usage: eg-mcp <corpus-dir> [--redact-values]";
 
@@ -81,39 +72,10 @@ fn main() {
         }
     );
 
-    if let Err(e) = serve(Server::new(state)) {
+    let mut server = Server::new(state);
+    let stdin = std::io::stdin();
+    if let Err(e) = serve(&mut server, stdin.lock(), std::io::stdout()) {
         eprintln!("eg-mcp: {e}");
         std::process::exit(1);
-    }
-}
-
-/// One JSON object per line, in and out, until stdin closes.
-fn serve(mut server: Server) -> std::io::Result<()> {
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    let mut line = String::new();
-
-    loop {
-        line.clear();
-        if stdin.lock().read_line(&mut line)? == 0 {
-            return Ok(()); // The client hung up.
-        }
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => server.handle(request),
-            Err(e) => Some(Response::anonymous_err(
-                code::PARSE_ERROR,
-                format!("could not read that line as a JSON-RPC request: {e}"),
-            )),
-        };
-
-        if let Some(response) = response {
-            serde_json::to_writer(&mut stdout, &response)?;
-            stdout.write_all(b"\n")?;
-            stdout.flush()?;
-        }
     }
 }

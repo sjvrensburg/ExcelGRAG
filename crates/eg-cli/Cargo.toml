@@ -6,4 +6,16 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "eg"
+path = "src/main.rs"
+
 [dependencies]
+eg-model.workspace = true
+eg-ingest.workspace = true
+eg-graph.workspace = true
+eg-index.workspace = true
+eg-retrieve.workspace = true
+eg-eval.workspace = true
+eg-mcp = { path = "../eg-mcp" }
+clap = { version = "4", features = ["derive"] }
