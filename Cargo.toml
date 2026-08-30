@@ -42,8 +42,9 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 
-# Local fork of calamine carrying fixes for XLSB shared/array formulas and the
-# transposed `>`/`>=` operators. See docs/upstream-issues.md; to be dropped once
-# the changes land upstream.
+# calamine fork carrying fixes for XLSB/XLS shared and array formulas and the
+# transposed `>`/`>=` operators, submitted upstream as tafia/calamine#712.
+# Without them 70% of the formulas in a real XLSB workbook are silently lost.
+# Drop this section once the changes land in a published release.
 [patch.crates-io]
-calamine = { path = "../calamine" }
+calamine = { git = "https://github.com/sjvrensburg/calamine.git", branch = "xlsb-shared-formulas" }

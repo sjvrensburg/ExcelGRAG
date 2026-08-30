@@ -29,18 +29,17 @@ are not yet built.
 
 ## The calamine fork
 
-`eg-ingest` depends on a forked calamine at `../calamine`, wired in via
-`[patch.crates-io]`. It fixes two silent bugs in both binary formats —
-dropped shared and array formulas, and transposed `>=` / `>` — without which 70%
-of the formulas in a real XLSB workbook go missing. Clone it alongside this repo:
+`eg-ingest` depends on a [forked calamine](https://github.com/sjvrensburg/calamine/tree/xlsb-shared-formulas),
+wired in via `[patch.crates-io]` and pinned by `Cargo.lock`. Nothing extra to
+clone — `cargo build` fetches it.
 
-```sh
-git clone https://github.com/tafia/calamine.git ../calamine
-cd ../calamine && git checkout xlsb-shared-formulas
-```
+The fork fixes two silent bugs in both binary formats: dropped shared and array
+formulas, and transposed `>=` / `>`. Without them 70% of the formulas in a real
+XLSB workbook go missing, and every comparison is inverted.
 
-The fix is ready to upstream, in two commits, one per format; see
-`docs/upstream-issues.md`, which also records what a pre-PR review caught.
+Submitted upstream as [tafia/calamine#712](https://github.com/tafia/calamine/pull/712).
+Once it lands in a published release, delete the `[patch.crates-io]` section.
+See `docs/upstream-issues.md`, which also records what a pre-PR review caught.
 
 ## Testing
 
