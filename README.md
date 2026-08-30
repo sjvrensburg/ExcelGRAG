@@ -464,6 +464,33 @@ already caught three real bugs — see `docs/upstream-issues.md`.
 Fixtures live in `tests/fixtures/vendor` and were authored by real Excel, because
 no open-source tool can write XLSB.
 
+### Asking a second reader
+
+Parity compares this reader with itself across two formats, which cannot catch
+a defect that reads both the same way — and four of the seven were exactly
+that. The other check is an independent implementation. `dump_cells` writes a
+sheet's formulas and cached values in the schema [sheet-oracle] writes from
+SheetJS, and the two dumps are diffed:
+
+```sh
+cargo run --release -p eg-ingest --example dump_cells -- private/book.xlsb \
+  --sheet 'Work Doc' --range A2:BZ200 --out ours.json
+node ../sheet-oracle/bin/sheet-oracle.js private/book.xlsb \
+  --sheet 'Work Doc' --max-rows 200 --range A2:BZ200 --out theirs.json
+node ../sheet-oracle/bin/sheet-oracle-compare.js ours.json theirs.json
+```
+
+On 10,137 formulas of the reference workbook the two agree on 9,543. Of the
+rest, 590 are SheetJS naming a column past `XFD` — the same defect this reader
+had, in the same field, found the same way — and 4 are the two of them
+spelling "a sheet in a workbook that is not open" differently. Neither reader
+is an authority. They simply do not have the same bugs in the same places.
+
+`--no-values` dumps formulas and value kinds without the data, for a workbook
+that is confidential.
+
+[sheet-oracle]: ../sheet-oracle
+
 ## Confidential workbooks
 
 Put them in `private/`, which is gitignored in full. To inspect one without
