@@ -542,6 +542,66 @@ fn heavier_edges_are_followed_first() {
 }
 
 #[test]
+fn a_heavy_detour_does_not_hide_what_is_closer() {
+    // Main reads Heavy from three cells and Light from one, and Heavy also
+    // reads Light. Weight-first takes Light through Heavy, records it at two
+    // hops, and then never queues its edges — so Deep, which is genuinely two
+    // hops from Main, is lost.
+    let wb = Workbook {
+        path: "detour.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash-detour".into(),
+        sheets: vec![
+            grid(
+                0,
+                "Main",
+                &[
+                    "Row Value",
+                    "a =Heavy!B2",
+                    "b =Heavy!B3",
+                    "c =Heavy!B4",
+                    "d =Light!B2",
+                ],
+            ),
+            grid(1, "Heavy", &["K V", "x =Light!B3", "y 2", "z 3"]),
+            grid(2, "Light", &["K V", "p =Deep!B2", "q =Deep!B3"]),
+            grid(3, "Deep", &["K V", "m 1", "n 2"]),
+        ],
+        defined_names: Vec::new(),
+        external_links: Vec::new(),
+    };
+    let (_root, corpus) = corpus_of("detour", &[wb]);
+    let seed = hit_for(&corpus, "hash-detour", "Main", NodeKind::Sheet);
+
+    let found = expand(
+        &corpus,
+        &[seed],
+        &ExpandOptions {
+            hops: 2,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let sheets: Vec<&str> = found.workbooks[0]
+        .nodes
+        .iter()
+        .filter_map(|n| n.sheet.as_deref())
+        .collect();
+    assert!(sheets.contains(&"Deep"), "reached only {sheets:?}");
+
+    // And Light is recorded at the distance it actually is from the seed.
+    let light = found.workbooks[0]
+        .nodes
+        .iter()
+        .filter(|n| n.sheet.as_deref() == Some("Light"))
+        .map(|n| n.hops)
+        .min()
+        .expect("Light was not reached");
+    assert_eq!(light, 1, "Light is one hop from Main, recorded as {light}");
+}
+
+#[test]
 fn a_seed_whose_workbook_is_gone_is_reported_rather_than_dropped() {
     let (_root, corpus) = corpus_of("missing", &[chain()]);
     let mut seed = hit_for(&corpus, "hash-chain", "Net", NodeKind::Column);

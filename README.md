@@ -272,9 +272,12 @@ most three that costs no hop, because naming a node is not travelling away from
 it — and outwards only when asked, and never from the workbook root, whose
 children are the whole file.
 
-Dependencies are followed in both directions, best-first by edge weight. Weight
-is the number of cell references behind the edge, so the heaviest first is what
-most of the workbook actually rests on.
+Dependencies are followed in both directions, nearest first and heaviest within
+a distance. Weight is the number of cell references behind the edge, so the
+heaviest is what most of the workbook actually rests on — but taking weight
+before distance loses nodes: a heavy detour reaches a node at two hops, the
+one-hop step to it is then dropped as already-seen, and because it arrived at
+the hop limit its own edges are never followed. Everything past it disappears.
 
 ### Rendering it for an agent
 

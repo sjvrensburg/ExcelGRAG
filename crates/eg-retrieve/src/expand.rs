@@ -28,10 +28,11 @@
 //!   what the index just ranked; the ones that matter are already seeds, and
 //!   pulling all 136 in would bury them. [`ExpandOptions::children`] opens it
 //!   with a cap for callers who want the shape of a table.
-//! - **Along dependencies**, both directions, k hops, best-first by edge
-//!   weight and under a node budget. Weight is the number of cell references
-//!   behind the edge, so following the heaviest first is following what most of
-//!   the workbook actually rests on.
+//! - **Along dependencies**, both directions, k hops, under a node budget:
+//!   nearest first, and heaviest within a distance. Weight is the number of
+//!   cell references behind the edge, so the heaviest is what most of the
+//!   workbook actually rests on — but taking weight before distance loses
+//!   nodes, as [`Step`]'s ordering explains.
 //!
 //! # Dependencies hang off regions, so ancestors are walked from too
 //!
@@ -183,8 +184,9 @@ pub struct RetrievedNode {
     /// gets it right for that child and truncated for every other.
     pub parent: Option<u32>,
     pub role: Role,
-    /// Dependency hops from the nearest seed. Ancestry does not count as a hop:
-    /// naming a node is not travelling away from it.
+    /// Dependency hops from the nearest seed, and it is the nearest: the walk
+    /// takes every node at distance *n* before any at *n+1*. Ancestry does not
+    /// count as a hop — naming a node is not travelling away from it.
     pub hops: usize,
     /// The seed's search score, carried on the seed only.
     pub score: Option<f32>,
@@ -340,11 +342,21 @@ struct Step {
 
 impl Ord for Step {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Heaviest first, then the shallower one, then by node index so the
-        // same graph and the same seeds always give the same walk.
-        self.weight
-            .cmp(&other.weight)
-            .then_with(|| other.hops.cmp(&self.hops))
+        // Nearest first, and heaviest within a distance.
+        //
+        // Weight-first looks like the right priority and quietly loses nodes.
+        // With a heavy S→A, a light S→C and a middling A→C, weight order takes
+        // C through A and records it at two hops; the one-hop step to C is then
+        // dropped as already-taken, and because C arrived at the hop limit its
+        // own edges were never queued. Everything past C disappears, and the
+        // `hops` recorded is not the distance to the nearest seed either.
+        //
+        // Ordering by distance first makes every node arrive at its shortest
+        // one, which is what the field claims and what the hop limit means.
+        other
+            .hops
+            .cmp(&self.hops)
+            .then_with(|| self.weight.cmp(&other.weight))
             .then_with(|| other.to.index().cmp(&self.to.index()))
     }
 }
@@ -514,7 +526,16 @@ fn add_ancestry(
 ) -> (Vec<NodeIndex>, bool) {
     let mut added = Vec::new();
     let mut child = from;
+    // A containment cycle cannot happen in a graph eg-graph built, but this
+    // walks one read off disk, and a corrupt file should give a short answer
+    // rather than a hung process. `WorkbookContext::ancestry` guards the same
+    // walk; this is the other place that does it.
+    let mut steps = 0;
     while let Some(parent) = containing(graph, child) {
+        steps += 1;
+        if steps > graph.node_count() {
+            return (added, false);
+        }
         if got.taken.contains(&parent) {
             child = parent;
             continue;
