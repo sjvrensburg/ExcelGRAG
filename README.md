@@ -121,8 +121,8 @@ stored — 119 MiB, and wanted only when drilling into one workbook, at which
 point they are rebuilt.
 
 ```sh
-cargo run --release -p eg-graph --example corpus -- index private/*.xlsb
-cargo run --release -p eg-graph --example corpus -- index
+cargo run --release -p eg-graph --example corpus -- index private/*.xlsb  # add
+cargo run --release -p eg-graph --example corpus -- index                # list
 ```
 
 ## Testing
