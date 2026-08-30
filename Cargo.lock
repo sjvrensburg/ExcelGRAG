@@ -582,6 +582,12 @@ version = "0.1.0"
 [[package]]
 name = "eg-eval"
 version = "0.1.0"
+dependencies = [
+ "eg-ingest",
+ "eg-model",
+ "rustc-hash",
+ "serde",
+]
 
 [[package]]
 name = "eg-graph"
