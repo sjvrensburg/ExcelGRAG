@@ -1,0 +1,2 @@
+# ExcelGRAG
+Excel --> Graph --> GraphRAG
