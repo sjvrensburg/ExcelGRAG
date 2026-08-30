@@ -17,8 +17,9 @@ Early, but a question now goes all the way from words to the part of a workbook
 that answers it. `eg-model`, `eg-ingest`, `eg-structure`, `eg-graph` and
 `eg-index` and `eg-retrieve` are implemented and tested: a question in words
 comes back as a cited passage, and `eg-eval` follows a citation down to the
-cells behind it and recomputes it from the cells under it. `eg-mcp` serves all
-of that to an agent over MCP, and `eg` is the same behind one command.
+cells behind it, recomputes it from the cells under it, and says what else
+moves if one of them changes. `eg-mcp` serves all of that to an agent over MCP,
+and `eg` is the same behind one command.
 
 ## Workspace
 
@@ -30,7 +31,7 @@ of that to an agent over MCP, and `eg` is the same behind one command.
 | `eg-graph` | Graph build, reference lifting, invariants, store | implemented |
 | `eg-index` | Lexical (tantivy) and vector (fastembed) indexes | implemented |
 | `eg-retrieve` | Hybrid search, graph expansion, context rendering | implemented |
-| `eg-eval` | Cell-level provenance, formula evaluation, what-if | provenance and recompute done |
+| `eg-eval` | Cell-level provenance, formula evaluation, what-if | implemented |
 | `eg-mcp` | MCP server | implemented |
 | `eg-cli` | Command-line front-end (`eg`) | implemented |
 
@@ -459,11 +460,83 @@ local cell happening to hold what the foreign cell held.
 `docs/upstream-issues.md` has all seven, and the four found this way are in the
 calamine fork.
 
+## What if this number were different
+
+Recomputing says whether one formula still agrees with the value beside it, and
+it reads that formula's precedents as *stored* values on purpose, so a
+disagreement is about one cell. A what-if is the opposite question and needs the
+opposite of that limit: put a different number in a cell, and follow it as far
+as it goes.
+
+```sh
+eg what-if book.xlsb 'RATES!BS9=0.175'
+eg what-if book.xlsb 'RATES!BS9=0.175' --levels 2 --limit 5
+```
+
+Nothing is written. The workbook cannot be written — XLSB is read-only here,
+because no Rust crate can serialise it — so a substituted value lives in an
+overlay that every read goes through, and the answer is a report rather than a
+file. That is a limitation on paper and rarely one in practice: the question is
+almost always "what would this do", not "please change it".
+
+Three costs the one-formula recompute did not have, and they are the whole
+design:
+
+- **Finding what is downstream.** Nothing records who reads a cell, so each
+  level of the chain is a full scan of the workbook's formulas.
+- **Order.** A cell must not be computed before the cells it reads, so each
+  level is sorted by its own internal dependencies. What cannot be sorted is a
+  cycle, and a cycle is reported rather than iterated to a fixed point —
+  Excel's iterative calculation is a setting this cannot see.
+- **Saying what it could not answer.** A cell whose formula this crate does not
+  model has no new value, and neither does anything reading it. Those come back
+  as *no answer*, never as *unchanged* — leaving the stored value in place would
+  report a smaller impact than the change really has.
+
+On the reference workbook, changing one interest rate — the one residential
+debtors are discounted at:
+
+```
+1,197,300 cell(s) downstream over 6 level(s), 7 scans of 47.5M formulas in 207s
+  moved           678,427
+  unchanged       518,873
+  blocked               0
+```
+
+The half that does not move is the interesting half, and the first level shows
+it cleanly:
+
+```
+115,566 cell(s) downstream over 1 level(s): 98,374 moved, 17,192 unchanged
+```
+
+That level is exactly the `PV()` column. Every one of those formulas looks the
+rate up in the whole table, `$BR$4:$BS$12`, so every one of them reads the cell
+that changed — but 17,192 of them are looking up a different category and come
+back with the number they had. A dependency graph is right that all 115,566
+depend on that cell; only recomputing can say which of them a change actually
+reaches.
+
+A walk that has to stop says which limit stopped it, because "nothing else
+moved" and "this did not look" are different answers:
+
+```
+  stopped at the ceiling on affected cells — the change reaches further than this
+```
+
+The cost is dominated by the scans, and the walk keeps them down by pruning:
+a cell that recomputes to what it already held cannot move anything reading it,
+so it does not travel in the next frontier. Matching a reference against that
+frontier is the inner loop — tens of millions of times against a set of
+hundreds of thousands of cells — so the frontier is held as sorted rows per
+column, and a reference costs a bounding-box reject and then a binary search
+per column it spans, rather than a walk over either side.
+
 ## One command
 
 Everything above is reachable through each crate's examples, which is fine for
 developing a library and poor for using one. `eg` is the same capabilities
-behind eight verbs, in the order a question travels:
+behind nine verbs, in the order a question travels:
 
 ```sh
 cargo install --path crates/eg-cli
@@ -474,6 +547,7 @@ eg search corpus/ bad debt --limit 3        # or just what matched
 eg cells book.xlsb 'LOOKUP!AE53:AG89'       # the cells behind a citation
 eg trace book.xlsb 'LOOKUP!AE53' --dependents
 eg check book.xlsb                          # do the formulas still agree
+eg what-if book.xlsb 'RATES!BS9=0.175'      # and what moves if one changes
 eg serve corpus/                            # the same, to an agent over MCP
 ```
 
@@ -488,7 +562,7 @@ READMEs — while a person who types `eg cells` is asking to see the cells.
 
 ## Serving it to an agent
 
-`eg-mcp` is an MCP server over the whole stack: a corpus in, seven tools out.
+`eg-mcp` is an MCP server over the whole stack: a corpus in, eight tools out.
 
 ```sh
 cargo run --release -p eg-graph --example corpus -- index private/book.xlsb
@@ -505,6 +579,7 @@ claude mcp add excelgrag -- "$PWD/target/release/eg-mcp" "$PWD/index"
 | `precedents` | what a formula reads |
 | `dependents` | what reads a cell — the expensive direction, and it says so |
 | `recompute` | whether a formula still agrees with the value stored beside it |
+| `what_if` | what else moves if a cell held a different number |
 
 The surface is the pipeline: search, then read the context, then go down to
 cells when the answer needs a number. A passage carries no values — it says

@@ -32,9 +32,16 @@
 pub mod calc;
 pub mod parse;
 pub mod trace;
+pub mod whatif;
 
-pub use calc::{check, evaluate, recompute, CheckReport, Input, Outcome, Recomputed, Unsupported};
+pub use calc::{
+    check, evaluate, evaluate_over, recompute, recompute_over, CheckReport, Input, Outcome,
+    Overrides, Recomputed, Unsupported,
+};
 pub use parse::{parse, BinOp, Expr, ParseError, UnaryOp};
 pub use trace::{
     cell, cells_in, dependents_of, precedents_of, CellFact, Reference, ScanReport, Target,
+};
+pub use whatif::{
+    what_if, Applied, Blocked, Change, Impact, ImpactReport, Moved, Stopped, WhatIfOptions,
 };

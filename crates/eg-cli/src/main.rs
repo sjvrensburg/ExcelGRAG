@@ -2,7 +2,7 @@
 //!
 //! Everything this workspace can do is reachable through the examples in each
 //! crate, which is fine for developing a library and poor for using one. This
-//! is the same capabilities behind one binary and eight verbs, in the order a
+//! is the same capabilities behind one binary and nine verbs, in the order a
 //! question actually travels:
 //!
 //! ```sh
@@ -10,6 +10,7 @@
 //! eg ask corpus/ bad debt        # a question, answered as a cited passage
 //! eg cells book.xlsb 'LOOKUP!AE53:AG89'   # the cells behind a citation
 //! eg check book.xlsb             # do the formulas still agree with their values
+//! eg what-if book.xlsb 'RATES!B4=0.15'    # and what moves if one changes
 //! eg serve corpus/               # the same, to an agent over MCP
 //! ```
 //!
@@ -135,6 +136,28 @@ enum Command {
         privacy: Privacy,
     },
 
+    /// Change a cell and report every cell that moves because of it.
+    #[command(name = "what-if", alias = "whatif")]
+    WhatIf {
+        workbook: String,
+        /// One or more `Sheet!A1=value` changes. A bare word is text, a
+        /// number is a number, and nothing at all empties the cell.
+        #[arg(required = true)]
+        changes: Vec<String>,
+        /// Levels of the dependency chain to follow. Each one is a full scan
+        /// of the workbook's formulas.
+        #[arg(long, default_value_t = 8)]
+        levels: usize,
+        /// Ceiling on how many cells the change may reach before the walk
+        /// gives up. The counts stay exact for what it did walk.
+        #[arg(long, default_value_t = 500_000)]
+        max_cells: usize,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[command(flatten)]
+        privacy: Privacy,
+    },
+
     /// Serve a corpus to an agent over MCP, on stdin and stdout.
     Serve {
         dir: String,
@@ -207,6 +230,21 @@ fn main() {
             limit,
             privacy,
         } => workbook::check(&workbook, scope.as_deref(), limit, privacy.redact_values),
+        Command::WhatIf {
+            workbook,
+            changes,
+            levels,
+            max_cells,
+            limit,
+            privacy,
+        } => workbook::whatif(
+            &workbook,
+            &changes,
+            levels,
+            max_cells,
+            limit,
+            privacy.redact_values,
+        ),
         Command::Serve { dir, privacy } => corpus::serve(&dir, privacy.redact_values),
     };
 
@@ -243,6 +281,7 @@ mod tests {
             "cells",
             "trace",
             "check",
+            "what-if",
             "serve",
         ] {
             assert!(names.contains(&verb.to_string()), "{verb} went missing");
