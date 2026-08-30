@@ -1,5 +1,8 @@
 /target
-Cargo.lock
+
+# Cargo.lock is committed deliberately: this workspace produces binaries, and
+# the lock is what pins the calamine fork to an exact commit. Without it a
+# `branch = ...` dependency would drift silently.
 
 # Confidential or user-supplied workbooks. Never commit real spreadsheets:
 # they routinely contain commercial, personal or financial data.
