@@ -1,6 +1,6 @@
 # Upstream issues in calamine
 
-Five defects found in [calamine](https://github.com/tafia/calamine) 0.36.1 while
+Six defects found in [calamine](https://github.com/tafia/calamine) 0.36.1 while
 building ExcelGRAG.
 
 **Status:** issues 2 and 3 are fixed in a fork at `../calamine`, branch
@@ -10,10 +10,10 @@ format — submitted as [tafia/calamine#712](https://github.com/tafia/calamine/p
 Issue 1 was our own bug and is fixed here. Issue 4 was found later, while
 building the graph, and is submitted separately as
 [#713](https://github.com/tafia/calamine/pull/713) — unrelated code, so it did
-not belong on a branch already under review. Issue 5 was found later still, by
-recomputing formulas rather than reading them, and sits on its own branch
-`xlsb-relative-columns` for the same reason; it is pushed to the fork but not
-yet opened upstream.
+not belong on a branch already under review. Issues 5 and 6 were found later still, by
+recomputing formulas rather than reading them, and sit on their own branches
+`xlsb-relative-columns` and `xlsb-formula-error-cells`; both are pushed to the
+fork but not yet opened upstream.
 
 The workspace patches in an `excelgrag` branch carrying both fixes, since
 `[patch.crates-io]` takes a single source.
@@ -368,15 +368,25 @@ That is the silent-misattribution case actually occurring, reached through a
 prefix that parses as a cell rather than through a sheet-name collision. Nothing
 about the output looked wrong.
 
-## 5. Relativity flags are read as part of a reference's column
+## 5. A reference's relativity flags, read twice wrongly
 
 **Affects:** `.xlsb`. Pre-existing upstream, in code untouched by #712.
 
 **Fixed** in the fork on branch `xlsb-relative-columns`, branched from `master`
 and independent of #712 and #713. Not yet opened upstream.
 
-An `RgceLoc` column field is 14 bits of column and two of relativity: `0x8000`
-marks the column relative, `0x4000` the row. `PtgRef` masks them off.
+An `RgceLoc` column field is 14 bits of column and two of relativity. **Both
+halves of that sentence were being read wrongly**, and the branch fixes them in
+that order: the flags were being taken as part of the column, and once they were
+not, they turned out to mean the opposite of what the reader believed.
+
+MS-XLSB orders the field column-first, so `0x4000` marks the column relative and
+`0x8000` the row — the reverse of the BIFF8 layout the `.xls` reader documents.
+Same two bits, different format.
+
+### 5a. The flags are read as part of the column
+
+`PtgRef` masks them off.
 `PtgArea`, `PtgRef3d` and `PtgArea3d` read the field whole and print both
 components as absolute, under a `// TODO: check with relative columns`:
 
@@ -407,6 +417,34 @@ only something that reads it finds the reference points nowhere, which is why
 this survived the graph, the index and the retrieval layer and was caught by the
 first component to evaluate a formula rather than parse it.
 
+### 5b. The two flags are the wrong way round
+
+Masking them off leaves the question of what they mean, and the reader had them
+swapped. For `PtgRef`, `PtgArea` and the 3-D forms that only moves the `$`
+signs, since an absolute and a relative reference name the same cell. For
+`PtgRefN` and `PtgAreaN` it decides whether the stored number is an index or an
+offset from the cell being evaluated — so it changes which cell is read, and
+those are the tokens every filled formula is built from.
+
+The token for the second operand of `AJ5` on the reference workbook is:
+
+```
+field = 0x8021, raw_row = 0, anchor = (row 4, col 35)
+```
+
+Read as the reader had it — column relative, row absolute — that is column
+35 + 33 = `BQ`, row 1: `=V5*BQ$1`, where `BQ1` holds 159.49 and the product is
+93,958. Excel stored 295.87. Read correctly — column absolute, row relative —
+it is column 33, row 4 + 0: `=V5*$AH5`, where `AH5` holds 0.502222 and the
+product is 295.86915555555555, the stored value to the last digit. `AH` is that
+sheet's "% to provide" column, and a provision of ageing bucket times percentage
+is what the formula is for. Four sibling cells decode the same way and match
+their stored values exactly; the row below stores 0, which only the relative row
+explains.
+
+**934,118 formulas — 13.7% of the workbook — moved from disagreeing with their
+stored value to agreeing with it.**
+
 ### The fix
 
 One `read_loc_col` splits the field, so a single place knows the layout, and
@@ -415,8 +453,10 @@ routed through both — a refactor, not a change: its masking and its flags
 already matched, and `formula_xlsb` covers it, `issues.xlsb` decoding to
 `B1+OneRange` before and after.
 
-The bit assignment is the one the XLS reader already documents and tests for
-BIFF8, where `RgceLocRel` has fColRel = `0x8000` and fRwRel = `0x4000`.
+Nothing in either repository's fixtures discriminates the two flag readings: a
+fixture would need a reference absolute in one axis and relative in the other,
+and none has one. That is also why this survived — `B1+OneRange` is relative in
+both axes, and both readings agree on it.
 
 No fixture in either repository exercises a relative area or a 3-D reference,
 and none can be authored for `.xlsb`. The branch carries unit tests for the
@@ -427,11 +467,75 @@ and for the two 3-D forms; the end-to-end path rests on the reference workbook.
 
 Recomputing every formula and comparing with the value Excel stored:
 
-| | Before | After |
-|---|---|---|
-| Agreed with the stored value | 71.9% | **83.8%** |
-| Not recomputable | 14.3% | **1.7%** |
-| Failed to parse | 855,637 | **0** |
+| | Before | After 5a | After 5b |
+|---|---|---|---|
+| Agreed with the stored value | 71.9% | 83.8% | **97.6%** |
+| Disagreed | 13.8% | 14.5% | **0.7%** |
+| Not recomputable | 14.3% | 1.7% | **1.7%** |
+| Failed to parse | 855,637 | 0 | **0** |
 
-What is left of the second row is two functions `eg-eval` does not implement,
+What is left of the third row is two functions `eg-eval` does not implement,
 `PV()` and `GETPIVOTDATA()`. Nothing left in it is a decoding failure.
+
+The middle column is worth reading twice: masking the flags off *raised* the
+disagreement count, because 855,637 formulas that had been unreadable became
+readable and then, being read with the flags reversed, wrong. A fix that makes
+a number worse is not always a wrong fix — it can be one that stops hiding the
+next defect.
+
+## 6. A formula cell whose cached value is an error is skipped
+
+**Affects:** `.xlsb`. Pre-existing upstream.
+
+**Fixed** in the fork on branch `xlsb-formula-error-cells`, branched from
+`master` and independent of every other branch. Not yet opened upstream.
+
+`next_cell` pairs each literal record with its formula counterpart:
+`BrtCellBool` with `BrtFmlaBool`, `BrtCellReal` with `BrtFmlaNum`, `BrtCellSt`
+with `BrtFmlaString`. `BrtCellError` (`0x0003`) has no such pair, so
+`BrtFmlaError` (`0x000B`) falls through the match's catch-all and the record is
+skipped:
+
+```rust
+0x0004 | 0x000A => DataRef::Bool(self.buf[8] != 0), // BrtCellBool or BrtFmlaBool
+0x0005 | 0x0009 => { .. }                           // BrtCellReal or BrtFmlaNum
+0x0006 | 0x0008 => { .. }                           // BrtCellSt or BrtFmlaString
+0x0003 => { .. }                                    // BrtCellError, alone
+```
+
+The cell is then not merely valueless but **absent**: `worksheet_range` has no
+entry for it and `used_cells` never yields it, so nothing distinguishes it from
+a blank. `worksheet_formula` still returns its formula, so the same coordinate
+exists in one range and not the other.
+
+That is an ordinary cell. Any `VLOOKUP` that misses stores `#N/A`, and a
+workbook that looks things up has thousands of them: **48,006 on the reference
+workbook**, whose stored values could not be read at all. Recomputing every
+formula, agreement goes from 97.6% to **98.3%**.
+
+### The fix
+
+`0x000B` joins the `0x0003` arm. The error byte sits at the same offset in both
+records — `next_formula_record` already reads the two together for that reason —
+and nothing in that arm reads past it.
+
+No fixture exercises it and none can be authored, for the usual reason. Verified
+against the reference workbook, where a `VLOOKUP` column returning `#N/A` came
+back blank before and comes back `#N/A` after.
+
+### What is left
+
+Eleven formulas out of 6,793,166 still disagree, and they fall into four kinds,
+none of which is a decoding failure of the sort above:
+
+- Two read `JOURNAL_IMPAIR!$D$21`–`$D$24` on a sheet that is 13 rows long. The
+  sheet index in the reference may be resolving to the wrong sheet.
+- Two read a pivot table's cells, which our load has as empty.
+- Two look up `'#Unknown'!A:C` — the marker a reader substitutes when it cannot
+  resolve a sheet index — and Excel stored a number, so it resolved.
+- One computes `1.49e-8` where Excel stored `0`, from a subtraction of two
+  numbers equal to 15 significant digits. That one is ours: Excel snaps such a
+  result to zero and `eg-eval` does not.
+
+The first three point at the same place — how a sheet index in a formula is
+resolved to a sheet — which is the next thing to look at.

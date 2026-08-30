@@ -393,47 +393,59 @@ Sweeping the reference workbook is one pass, and it costs about as much as
 loading it:
 
 ```
-6,793,166 formulas in 24.0s (283,000 per second)
-  agreed         5,695,274 (83.8%)
-  differed         982,135 (14.5%)
+6,793,166 formulas in 24.4s (278,000 per second)
+  agreed         6,677,398 (98.3%)
+  differed              11 ( 0.0%)
   unsupported      115,757 ( 1.7%)
 ```
 
-The unsupported column is the honest one, and it names what it could not do:
-`PV()` accounts for 115,566 of it and `GETPIVOTDATA()` for 191. That is the
-whole of it — two functions nobody has written yet, and nothing else.
+Eleven disagreements, out of six and three quarter million formulas. The
+unsupported column is two functions nobody has written yet — `PV()` accounts
+for 115,566 of it and `GETPIVOTDATA()` for 191 — and nothing else.
 
-It did not start out that way. The first sweep put 14.3% in that column, and
-855,637 of those formulas failed to parse because they named columns that
-cannot exist:
+It did not start out that way. The first sweep agreed with 71.9%, and getting
+from there to here meant fixing three defects, none of them in this crate. The
+first sweep put 855,637 formulas in the unsupported column because they named
+columns that cannot exist:
 
 ```
 =OVERVIEW!$BTRO$25
 =VLOOKUP(B2,HQ880_20240630!$XFF$1:$XFM$1048576,5,FALSE)
 ```
 
-Excel's last column is `XFD`. `XFF` is two past it and `BTRO` is three times
-the width of a worksheet, so no formula was ever written this way. The cause
-was two bits: an XLSB reference stores its column in 14 bits and its
-relativity in the other two, and three of the four decoding paths were reading
-the field whole, so a relative column 2 arrived as column 16,386. Those two
-formulas are really `=OVERVIEW!C25` and
-`=VLOOKUP(B2,HQ880_20240630!$B1:$I1048576,5,FALSE)`. Fixed in the calamine
-fork — see `docs/upstream-issues.md` — and the counts above are from after
-that fix.
+Excel's last column is `XFD`. An XLSB reference stores its column in 14 bits
+and its relativity in the other two, and three of the four decoding paths were
+reading the field whole, so a relative column 2 arrived as column 16,386.
+Masking the flags off made those formulas readable — and *raised* the
+disagreement count, because they were then read with the two flags meaning the
+opposite of what they mean. That is the second defect, and it is the one that
+mattered:
 
-Nothing had failed. A formula that is wrong still looks like a formula, and
-12.6% of this workbook had been read that way by the graph, the index and the
-retrieval layer, none of which can tell a column that exists from one that
-does not. The first thing to notice was the first thing that evaluated a
-formula instead of parsing it, and it noticed the way a recompute is supposed
-to: by disagreeing with Excel about a number.
+```
+=V5*BQ$1     column relative, row absolute — 589.12 × 159.49 = 93,958
+=V5*$AH5     column absolute, row relative — 589.12 × 0.502222 = 295.86915555555555
+```
 
-Which leaves 14.5% still disagreeing, and that is a separate question rather
-than a conclusion. Some of it is precedents the loader never populated,
-which is another defect below this layer. Some of it is a stored value of blank
-where the formula computes `#N/A`. A sweep that came back clean
-would only have meant it was not looking.
+Excel stored 295.86915555555555. `AH` is that sheet's "% to provide" column,
+and a provision of ageing bucket times percentage is what the formula is for.
+Two bits, and 934,118 formulas moved from disagreeing to agreeing.
+
+The third was quieter. A formula cell whose cached value is an error was
+skipped entirely by the reader rather than read as an error, so the cell was
+absent instead of valueless — 48,006 of them, every `VLOOKUP` in the workbook
+that misses. All three are fixed in the calamine fork; `docs/upstream-issues.md`
+has the detail.
+
+None of this failed. A formula that is wrong still looks like a formula, and a
+missing cell looks like a blank one. The graph, the index and the retrieval
+layer had all read this workbook without anything to notice, because none of
+them ever asks the workbook a question it can answer wrongly. A recompute does,
+six and three quarter million times, and it disagreed.
+
+The eleven that remain are each worth looking at, which is the point of there
+being eleven. Ten of them read a cell that is not where the reference says it
+is, pointing at one more defect in how a formula's sheet index is resolved. The eleventh is ours: Excel snaps a subtraction of two
+numbers equal to 15 significant digits to zero, and we return the 1.49e-8.
 
 ## Testing
 
