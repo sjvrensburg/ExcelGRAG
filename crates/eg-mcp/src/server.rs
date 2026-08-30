@@ -18,6 +18,8 @@ use crate::rpc::{code, Request, Response};
 use crate::state::State;
 use crate::tools::{self, TOOLS};
 
+pub use crate::tools::Tool;
+
 /// The protocol version this server implements. A client asking for another
 /// version is answered with this one, and the spec leaves it to the client to
 /// decide whether it can live with that.

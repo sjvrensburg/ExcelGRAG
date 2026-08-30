@@ -18,7 +18,7 @@ that answers it. `eg-model`, `eg-ingest`, `eg-structure`, `eg-graph` and
 `eg-index` and `eg-retrieve` are implemented and tested: a question in words
 comes back as a cited passage, and `eg-eval` follows a citation down to the
 cells behind it and recomputes it from the cells under it. `eg-mcp` serves all
-of that to an agent over MCP. The CLI is not yet built.
+of that to an agent over MCP, and `eg` is the same behind one command.
 
 ## Workspace
 
@@ -32,7 +32,7 @@ of that to an agent over MCP. The CLI is not yet built.
 | `eg-retrieve` | Hybrid search, graph expansion, context rendering | implemented |
 | `eg-eval` | Cell-level provenance, formula evaluation, what-if | provenance and recompute done |
 | `eg-mcp` | MCP server | implemented |
-| `eg-cli` | Command-line front-end | stub |
+| `eg-cli` | Command-line front-end (`eg`) | implemented |
 
 ## The calamine fork
 
@@ -450,6 +450,33 @@ local cell happening to hold what the foreign cell held.
 
 `docs/upstream-issues.md` has all seven, and the four found this way are in the
 calamine fork.
+
+## One command
+
+Everything above is reachable through each crate's examples, which is fine for
+developing a library and poor for using one. `eg` is the same capabilities
+behind eight verbs, in the order a question travels:
+
+```sh
+cargo install --path crates/eg-cli
+
+eg index corpus/ book.xlsb                  # read it, store its graph, index it
+eg ask corpus/ bad debt provision           # a question, as a cited passage
+eg search corpus/ bad debt --limit 3        # or just what matched
+eg cells book.xlsb 'LOOKUP!AE53:AG89'       # the cells behind a citation
+eg trace book.xlsb 'LOOKUP!AE53' --dependents
+eg check book.xlsb                          # do the formulas still agree
+eg serve corpus/                            # the same, to an agent over MCP
+```
+
+The verbs wrap library calls only. The diagnostics — `raw_cells`,
+`why_unpopulated`, the format probes — stay as examples in the crate they
+belong to, because they exist to develop this code rather than to use it.
+
+`eg` and `eg serve` both **show** cell values, and take `--redact-values` to
+turn them into kinds. That is the opposite default from the examples, which
+redact unless asked, because their output ends up in commit messages and
+READMEs — while a person who types `eg cells` is asking to see the cells.
 
 ## Serving it to an agent
 

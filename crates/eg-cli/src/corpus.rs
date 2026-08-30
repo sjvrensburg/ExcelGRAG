@@ -1,0 +1,301 @@
+//! The verbs that work on a corpus: building one, asking it a question, and
+//! serving it.
+
+use std::time::Instant;
+
+use eg_graph::store::Corpus;
+use eg_graph::{build_with, GraphOptions};
+use eg_index::vector::{embeddable, VectorIndex};
+use eg_index::{fuse, Embedder, Hit, SearchOptions, TextIndex};
+use eg_ingest::{load_with, LoadOptions};
+use eg_retrieve::{expand, render, ExpandOptions, RenderOptions};
+
+/// Read workbooks into the corpus, then bring both indexes up to date.
+///
+/// The three stages are separable on purpose. Storing a graph is the expensive,
+/// once-per-workbook part; the lexical index is cheap; the vector index needs a
+/// model that may not be reachable, and a corpus with only the first two still
+/// answers questions by word.
+pub fn index(
+    dir: &str,
+    workbooks: &[String],
+    reindex: bool,
+    lexical_only: bool,
+) -> Result<(), String> {
+    let mut corpus = Corpus::open(dir).map_err(|e| format!("could not open the corpus: {e}"))?;
+
+    for path in workbooks {
+        let started = Instant::now();
+        let loaded = load_with(
+            path,
+            &LoadOptions {
+                max_cells: None,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| format!("could not load {path}: {e}"))?;
+        let read = started.elapsed();
+
+        // Only the region-level graph is stored. Formula groups are hundreds of
+        // thousands of nodes on a real workbook and are wanted only when
+        // drilling into one, at which point they are rebuilt from the file.
+        let built = build_with(
+            &loaded.workbook,
+            &GraphOptions {
+                formula_group_nodes: false,
+                ..Default::default()
+            },
+        );
+        corpus
+            .put(
+                &loaded.workbook.content_hash,
+                path,
+                loaded.workbook.sheets.len(),
+                loaded.workbook.total_cells() as u64,
+                false,
+                &built,
+            )
+            .map_err(|e| format!("could not store {path}: {e}"))?;
+
+        println!(
+            "{path}\n  {} sheets, {} cells read in {:.1}s → {} nodes, {} edges in {:.1}s",
+            loaded.workbook.sheets.len(),
+            loaded.workbook.total_cells(),
+            read.as_secs_f64(),
+            built.graph.node_count(),
+            built.graph.edge_count(),
+            started.elapsed().as_secs_f64() - read.as_secs_f64(),
+        );
+        for warning in &loaded.warnings {
+            println!("  warning: {warning}");
+        }
+    }
+
+    let mut text =
+        TextIndex::open(dir).map_err(|e| format!("could not open the lexical index: {e}"))?;
+    // The model is loaded only if something needs embedding, because loading it
+    // is seconds and a re-run with nothing to do should cost nothing.
+    let mut embedder: Option<(Embedder, VectorIndex)> = None;
+    let hashes: Vec<String> = corpus.entries().map(|(hash, _)| hash.to_string()).collect();
+    let (mut lexical_docs, mut embedded) = (0usize, 0usize);
+
+    for hash in &hashes {
+        // The two indexes are asked separately: the lexical one rebuilds itself
+        // empty on a schema change, so inferring its contents from the vector
+        // index would mean silently searching nothing.
+        let want_text = reindex || !text.contains(hash).unwrap_or(false);
+        let want_vectors = !lexical_only
+            && (reindex
+                || match &embedder {
+                    Some((_, vectors)) => !vectors.contains(hash),
+                    None => true,
+                });
+        if !want_text && !want_vectors {
+            continue;
+        }
+        let Some(stored) = corpus
+            .get(hash)
+            .map_err(|e| format!("could not read the stored graph {}: {e}", short(hash)))?
+        else {
+            continue;
+        };
+
+        if want_text {
+            lexical_docs += text
+                .index_stored(&stored)
+                .map_err(|e| format!("could not index {}: {e}", short(hash)))?;
+        }
+
+        if want_vectors {
+            if embedder.is_none() {
+                match open_embedder(dir) {
+                    Ok(pair) => embedder = Some(pair),
+                    Err(e) => {
+                        println!("  no semantic half ({e}); indexing by word only");
+                        continue;
+                    }
+                }
+            }
+            let Some((embedder, vectors)) = embedder.as_mut() else {
+                continue;
+            };
+            if !reindex && vectors.contains(hash) {
+                continue;
+            }
+            let docs = embeddable(&stored.graph);
+            let made = embedder
+                .embed_documents(&docs)
+                .map_err(|e| format!("could not embed {}: {e}", short(hash)))?;
+            embedded += vectors
+                .put(hash, &stored.path, &docs, &made)
+                .map_err(|e| format!("could not store vectors for {}: {e}", short(hash)))?;
+        }
+    }
+
+    println!(
+        "\ncorpus at {dir}: {} workbook(s), {lexical_docs} lexical document(s) and {embedded} vector(s) added",
+        corpus.len()
+    );
+    Ok(())
+}
+
+fn open_embedder(dir: &str) -> Result<(Embedder, VectorIndex), String> {
+    let embedder = Embedder::new().map_err(|e| e.to_string())?;
+    let vectors =
+        VectorIndex::open(dir, embedder.name(), embedder.dim()).map_err(|e| e.to_string())?;
+    Ok((embedder, vectors))
+}
+
+pub struct AskOptions {
+    pub seeds: usize,
+    pub hops: usize,
+    pub budget: usize,
+    pub children: usize,
+    pub chars: usize,
+    pub lexical_only: bool,
+}
+
+pub fn ask(dir: &str, query: &str, options: AskOptions) -> Result<(), String> {
+    let corpus = Corpus::open(dir).map_err(|e| format!("could not open the corpus: {e}"))?;
+    let search_options = SearchOptions {
+        limit: options.seeds.max(1),
+        ..Default::default()
+    };
+    let hits = find(dir, query, &search_options, options.lexical_only)?;
+    if hits.is_empty() {
+        println!("{query:?} — nothing matched.");
+        return Ok(());
+    }
+
+    let found = expand(
+        &corpus,
+        &hits,
+        &ExpandOptions {
+            hops: options.hops,
+            budget: options.budget.max(1),
+            children: options.children,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| format!("expansion failed: {e}"))?;
+    let rendered = render(
+        &found,
+        &RenderOptions {
+            max_chars: options.chars.max(200),
+            ..Default::default()
+        },
+    );
+
+    print!("{}", rendered.text);
+    println!(
+        "\n---\n{} node(s) from {} seed(s), {} citation(s){}",
+        found.total_nodes(),
+        hits.len(),
+        rendered.citations.len(),
+        if rendered.omitted > 0 {
+            format!(", {} omitted to fit", rendered.omitted)
+        } else {
+            String::new()
+        }
+    );
+    for hash in &found.missing_workbooks {
+        println!(
+            "{}: matched in the index but is not in the corpus — re-run `eg index`",
+            short(hash)
+        );
+    }
+    Ok(())
+}
+
+pub fn search(
+    dir: &str,
+    query: &str,
+    limit: usize,
+    sheet: Option<String>,
+    lexical_only: bool,
+) -> Result<(), String> {
+    let options = SearchOptions {
+        limit: limit.max(1),
+        sheet,
+        ..Default::default()
+    };
+    let hits = find(dir, query, &options, lexical_only)?;
+    if hits.is_empty() {
+        println!("{query:?} — nothing matched.");
+        return Ok(());
+    }
+    println!("{} hit(s) for {query:?}", hits.len());
+    for hit in &hits {
+        println!("  {:.2}  {:<8} {}", hit.score, hit.kind.as_str(), hit.label);
+        if let Some(a1) = &hit.a1 {
+            println!("          {a1}");
+        }
+    }
+    Ok(())
+}
+
+/// Both halves of the search, fused. The semantic half is optional: a corpus
+/// with no vectors, or a machine that cannot reach the model, still answers.
+fn find(
+    dir: &str,
+    query: &str,
+    options: &SearchOptions,
+    lexical_only: bool,
+) -> Result<Vec<Hit>, String> {
+    let text =
+        TextIndex::open(dir).map_err(|e| format!("could not open the lexical index: {e}"))?;
+    let lexical = text
+        .search(query, options)
+        .map_err(|e| format!("lexical search failed: {e}"))?;
+    if lexical_only {
+        return Ok(lexical);
+    }
+    let semantic = match open_embedder(dir) {
+        Ok((mut embedder, vectors)) if !vectors.is_empty() => embedder
+            .embed_query(query)
+            .map(|vector| vectors.search(&vector, options))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    if semantic.is_empty() {
+        return Ok(lexical);
+    }
+    Ok(fuse(&[&lexical, &semantic], options.limit))
+}
+
+pub fn workbooks(dir: &str) -> Result<(), String> {
+    let corpus = Corpus::open(dir).map_err(|e| format!("could not open the corpus: {e}"))?;
+    if corpus.is_empty() {
+        println!("The corpus at {dir} is empty. Add a workbook with `eg index`.");
+        return Ok(());
+    }
+    println!("{} workbook(s) at {dir}", corpus.len());
+    for (hash, entry) in corpus.entries() {
+        println!("  {}  {}", short(hash), entry.path);
+        println!(
+            "    {} sheets, {} cells, {} nodes, {} edges",
+            entry.sheets, entry.cells, entry.nodes, entry.edges
+        );
+    }
+    Ok(())
+}
+
+pub fn serve(dir: &str, redact_values: bool) -> Result<(), String> {
+    let state = eg_mcp::State::open(dir, redact_values)?;
+    eprintln!(
+        "eg serve: {} workbook(s) from {dir}{}",
+        state.corpus.len(),
+        if redact_values {
+            ", values redacted"
+        } else {
+            ""
+        }
+    );
+    let mut server = eg_mcp::Server::new(state);
+    let stdin = std::io::stdin();
+    eg_mcp::serve(&mut server, stdin.lock(), std::io::stdout()).map_err(|e| e.to_string())
+}
+
+fn short(hash: &str) -> &str {
+    &hash[..hash.len().min(12)]
+}
