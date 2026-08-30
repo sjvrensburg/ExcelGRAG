@@ -31,9 +31,9 @@ pub struct FormulaGroup {
     /// The formula as written at the group's top-left cell, in A1. Kept so the
     /// group can be shown to a reader the way the workbook shows it.
     pub representative: String,
-    /// Cells in the rectangle that actually carry the shape. Equal to the
-    /// rectangle's area for a solid block, less where the group was merged
-    /// across columns with gaps.
+    /// Cells in the rectangle that carry the shape. A group is built only from
+    /// contiguous runs merged across contiguous columns, so the rectangle is
+    /// always solid and this equals its area.
     pub cell_count: u64,
 }
 
@@ -82,11 +82,7 @@ impl GroupingStats {
 fn formula_cells_column_major(sheet: &Sheet) -> Vec<(u16, u32, &str)> {
     let mut cells: Vec<(u16, u32, &str)> = sheet
         .iter()
-        .filter_map(|(addr, cell)| {
-            cell.formula
-                .as_deref()
-                .map(|f| (addr.col, addr.row, f))
-        })
+        .filter_map(|(addr, cell)| cell.formula.as_deref().map(|f| (addr.col, addr.row, f)))
         .collect();
     cells.sort_unstable_by_key(|&(col, row, _)| (col, row));
     cells
@@ -107,7 +103,6 @@ struct Run {
 pub fn group_formulas(sheet: &Sheet) -> (Vec<FormulaGroup>, GroupingStats) {
     let mut runs = Vec::new();
     let mut stats = GroupingStats::default();
-
 
     // Reused across every cell on the sheet, so shape computation allocates
     // almost nothing.
@@ -130,9 +125,7 @@ pub fn group_formulas(sheet: &Sheet) -> (Vec<FormulaGroup>, GroupingStats) {
             // Extend the run only if this cell is directly below the last one
             // in the same column; a gap starts a new group even for the same
             // shape, so a group is always a contiguous block.
-            Some(run)
-                if run.col == col && run.bottom + 1 == row && run.shape == shape =>
-            {
+            Some(run) if run.col == col && run.bottom + 1 == row && run.shape == shape => {
                 run.bottom = row;
             }
             _ => {
@@ -248,10 +241,13 @@ pub fn find_shape_exceptions(sheet: &Sheet) -> Vec<ShapeException> {
             continue;
         }
 
-        let above = shape_of(c0, r0, f0, &mut buf, &mut scratch);
-
         // Case 1: three consecutive rows, the middle one edited by hand.
+        // The shapes are computed only once the window is known to be a
+        // candidate; on a workbook with millions of formulas almost every
+        // window is rejected here, and rewriting each one first would triple
+        // the cost of the pass for nothing.
         if r1 == r0 + 1 && r2 == r1 + 1 {
+            let above = shape_of(c0, r0, f0, &mut buf, &mut scratch);
             let below = shape_of(c2, r2, f2, &mut buf, &mut scratch);
             if above != below {
                 continue;

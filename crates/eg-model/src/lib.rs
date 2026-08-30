@@ -14,6 +14,4 @@ pub use address::{
 };
 pub use cell::{Cell, CellFormat, CellValue, ErrorKind, ValueKind};
 pub use formula::{scan_references, to_r1c1_shape, ReferenceSpan};
-pub use workbook::{
-    DefinedName, ExcelTable, Sheet, Visibility, Workbook, WorkbookFormat,
-};
+pub use workbook::{DefinedName, ExcelTable, Sheet, Visibility, Workbook, WorkbookFormat};

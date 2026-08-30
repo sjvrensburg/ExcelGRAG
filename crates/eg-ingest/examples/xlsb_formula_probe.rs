@@ -50,11 +50,7 @@ fn main() {
                         empty += 1;
                         if first_empty.len() < 5 {
                             let (r, c) = cell.get_position();
-                            first_empty.push(format!(
-                                "{}{}",
-                                eg_model::col_to_letters(c),
-                                r + 1
-                            ));
+                            first_empty.push(format!("{}{}", eg_model::col_to_letters(c), r + 1));
                         }
                     } else {
                         ok += 1;

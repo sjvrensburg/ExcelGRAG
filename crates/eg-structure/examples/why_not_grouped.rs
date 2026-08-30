@@ -116,7 +116,8 @@ fn shift_rows(formula: &str, delta: i64) -> String {
                     i += 1;
                 }
                 let is_call = i < b.len() && b[i] == b'(';
-                let preceded = start > 0 && (b[start - 1].is_ascii_alphanumeric() || b[start - 1] == b'_');
+                let preceded =
+                    start > 0 && (b[start - 1].is_ascii_alphanumeric() || b[start - 1] == b'_');
                 if (1..=3).contains(&letters) && i > ds && !row_abs && !is_call && !preceded {
                     let n: i64 = std::str::from_utf8(&b[ds..i]).unwrap().parse().unwrap_or(0);
                     out.extend_from_slice(&b[start..ds]);
