@@ -43,9 +43,16 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 
-# calamine fork carrying fixes for XLSB/XLS shared and array formulas and the
-# transposed `>`/`>=` operators, submitted upstream as tafia/calamine#712.
-# Without them 70% of the formulas in a real XLSB workbook are silently lost.
-# Drop this section once the changes land in a published release.
+# calamine fork carrying three fixes, each submitted upstream on its own branch
+# and pointed at here through one integration branch, since `[patch.crates-io]`
+# takes a single source:
+#
+#   tafia/calamine#712 (branch xlsb-shared-formulas) — XLSB/XLS shared and array
+#     formulas, and the transposed `>`/`>=` operators. Without it 70% of the
+#     formulas in a real XLSB workbook are silently lost.
+#   tafia/calamine#713 (branch quote-sheet-names) — a sheet name needing quotes
+#     is written bare, so `'Q3 SALES'!A1` reads as a sheet called `SALES`.
+#
+# Drop this section once both land in a published release.
 [patch.crates-io]
-calamine = { git = "https://github.com/sjvrensburg/calamine.git", branch = "xlsb-shared-formulas" }
+calamine = { git = "https://github.com/sjvrensburg/calamine.git", branch = "excelgrag" }
