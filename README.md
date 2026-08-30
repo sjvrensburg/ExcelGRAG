@@ -20,7 +20,7 @@ evaluation and MCP layers are not yet built.
 | `eg-model` | Addressing, cell values, workbook model | implemented |
 | `eg-ingest` | Loading xlsx/xlsm/xlsb/xls/ods via calamine | implemented |
 | `eg-structure` | Region detection, header inference, formula grouping | implemented |
-| `eg-graph` | Graph build, reference lifting, invariants | implemented |
+| `eg-graph` | Graph build, reference lifting, invariants, store | implemented |
 | `eg-index` | Lexical (tantivy) and vector (fastembed) indexes | stub |
 | `eg-retrieve` | Hybrid search, graph expansion, context rendering | stub |
 | `eg-eval` | Formula evaluation and what-if | stub |
@@ -103,6 +103,27 @@ cargo run --release -p eg-graph --example graph -- private/book.xlsb --no-groups
 The example reports node and edge counts by kind, the reference breakdown,
 measured memory, the degree distribution, references to sheets the workbook does
 not have, and whether every invariant holds.
+
+## The corpus
+
+The region-level graph of that 170 MB workbook is **122 KB of JSON**, so the
+store is a directory rather than a database: `manifest.json` plus one file per
+workbook, keyed by the blake3 of the source file. A workbook that has not
+changed is a hit however it was copied; one that has changed cannot be.
+
+| | Cold | Warm |
+|---|---|---|
+| 170 MB workbook | 17.4s | **0.36ms** |
+
+The 6 GB in-memory workbook is never touched to answer a corpus-level question,
+which is the whole reason to keep a store. Formula groups are deliberately not
+stored — 119 MiB, and wanted only when drilling into one workbook, at which
+point they are rebuilt.
+
+```sh
+cargo run --release -p eg-graph --example corpus -- index private/*.xlsb
+cargo run --release -p eg-graph --example corpus -- index
+```
 
 ## Testing
 
