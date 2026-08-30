@@ -1215,6 +1215,9 @@ impl Eval<'_> {
                 })
             }
 
+            // -- financial --------------------------------------------------
+            "PV" => self.present_value(args),
+
             // -- text -------------------------------------------------------
             "LEN" | "TRIM" | "UPPER" | "LOWER" => {
                 let value = self.scalar(&args[0])?;
@@ -1316,6 +1319,76 @@ impl Eval<'_> {
     fn number(&mut self, expr: &Expr) -> Result<Result<f64, ErrorKind>, Unsupported> {
         let value = self.scalar(expr)?;
         Ok(to_number(&value))
+    }
+
+    /// An optional numeric argument: absent, or written as an empty slot in
+    /// `PV(r,n,0,,0)`, takes the default rather than reading a cell.
+    fn number_or(
+        &mut self,
+        arg: Option<&Expr>,
+        default: f64,
+    ) -> Result<Result<f64, ErrorKind>, Unsupported> {
+        match arg {
+            None | Some(Expr::Literal(CellValue::Empty)) => Ok(Ok(default)),
+            Some(expr) => self.number(expr),
+        }
+    }
+
+    /// `PV(rate, nper, pmt, [fv], [type])` — what a future stream is worth now.
+    ///
+    /// Modelled ahead of the rest of the financial family because it is the
+    /// single largest gap in the sweep: 115,566 of the reference workbook's
+    /// unsupported formulas are this one function, discounting each overdue
+    /// amount by the days it has been outstanding.
+    ///
+    /// Excel's identity, and its sign convention with it — money paid out is
+    /// negative, which is why the whole expression is negated:
+    ///
+    /// ```text
+    /// rate ≠ 0:  -(fv + pmt · (1 + rate·type) · ((1+rate)^nper − 1) / rate) / (1+rate)^nper
+    /// rate = 0:  -(fv + pmt · nper)
+    /// ```
+    ///
+    /// `type` says whether each payment falls at the end of its period (0) or
+    /// the start (1); Excel documents anything else as `#NUM!` rather than
+    /// rounding it to one, so that is what this returns.
+    fn present_value(&mut self, args: &[Expr]) -> Result<Value, Unsupported> {
+        if args.len() < 3 {
+            return Ok(err(ErrorKind::Value));
+        }
+        let rate = match self.number(&args[0])? {
+            Ok(n) => n,
+            Err(e) => return Ok(err(e)),
+        };
+        let nper = match self.number(&args[1])? {
+            Ok(n) => n,
+            Err(e) => return Ok(err(e)),
+        };
+        let pmt = match self.number(&args[2])? {
+            Ok(n) => n,
+            Err(e) => return Ok(err(e)),
+        };
+        let future = match self.number_or(args.get(3), 0.0)? {
+            Ok(n) => n,
+            Err(e) => return Ok(err(e)),
+        };
+        let due = match self.number_or(args.get(4), 0.0)? {
+            Ok(n) => n,
+            Err(e) => return Ok(err(e)),
+        };
+        if due != 0.0 && due != 1.0 {
+            return Ok(err(ErrorKind::Num));
+        }
+        let present = if rate == 0.0 {
+            -(future + pmt * nper)
+        } else {
+            // A rate of exactly -1 sends this to zero and the division to an
+            // infinity, which `number_or_num_error` turns into #NUM! — the
+            // same answer Excel gives, arrived at rather than special-cased.
+            let growth = (1.0 + rate).powf(nper);
+            -(future + pmt * (1.0 + rate * due) * (growth - 1.0) / rate) / growth
+        };
+        Ok(Value::Scalar(number_or_num_error(present)))
     }
 
     /// VLOOKUP and HLOOKUP, which differ only in which axis they walk.
