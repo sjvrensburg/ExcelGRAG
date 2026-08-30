@@ -9,7 +9,10 @@ use eg_graph::store::Corpus;
 use eg_graph::{build, NodeKind};
 use eg_index::Hit;
 use eg_model::{Cell, CellValue, Sheet, SheetId, Workbook, WorkbookFormat};
-use eg_retrieve::{expand, render, ExpandOptions, RenderOptions, Retrieved};
+use eg_retrieve::{
+    expand, render, ExpandOptions, RenderOptions, Retrieved, RetrievedNode, Role, WorkbookContext,
+};
+use std::collections::BTreeMap;
 
 fn grid(id: u16, name: &str, rows: &[&str]) -> Sheet {
     let mut sheet = Sheet::new(SheetId(id), name);
@@ -295,9 +298,8 @@ fn the_ceiling_holds_across_several_workbooks() {
 /// The body of a passage: everything before the trailing "left out" footer,
 /// which is written after the ceiling on purpose so a cut can announce itself.
 ///
-/// Splitting on the phrase alone left the footer's own newline and node count
-/// in the body, which is four characters of slack in every assertion about the
-/// ceiling — enough to hide the overshoot these tests exist to catch.
+/// Every character it leaves behind is slack in an assertion about the
+/// ceiling, so it strips the footer exactly and nothing more.
 fn body(text: &str) -> &str {
     let Some(at) = text.find(" further node(s) were retrieved") else {
         return text;
@@ -349,19 +351,135 @@ fn the_ceiling_holds_at_every_size_and_not_just_the_convenient_ones() {
     }
 }
 
+/// `n` copies of the fixture's workbook, so tests can reach the path where
+/// `already` is non-zero and the unconditional-first-entry escape is spent.
+fn several(found: &Retrieved, n: usize) -> Retrieved {
+    let mut many = Retrieved::default();
+    for i in 0..n {
+        let mut copy = found.workbooks[0].clone();
+        copy.content_hash = format!("hash-{i}");
+        copy.path = format!("book{i}.xlsx");
+        many.workbooks.push(copy);
+    }
+    many
+}
+
 #[test]
 fn a_passage_that_fits_is_not_announced_as_cut() {
-    // Charging every workbook for the longer "cut to fit" heading meant a
-    // passage with room to spare was trimmed anyway, and then said so. The
-    // fixture's full passage is a few hundred characters; at that ceiling it
-    // must come back whole.
+    // Charging a workbook for the longer "cut to fit" heading meant a passage
+    // with room to spare was trimmed anyway, and then said so.
+    //
+    // Three workbooks, not one: the second and third carry a non-zero running
+    // total and have no unconditional first entry, so an over-charge there
+    // drops a whole workbook rather than trimming an entry — a different branch
+    // from the one a single-workbook fixture reaches.
     let found = retrieved("nocut", "Net", NodeKind::Column, &ExpandOptions::default());
-    let whole = render(&found, &RenderOptions::default());
-    let full_size = body(&whole.text).chars().count();
-    assert_eq!(whole.omitted, 0, "the default ceiling already cut it");
+    for count in [1, 3] {
+        let many = several(&found, count);
+        let whole = render(&many, &RenderOptions::default());
+        let full_size = body(&whole.text).chars().count();
+        assert_eq!(whole.omitted, 0, "the default ceiling already cut {count}");
 
-    // At exactly its own size, and at every size above, it is still whole.
-    for ceiling in full_size..full_size + 40 {
+        for ceiling in full_size..full_size + 40 {
+            let rendered = render(
+                &many,
+                &RenderOptions {
+                    max_chars: ceiling,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                rendered.omitted, 0,
+                "a {full_size}-character passage of {count} workbook(s) was cut \
+                 at a ceiling of {ceiling}:\n{}",
+                rendered.text
+            );
+            assert_eq!(rendered.omitted_workbooks, 0);
+            assert!(!rendered.text.contains("the rest cut to fit"));
+        }
+    }
+}
+
+#[test]
+fn a_later_workbook_is_cut_by_a_character_and_not_dropped_whole() {
+    // The earlier test could not fail: with one workbook the first entry is
+    // unconditional, so `fits >= 1` however badly the heading was measured, and
+    // no heading arithmetic could ever drop it. A second workbook has no such
+    // escape, so this is where over-charging shows up.
+    let found = retrieved("later", "Net", NodeKind::Column, &ExpandOptions::default());
+    let two = several(&found, 2);
+    let whole = render(&two, &RenderOptions::default());
+    let full = body(&whole.text).chars().count();
+
+    // One character short of the whole thing: something must give, and it must
+    // be one entry rather than an entire workbook.
+    let rendered = render(
+        &two,
+        &RenderOptions {
+            max_chars: full - 1,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        rendered.omitted_workbooks, 0,
+        "a workbook was dropped whole to save one character:\n{}",
+        rendered.text
+    );
+    assert!(rendered.omitted > 0);
+    assert!(body(&rendered.text).chars().count() < full);
+}
+
+/// A workbook of `n` plain nodes, distinct and without ancestry.
+///
+/// Wide on purpose. The fixture used everywhere else has eight nodes, and the
+/// heading's two forms are then the same length whatever the cut — "1 of 8"
+/// against "7 of 8" — so a whole class of measurement error is invisible to it.
+/// Above ten the digit counts diverge, which is where charging for a number
+/// that will not be written starts to cost an entry.
+fn wide_workbook(n: usize) -> Retrieved {
+    let nodes: Vec<RetrievedNode> = (0..n)
+        .map(|i| RetrievedNode {
+            node: i as u32,
+            kind: NodeKind::Column,
+            label: format!("Column {i}"),
+            a1: Some(format!("Sheet1!A{}:A{}", i + 1, i + 200)),
+            sheet: Some("Sheet1".into()),
+            parent: None,
+            role: if i == 0 {
+                Role::Seed
+            } else {
+                Role::Ancestor { of: 0 }
+            },
+            hops: 0,
+            score: if i == 0 { Some(1.0) } else { None },
+        })
+        .collect();
+
+    Retrieved {
+        workbooks: vec![WorkbookContext {
+            content_hash: "hash-wide".into(),
+            path: "wide.xlsx".into(),
+            nodes,
+            truncated: false,
+        }],
+        missing_workbooks: Vec::new(),
+    }
+}
+
+#[test]
+fn the_passage_is_as_full_as_the_ceiling_allows() {
+    // Not just "within the ceiling" — that passes for a renderer that shows one
+    // entry and stops. This checks the other direction: whatever number of
+    // entries fits, that is the number returned.
+    //
+    // The size of a k-entry passage is read off the sweep itself, so the test
+    // needs no second implementation of the thing it is checking.
+    let found = wide_workbook(121);
+    let ceilings = 200..=4_000usize;
+
+    let mut size_of: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut shown_at: BTreeMap<usize, usize> = BTreeMap::new();
+    for ceiling in ceilings.clone() {
         let rendered = render(
             &found,
             &RenderOptions {
@@ -369,41 +487,28 @@ fn a_passage_that_fits_is_not_announced_as_cut() {
                 ..Default::default()
             },
         );
-        assert_eq!(
-            rendered.omitted, 0,
-            "a {full_size}-character passage was cut at a ceiling of {ceiling}:\n{}",
-            rendered.text
-        );
-        assert!(!rendered.text.contains("the rest cut to fit"));
+        let k = entries(&rendered.text).len();
+        let len = body(&rendered.text).chars().count();
+        size_of.entry(k).or_insert(len);
+        shown_at.insert(ceiling, k);
     }
-}
 
-#[test]
-fn a_single_node_workbook_is_not_dropped_over_a_heading_it_cannot_write() {
-    // `saturating_sub(1)` measured "0 of 1 node(s), the rest cut to fit" — a
-    // sentence that can never be written, since a workbook with nothing shown
-    // returns before the heading.
-    let found = retrieved("single", "Net", NodeKind::Column, &ExpandOptions::default());
-    let mut one = Retrieved::default();
-    let mut only = found.workbooks[0].clone();
-    only.nodes.truncate(1);
-    one.workbooks.push(only);
-
-    let whole = render(&one, &RenderOptions::default());
-    let full_size = body(&whole.text).chars().count();
-    for ceiling in full_size..full_size + 40 {
-        let rendered = render(
-            &one,
-            &RenderOptions {
-                max_chars: ceiling,
-                ..Default::default()
-            },
-        );
+    for ceiling in ceilings {
+        let shown = shown_at[&ceiling];
+        let best = size_of
+            .iter()
+            .filter(|(_, &len)| len <= ceiling)
+            .map(|(&k, _)| k)
+            .max()
+            .unwrap_or(0)
+            // The first entry of a passage is written whatever the ceiling.
+            .max(1);
         assert_eq!(
-            rendered.omitted_workbooks, 0,
-            "dropped at ceiling {ceiling}"
+            shown, best,
+            "at a ceiling of {ceiling} the passage shows {shown} entries when \
+             {best} fit in {} characters",
+            size_of[&best]
         );
-        assert_eq!(entries(&rendered.text).len(), 1);
     }
 }
 

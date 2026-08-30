@@ -35,25 +35,29 @@ use crate::expand::{Retrieved, RetrievedNode, Role, WorkbookContext};
 /// How much text to produce.
 #[derive(Debug, Clone)]
 pub struct RenderOptions {
-    /// A ceiling on the node entries, in characters.
+    /// A ceiling on the passage, in characters: the missing-workbook notice,
+    /// each workbook's heading, the entries under it, and the blank line
+    /// between workbooks.
     ///
     /// Characters and not tokens: this crate has no tokenizer and should not
     /// pretend to, and every tokenizer disagrees anyway. A caller fitting a
     /// context window should divide by three and leave room.
     ///
-    /// Three things are written whatever this says, and nothing else is:
+    /// Four things are written whatever this says, and nothing else is:
     ///
-    /// - The first node of the passage. A preamble with nothing under it would
-    ///   be worse than one that overran.
+    /// - The first node of the passage, and the heading above it. A preamble
+    ///   with nothing under it would be worse than one that overran, and a node
+    ///   with no workbook named above it cannot be cited.
     /// - The notice that workbooks are missing from the corpus, shortened to a
     ///   bare count if it has to be. A caller not told that data is absent will
     ///   present what is left as everything there was.
     /// - The closing line saying how much was cut, for the same reason.
     ///
-    /// Together those are a few hundred characters at worst, and a caller
-    /// sizing a window should leave room for them rather than treat this as a
-    /// hard bound. `max_chars: 10` against a corpus full of stale hashes still
-    /// returns a few hundred characters, all of it saying so.
+    /// Their total is not bounded by anything here, because a heading carries
+    /// the workbook's path and a path can be any length. In practice it is a
+    /// few hundred characters; a caller sizing a context window should leave
+    /// room for the longest path in its corpus rather than read this as a hard
+    /// bound.
     pub max_chars: usize,
     /// Show how many cell references stand behind each relation. On by default:
     /// the difference between an edge of weight 1 and one of weight 115,003 is
@@ -197,41 +201,54 @@ fn render_workbook(
     let pad = order.len().to_string().len();
     let indent = " ".repeat(pad + 5);
 
-    // How many entries fit, decided before any of them is written. Relations
-    // are then rendered against that count, so a surviving entry can never
-    // point at a number the passage does not list — the whole reason to know
-    // the cut in advance.
-    let entry = |i: usize, upto: usize| -> String {
-        build_entry(
-            workbook, &order, i, upto, &reads, &read_by, opts, pad, &indent,
-        )
-    };
-    // The heading is one of two sentences and they are not the same length: a
-    // cut workbook writes "4 of 30 node(s), the rest cut to fit" where a whole
-    // one writes "30 node(s)", some twenty-six characters shorter.
-    //
-    // So it is measured twice. Optimistically first, against the short form,
-    // because most workbooks fit whole and charging them for a sentence they
-    // will not write cuts passages that had room — a complete 616-character
-    // passage needed a 642 ceiling before this, and announced itself as cut.
-    // Only when that pass comes up short is the longer form charged, and then
-    // against the longest it could be, so the sentence finally written always
-    // fits the space measured for it.
-    let uncut = self::heading(workbook, order.len(), order.len())
-        .chars()
-        .count();
-    let longest_cut = self::heading(workbook, order.len().saturating_sub(1), order.len())
-        .chars()
-        .count();
+    // The half of each entry that does not depend on how many entries survive:
+    // its number, kind, label, citation and containment path. Built once,
+    // because the cut is found by trying sizes and this is the expensive half —
+    // `ancestry` walks the result list once per step of the path.
+    let fixed: Vec<String> = (0..order.len())
+        .map(|i| entry_head(workbook, &order, i, pad, &indent))
+        .collect();
 
-    let mut fits = count_fits(&order, uncut, *chars, *wrote_an_entry, opts, &entry);
-    if fits < order.len() {
-        fits = count_fits(&order, longest_cut, *chars, *wrote_an_entry, opts, &entry);
+    let assemble = |fits: usize| -> String {
+        let mut text = heading(workbook, fits, order.len());
+        for (i, head) in fixed.iter().enumerate().take(fits) {
+            text.push_str(head);
+            text.push_str(&entry_relations(
+                i + 1,
+                fits,
+                &reads,
+                &read_by,
+                opts,
+                &indent,
+            ));
+        }
+        text.push('\n');
+        text
+    };
+
+    // The cut is found by assembling what would actually be written and
+    // counting it, not by predicting its size.
+    //
+    // Every predicting version of this charged for something it did not write.
+    // The heading is one of two sentences of different lengths, an entry's
+    // relations shrink when the entries they point at are cut, and the digits
+    // in "4 of 30" depend on the answer being computed. Four rounds of review
+    // found four separate arithmetic errors in that estimate and the last one
+    // was still wrong by the width of a number. Assembling a candidate is a few
+    // string pushes over a list bounded by the expansion budget, and it cannot
+    // be wrong about its own size.
+    //
+    // Sizes are not monotone across the whole range — the whole passage uses
+    // the shorter heading — so this walks down from the top rather than
+    // bisecting.
+    let floor = usize::from(!*wrote_an_entry);
+    let mut fits = order.len();
+    let mut text = assemble(fits);
+    while fits > floor && *chars + text.chars().count() > opts.max_chars {
+        fits -= 1;
+        text = assemble(fits);
     }
-    // Entries are measured with every relation present, which is the largest
-    // they can be; filtering them afterwards only shrinks the passage.
-    // Plus the blank line that closes the workbook, which is written whether or
-    // not anything was cut and so belongs in the measurement.
+
     if fits == 0 {
         // Everything this workbook offered is omitted, and the workbook itself
         // never appears. Both have to be counted: a reader can see that a
@@ -241,53 +258,15 @@ fn render_workbook(
         return;
     }
 
-    // Reporting `order.len()` here put "27 node(s)" above a list ending at
-    // [4]: a passage contradicting itself, which the reader can only resolve
-    // from a footer several workbooks further down.
-    let heading = self::heading(workbook, fits, order.len());
-    out.text.push_str(&heading);
-    *chars += heading.chars().count();
-    for (i, node) in order.iter().enumerate().take(fits) {
-        let text = entry(i, fits);
-        *chars += text.chars().count();
-        out.text.push_str(&text);
-        *wrote_an_entry = true;
+    *chars += text.chars().count();
+    out.text.push_str(&text);
+    *wrote_an_entry = true;
+    for node in order.iter().take(fits) {
         if let Some(a1) = &node.a1 {
             out.citations.push(a1.clone());
         }
     }
     out.omitted += order.len() - fits;
-    out.text.push('\n');
-    *chars += 1;
-}
-
-/// How many entries fit under `opts.max_chars`, charged for a heading of
-/// `heading_chars` and for the blank line that closes the workbook.
-///
-/// Entries are measured with every relation present, which is the largest they
-/// can be; filtering them to what survives the cut only shrinks the passage.
-fn count_fits(
-    order: &[&RetrievedNode],
-    heading_chars: usize,
-    already: usize,
-    wrote_an_entry: bool,
-    opts: &RenderOptions,
-    entry: &dyn Fn(usize, usize) -> String,
-) -> usize {
-    let mut used = already + heading_chars + 1;
-    let mut fits = 0usize;
-    for i in 0..order.len() {
-        let size = entry(i, order.len()).chars().count();
-        // The very first entry of the whole passage always goes in. A preamble
-        // with no nodes under it is not a smaller answer, it is no answer.
-        let unconditional = !wrote_an_entry && i == 0;
-        if !unconditional && used + size > opts.max_chars {
-            break;
-        }
-        used += size;
-        fits += 1;
-    }
-    fits
 }
 
 fn heading(workbook: &WorkbookContext, shown: usize, total: usize) -> String {
@@ -314,16 +293,11 @@ fn heading(workbook: &WorkbookContext, shown: usize, total: usize) -> String {
     out
 }
 
-/// One entry, with its relations limited to entries numbered `upto` or lower.
-#[allow(clippy::too_many_arguments)]
-fn build_entry(
+/// The part of an entry that is the same however many entries survive.
+fn entry_head(
     workbook: &WorkbookContext,
     order: &[&RetrievedNode],
     i: usize,
-    upto: usize,
-    reads: &BTreeMap<usize, Vec<Relation>>,
-    read_by: &BTreeMap<usize, Vec<Relation>>,
-    opts: &RenderOptions,
     pad: usize,
     indent: &str,
 ) -> String {
@@ -356,13 +330,27 @@ fn build_entry(
     if !path.is_empty() {
         let _ = writeln!(entry, "{indent}in: {}", path.join(" > "));
     }
+    entry
+}
+
+/// The part that shrinks as entries are cut: relations to entries numbered
+/// `upto` or lower.
+fn entry_relations(
+    number: usize,
+    upto: usize,
+    reads: &BTreeMap<usize, Vec<Relation>>,
+    read_by: &BTreeMap<usize, Vec<Relation>>,
+    opts: &RenderOptions,
+    indent: &str,
+) -> String {
+    let mut out = String::new();
     if let Some(line) = relation_line("reads", reads.get(&number), upto, opts) {
-        let _ = writeln!(entry, "{indent}{line}");
+        let _ = writeln!(out, "{indent}{line}");
     }
     if let Some(line) = relation_line("read by", read_by.get(&number), upto, opts) {
-        let _ = writeln!(entry, "{indent}{line}");
+        let _ = writeln!(out, "{indent}{line}");
     }
-    entry
+    out
 }
 
 /// Both directions of every dependency the expansion recorded, by passage
