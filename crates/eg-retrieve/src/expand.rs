@@ -229,8 +229,10 @@ impl WorkbookContext {
         while let Some(index) = at {
             let Some(node) = self.node(index) else { break };
             // A containment cycle cannot happen in a graph built by eg-graph,
-            // but this walks data read off disk.
-            if path.len() > self.nodes.len() {
+            // but this walks data read off disk. A path can visit each node at
+            // most once, so reaching that many is already proof of a cycle —
+            // the earlier `>` let it return one node more than the result holds.
+            if path.len() >= self.nodes.len() {
                 break;
             }
             path.push(node);

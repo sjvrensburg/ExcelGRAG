@@ -612,6 +612,151 @@ fn a_seed_whose_workbook_is_gone_is_reported_rather_than_dropped() {
     assert_eq!(found.missing_workbooks, vec!["hash-that-is-not-there"]);
 }
 
+/// A stored graph whose CONTAINS edges form a cycle.
+///
+/// eg-graph cannot build one; a corrupt or hand-edited file on disk can, and
+/// both ancestry walks claim in their comments to survive it.
+fn cyclic_containment() -> (std::path::PathBuf, Corpus, u32) {
+    use eg_graph::{BuiltGraph, Edge, EdgeKind, Node, SheetNode, WorkbookNode};
+    use eg_model::SheetId;
+    use petgraph::graph::DiGraph;
+
+    let mut graph: DiGraph<Node, Edge> = DiGraph::new();
+    let root = graph.add_node(Node::Workbook(WorkbookNode {
+        path: "cycle.xlsx".into(),
+        content_hash: "hash-cycle".into(),
+        format: None,
+    }));
+    let a = graph.add_node(Node::Sheet(SheetNode {
+        id: SheetId(0),
+        name: "A".into(),
+        visible: true,
+        cells: 1,
+        formula_cells: 0,
+    }));
+    let b = graph.add_node(Node::Sheet(SheetNode {
+        id: SheetId(1),
+        name: "B".into(),
+        visible: true,
+        cells: 1,
+        formula_cells: 0,
+    }));
+    graph.add_edge(root, a, Edge::new(EdgeKind::Contains));
+    // The cycle: A contains B and B contains A.
+    graph.add_edge(a, b, Edge::new(EdgeKind::Contains));
+    graph.add_edge(b, a, Edge::new(EdgeKind::Contains));
+
+    let built = BuiltGraph {
+        graph,
+        root,
+        report: Default::default(),
+    };
+    let dir = dir("cycle");
+    let mut corpus = Corpus::open(&dir).unwrap();
+    corpus
+        .put("hash-cycle", "cycle.xlsx", 2, 2, false, &built)
+        .unwrap();
+    (dir, corpus, b.index() as u32)
+}
+
+#[test]
+fn a_containment_cycle_on_disk_gives_a_short_answer_not_a_hung_process() {
+    let (_root, corpus, seed_node) = cyclic_containment();
+    let seed = Hit {
+        score: 1.0,
+        workbook: "hash-cycle".into(),
+        path: "cycle.xlsx".into(),
+        node: seed_node,
+        kind: NodeKind::Sheet,
+        sheet: None,
+        label: "B".into(),
+        a1: None,
+    };
+
+    // Both walks are exercised: `add_ancestry` while expanding, and
+    // `WorkbookContext::ancestry` while reading the result back.
+    let found = expand(&corpus, &[seed], &ExpandOptions::default()).unwrap();
+    assert!(found.total_nodes() > 0);
+    for node in &found.workbooks[0].nodes {
+        let path = found.workbooks[0].ancestry(node.node);
+        assert!(path.len() <= found.workbooks[0].nodes.len());
+    }
+}
+
+#[test]
+fn a_budget_that_runs_out_spends_it_on_the_better_ranked_seed() {
+    // Seeds arrive in the index's order, and the walk must not trade a
+    // top-ranked hit for a worse one just because the worse one was cheaper to
+    // reach.
+    let (_root, corpus) = corpus_of("seedorder", &[chain()]);
+    let first = hit_for(&corpus, "hash-chain", "Net", NodeKind::Column);
+    let second = hit_for(&corpus, "hash-chain", "Tariff", NodeKind::Column);
+
+    let found = expand(
+        &corpus,
+        &[first.clone(), second.clone()],
+        &ExpandOptions {
+            budget: 1,
+            hops: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(found.total_nodes(), 1);
+    assert_eq!(found.workbooks[0].nodes[0].node, first.node);
+    assert!(found.truncated());
+}
+
+#[test]
+fn only_a_seed_carries_a_search_score() {
+    let (_root, corpus) = corpus_of("scores", &[chain()]);
+    let seed = hit_for(&corpus, "hash-chain", "Net", NodeKind::Column);
+    let found = expand(&corpus, &[seed], &ExpandOptions::default()).unwrap();
+
+    for node in &found.workbooks[0].nodes {
+        if node.role == Role::Seed {
+            assert!(node.score.is_some(), "{} lost its score", node.label);
+        } else {
+            assert!(
+                node.score.is_none(),
+                "{} carries a score it was never given",
+                node.label
+            );
+        }
+    }
+}
+
+#[test]
+fn the_same_graph_and_seeds_give_the_same_walk_every_time() {
+    // `Step`'s ordering breaks ties by node index for this reason. Petgraph
+    // iteration is stable, but the heap is not unless the comparison is total.
+    let (_root, corpus) = corpus_of("stable", &[chain()]);
+    let seed = hit_for(&corpus, "hash-chain", "Net", NodeKind::Column);
+    let opts = ExpandOptions {
+        budget: 6,
+        ..Default::default()
+    };
+
+    let first: Vec<u32> = expand(&corpus, std::slice::from_ref(&seed), &opts)
+        .unwrap()
+        .workbooks[0]
+        .nodes
+        .iter()
+        .map(|n| n.node)
+        .collect();
+    for _ in 0..8 {
+        let again: Vec<u32> = expand(&corpus, std::slice::from_ref(&seed), &opts)
+            .unwrap()
+            .workbooks[0]
+            .nodes
+            .iter()
+            .map(|n| n.node)
+            .collect();
+        assert_eq!(first, again);
+    }
+}
+
 #[test]
 fn a_hit_pointing_past_the_end_of_the_graph_is_skipped_not_panicked_on() {
     let (_root, corpus) = corpus_of("stale", &[chain()]);
