@@ -302,9 +302,18 @@ fn body(text: &str) -> &str {
     let Some(at) = text.find(" further node(s) were retrieved") else {
         return text;
     };
+    // The footer is exactly "\n{digits} further node(s)…", so strip the digits
+    // and then the one newline before them. The previous version accepted
+    // either at each step, so it walked back across the blank line closing the
+    // passage and went on eating digits that were real content — the `3` of
+    // `A1:B3`, and six more of an `A1:BM115004`. That is slack in every
+    // assertion about the ceiling, which is what this helper exists to remove.
     let bytes = text.as_bytes();
     let mut start = at;
-    while start > 0 && (bytes[start - 1].is_ascii_digit() || bytes[start - 1] == b'\n') {
+    while start > 0 && bytes[start - 1].is_ascii_digit() {
+        start -= 1;
+    }
+    if start > 0 && bytes[start - 1] == b'\n' {
         start -= 1;
     }
     &text[..start]
@@ -337,6 +346,64 @@ fn the_ceiling_holds_at_every_size_and_not_just_the_convenient_ones() {
             body(&rendered.text).chars().count(),
             rendered.text
         );
+    }
+}
+
+#[test]
+fn a_passage_that_fits_is_not_announced_as_cut() {
+    // Charging every workbook for the longer "cut to fit" heading meant a
+    // passage with room to spare was trimmed anyway, and then said so. The
+    // fixture's full passage is a few hundred characters; at that ceiling it
+    // must come back whole.
+    let found = retrieved("nocut", "Net", NodeKind::Column, &ExpandOptions::default());
+    let whole = render(&found, &RenderOptions::default());
+    let full_size = body(&whole.text).chars().count();
+    assert_eq!(whole.omitted, 0, "the default ceiling already cut it");
+
+    // At exactly its own size, and at every size above, it is still whole.
+    for ceiling in full_size..full_size + 40 {
+        let rendered = render(
+            &found,
+            &RenderOptions {
+                max_chars: ceiling,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            rendered.omitted, 0,
+            "a {full_size}-character passage was cut at a ceiling of {ceiling}:\n{}",
+            rendered.text
+        );
+        assert!(!rendered.text.contains("the rest cut to fit"));
+    }
+}
+
+#[test]
+fn a_single_node_workbook_is_not_dropped_over_a_heading_it_cannot_write() {
+    // `saturating_sub(1)` measured "0 of 1 node(s), the rest cut to fit" — a
+    // sentence that can never be written, since a workbook with nothing shown
+    // returns before the heading.
+    let found = retrieved("single", "Net", NodeKind::Column, &ExpandOptions::default());
+    let mut one = Retrieved::default();
+    let mut only = found.workbooks[0].clone();
+    only.nodes.truncate(1);
+    one.workbooks.push(only);
+
+    let whole = render(&one, &RenderOptions::default());
+    let full_size = body(&whole.text).chars().count();
+    for ceiling in full_size..full_size + 40 {
+        let rendered = render(
+            &one,
+            &RenderOptions {
+                max_chars: ceiling,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            rendered.omitted_workbooks, 0,
+            "dropped at ceiling {ceiling}"
+        );
+        assert_eq!(entries(&rendered.text).len(), 1);
     }
 }
 
