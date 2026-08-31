@@ -823,6 +823,7 @@ dependencies = [
  "eg-index",
  "eg-ingest",
  "eg-model",
+ "eg-structure",
  "petgraph",
  "rustc-hash",
  "serde",

@@ -76,6 +76,17 @@ pub struct Region {
     /// One entry per body column, left to right. Multi-row headers are joined
     /// with `.`, giving paths like `Q3.Revenue`.
     pub headers: Vec<String>,
+    /// One entry per row-label column, left to right — the headers of the
+    /// leading [`Region::header_cols`] columns, read from the same header rows.
+    ///
+    /// Separate from `headers` because a row-label column is not body data and
+    /// every caller that walks `headers` positionally would be wrong if it
+    /// were prepended. But it is still a *named column*: `Account` heading the
+    /// key of a debtors table names the thing the table is keyed by, which is
+    /// one of the most ordinary questions anyone asks of a table. Dropping the
+    /// name on the floor is what made that question unanswerable.
+    #[serde(default)]
+    pub label_headers: Vec<String>,
     /// Populated cells inside `range`.
     pub cell_count: u64,
     /// Trailing rows of `range` that are a declared table's totals row, not
@@ -195,6 +206,10 @@ pub fn detect_regions_with(sheet: &Sheet, opts: &RegionOptions) -> Vec<Region> {
             header_rows,
             header_cols: 0,
             headers: table.columns.clone(),
+            // A declared table has no row-label columns: the workbook named
+            // every column of it, and `header_cols` is 0 above for the same
+            // reason — none of this is guessed at for a table Excel declared.
+            label_headers: Vec::new(),
             cell_count: sheet.iter_range(table.range).count() as u64,
             totals_rows,
         });
@@ -445,10 +460,13 @@ fn describe(sheet: &Sheet, range: RangeRef, cell_count: u64, opts: &RegionOption
         RegionKind::Block
     };
 
-    let headers = if header_rows > 0 {
-        column_headers(sheet, after_title, header_rows, header_cols)
+    let (headers, label_headers) = if header_rows > 0 {
+        (
+            column_headers(sheet, after_title, header_rows, header_cols),
+            label_headers(sheet, after_title, header_rows, header_cols),
+        )
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
     Region {
@@ -459,9 +477,31 @@ fn describe(sheet: &Sheet, range: RangeRef, cell_count: u64, opts: &RegionOption
         header_rows,
         header_cols,
         headers,
+        label_headers,
         cell_count,
         totals_rows: 0,
     }
+}
+
+/// Header text for the row-label columns, in the same shape as
+/// [`column_headers`] gives for body columns.
+///
+/// Reads the same header rows over the leading `header_cols` columns. Empty
+/// when the region has no label columns, and an entry may itself be empty when
+/// a label column is unheaded — which is ordinary, and means only that there is
+/// no name to offer.
+fn label_headers(
+    sheet: &Sheet,
+    range: RangeRef,
+    header_rows: u32,
+    header_cols: u16,
+) -> Vec<String> {
+    if header_cols == 0 {
+        return Vec::new();
+    }
+    let last = range.left.saturating_add(header_cols - 1).min(range.right);
+    let stop = RangeRef::new(range.sheet, range.top, range.left, range.bottom, last);
+    column_headers(sheet, stop, header_rows, 0)
 }
 
 /// A lone text cell on the region's first row, read as a section title.

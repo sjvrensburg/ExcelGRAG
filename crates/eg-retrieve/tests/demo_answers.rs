@@ -190,12 +190,16 @@ fn the_right_node_is_at_or_near_the_top_of_the_ranking() {
     );
 }
 
-/// Measured at 0.865 over the thirteen answerable questions — ten of them rank
-/// an acceptable answer first, two second, one fourth — and set below that, so
-/// that ordinary movement does not fail the suite and a real regression does.
+/// Measured at 0.863 over all fourteen questions, and set below that so that
+/// ordinary movement does not fail the suite and a real regression does.
 ///
-/// Note this is not the number `--example answers` prints for the same file:
-/// the example divides by every question, this by the ones not recorded as
-/// gaps. Both are defensible and they are not comparable, which is why the
-/// floor lives here rather than being read off a run.
-const MRR_FLOOR: f64 = 0.80;
+/// It was 0.804 over the same questions when one of them — the column a table
+/// is keyed by — could not be answered at all. Giving row-label columns nodes
+/// of their own took hit@5 to 100% and the passage to citing every answer, and
+/// the floor was raised to match: retrieval that got better should raise it,
+/// and moving it the other way needs a reason written down.
+///
+/// This is comparable with what `--example answers` prints only while nothing
+/// in the file is a recorded gap — the example divides by every question, this
+/// by the ones without one.
+const MRR_FLOOR: f64 = 0.82;

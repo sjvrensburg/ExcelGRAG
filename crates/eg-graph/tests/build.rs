@@ -58,9 +58,19 @@ fn the_structural_layers_are_wired_root_to_group() {
     assert_eq!(r.nodes_of(NodeKind::Workbook), 1);
     assert_eq!(r.nodes_of(NodeKind::Sheet), 1);
     assert_eq!(r.nodes_of(NodeKind::Region), 1);
-    // Two, not three: column A holds the row labels, so it heads nothing and
-    // region detection excludes it from the headers.
-    assert_eq!(r.nodes_of(NodeKind::Column), 2);
+    // Three: `Q1` and `Q2` head body columns, and `Region` heads the column
+    // that labels the rows. A row-label column is not *data* — that is why
+    // region detection keeps it out of `headers` — but it is still a named
+    // column, and it used to get no node at all, which made the ordinary
+    // question "which region" unanswerable about every table in a corpus.
+    assert_eq!(r.nodes_of(NodeKind::Column), 3);
+    assert!(
+        built
+            .graph
+            .node_weights()
+            .any(|n| n.kind() == NodeKind::Column && n.label() == "Region"),
+        "the row-label column is named by its own header"
+    );
     // `=A2*2` and `=A3*2` share one R1C1 shape, so they are one group.
     assert_eq!(r.nodes_of(NodeKind::FormulaGroup), 1);
 

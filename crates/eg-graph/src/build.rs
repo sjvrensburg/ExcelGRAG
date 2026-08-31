@@ -247,11 +247,23 @@ impl<'a> Builder<'a> {
             .add_edge(sheet_node, node, Edge::new(EdgeKind::Contains));
 
         // Headers run left to right from the first column that is not a row
-        // label; the body is what lies below the title and header rows.
+        // label; the body is what lies below the title and header rows. The
+        // row-label columns come first and are named by `label_headers` —
+        // a table's key column is still a column, and used to get no node at
+        // all, which made "which account" a question the graph could not
+        // answer about any table in the corpus.
         let mut columns = FxHashMap::default();
         if let Some(body) = region.body() {
-            let first = region.range.left + region.header_cols;
-            for (offset, header) in region.headers.iter().enumerate() {
+            let labelled = region
+                .label_headers
+                .iter()
+                .enumerate()
+                .map(|(offset, header)| (region.range.left, offset, header));
+            let bodied =
+                region.headers.iter().enumerate().map(|(offset, header)| {
+                    (region.range.left + region.header_cols, offset, header)
+                });
+            for (first, offset, header) in labelled.chain(bodied) {
                 // A blank header names nothing, so a node for it could not be
                 // found by any search not already at the region. The column is
                 // still covered, by the region itself.
