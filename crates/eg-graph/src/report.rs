@@ -186,7 +186,10 @@ pub fn degree_stats(graph: &Graph, hubs: usize) -> DegreeStats {
         .map(|(i, count)| (if i == 0 { 0 } else { 1 << (i - 1) }, count))
         .collect();
 
-    ranked.sort_unstable_by_key(|&(total, ..)| std::cmp::Reverse(total));
+    // Ties broken by node index, so two runs over one workbook report the same
+    // hubs. An unstable sort on degree alone left a field of equal-degree
+    // nodes in whatever order the sort happened to leave them.
+    ranked.sort_unstable_by_key(|&(total, index, _)| (std::cmp::Reverse(total), index));
     stats.hubs = ranked
         .into_iter()
         .take(hubs)

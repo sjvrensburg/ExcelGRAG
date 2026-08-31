@@ -659,22 +659,32 @@ impl LookupIndex {
                     return map;
                 };
                 let range = column;
+                // The *lowest* row wins, not the first one this happens to
+                // reach: a lookup takes the first row that matches, and the
+                // two passes below are not in row order with respect to each
+                // other. A substitution into a cell the sheet leaves empty is
+                // only visible to the second pass, so `or_insert` there let a
+                // stored match further down the column beat an overridden one
+                // above it.
+                let mut note = |key: Key, row: u32| {
+                    map.entry(key)
+                        .and_modify(|first| *first = (*first).min(row))
+                        .or_insert(row);
+                };
                 for (at, cell) in sheet.iter_range(range) {
                     let value = match overrides.get(at) {
                         Some(v) => v,
                         None => &cell.value,
                     };
                     if let Some(key) = Key::of(value) {
-                        // First occurrence wins, as a lookup takes the first
-                        // row that matches.
-                        map.entry(key).or_insert(at.row - top);
+                        note(key, at.row - top);
                     }
                 }
                 // A substitution into a cell the sheet leaves empty is a row
                 // the loop above never saw.
                 for (at, value) in overrides.in_range(range) {
                     if let Some(key) = Key::of(value) {
-                        map.entry(key).or_insert(at.row - top);
+                        note(key, at.row - top);
                     }
                 }
                 map

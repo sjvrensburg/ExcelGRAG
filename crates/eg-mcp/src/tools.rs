@@ -301,6 +301,21 @@ fn opt_usize(args: &Value, key: &str, default: usize) -> Result<usize, String> {
     }
 }
 
+/// As [`opt_str`], for a list argument. Absent or `null` is the empty list;
+/// anything else that is not an array is refused.
+///
+/// Silently reading a wrong-typed one as absent is worse here than anywhere
+/// else on this surface: `where` sent as a single object instead of a list of
+/// them drops every condition, and `query_table` then totals the whole table
+/// and presents it as the answer to a filtered question.
+fn opt_array<'a>(args: &'a Value, key: &str) -> Result<&'a [Value], String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(&[]),
+        Some(Value::Array(items)) => Ok(items),
+        Some(other) => Err(format!("{key} must be an array, got {}", json_kind(other))),
+    }
+}
+
 fn opt_bool(args: &Value, key: &str) -> Result<bool, String> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(false),
@@ -347,13 +362,8 @@ fn find(
         lexical_only,
         ..Default::default()
     };
-    let (text, mut held) = state.halves();
-    if lexical_only {
-        held = None;
-    }
-    let semantic = held
-        .as_mut()
-        .map(|(embedder, vectors)| (&mut **embedder, &*vectors));
+    let (text, held) = state.halves();
+    let semantic = if lexical_only { None } else { held };
     find_in(text, semantic, query, opts, &fusion).map_err(|e| e.to_string())
 }
 
@@ -512,6 +522,26 @@ fn resolve_range(workbook: &Workbook, citation: &str) -> Result<RangeRef, String
     Ok(parsed.resolve(id))
 }
 
+/// The populated cells of a citation, clipped to what the sheet actually uses.
+///
+/// `Sheet::iter_range` probes the ordered map once per row of the range's
+/// *height*, so an unclipped whole-column citation — `Sheet1!A:A`, which
+/// `parse_a1` accepts — costs 1,048,576 probes to find whatever handful of
+/// cells is really there. `eg_eval::cells_in` already clips for exactly this
+/// reason; the tools that walk a range themselves must too.
+fn populated_in(
+    workbook: &Workbook,
+    range: RangeRef,
+) -> impl Iterator<Item = (eg_model::CellRef, &eg_model::Cell)> {
+    let sheet = workbook.sheet(range.sheet);
+    let clipped = sheet
+        .and_then(|s| s.used_range())
+        .and_then(|used| range.intersection(&used));
+    sheet
+        .into_iter()
+        .flat_map(move |s| clipped.into_iter().flat_map(move |r| s.iter_range(r)))
+}
+
 /// A value, or the shape of one when this server is not allowed to say.
 fn show(value: &CellValue, redact: bool) -> String {
     if redact {
@@ -571,11 +601,7 @@ fn precedents(state: &mut State, args: &Value) -> Result<String, String> {
 
     let mut out = format!("{note}{} reads\n", workbook.cite_range(range));
     let mut printed = 0;
-    for (at, cell) in workbook
-        .sheet(range.sheet)
-        .into_iter()
-        .flat_map(|sheet| sheet.iter_range(range))
-    {
+    for (at, cell) in populated_in(workbook, range) {
         if cell.formula.is_none() {
             continue;
         }
@@ -640,18 +666,20 @@ fn recompute_tool(state: &mut State, args: &Value) -> Result<String, String> {
 
     let mut out = note;
     let mut printed = 0;
-    for (at, _) in workbook
-        .sheet(range.sheet)
-        .into_iter()
-        .flat_map(|sheet| sheet.iter_range(range))
-    {
-        let Some(result) = recompute(workbook, at) else {
+    for (at, cell) in populated_in(workbook, range) {
+        // Checked before recomputing, not after: `recompute` parses and
+        // evaluates the formula, and the limit is meant to bound that work,
+        // not just the printing of it.
+        if cell.formula.is_none() {
             continue;
-        };
+        }
         if printed >= limit {
             out.push_str("… more, raise limit\n");
             break;
         }
+        let Some(result) = recompute(workbook, at) else {
+            continue;
+        };
         printed += 1;
         out.push_str(&format!(
             "{}\n  ={}\n",
@@ -909,9 +937,8 @@ fn tables(state: &mut State, args: &Value) -> Result<String, String> {
 }
 
 /// Find the table a caller named by its range.
-fn table_at(loaded: &eg_ingest::Loaded, citation: &str) -> Result<(usize, Table), String> {
+fn table_at(loaded: &eg_ingest::Loaded, citation: &str) -> Result<Table, String> {
     let range = resolve_range(&loaded.workbook, citation)?;
-    let index = range.sheet.0 as usize;
     let sheet = loaded
         .workbook
         .sheet(range.sheet)
@@ -920,7 +947,7 @@ fn table_at(loaded: &eg_ingest::Loaded, citation: &str) -> Result<(usize, Table)
         if region.range == range {
             let table = read_table(sheet, &region)
                 .ok_or_else(|| format!("{citation} is a region with no rows under its header"))?;
-            return Ok((index, table));
+            return Ok(table);
         }
     }
     Err(format!(
@@ -932,24 +959,16 @@ fn query_table(state: &mut State, args: &Value) -> Result<String, String> {
     let citation = want_str(args, "table")?;
     let (_, path) = state.resolve(opt_str(args, "workbook")?.as_deref())?;
     let (loaded, load_seconds) = state.workbook(&path)?;
-    let (_, table) = table_at(&loaded, &citation)?;
+    let table = table_at(&loaded, &citation)?;
 
     let mut query = Query {
         limit: opt_usize(args, "limit", 20)?.clamp(1, 200),
         ..Default::default()
     };
-    for filter in args
-        .get("where")
-        .and_then(Value::as_array)
-        .unwrap_or(&vec![])
-    {
+    for filter in opt_array(args, "where")? {
         query.filters.push(read_filter(filter)?);
     }
-    for column in args
-        .get("group_by")
-        .and_then(Value::as_array)
-        .unwrap_or(&vec![])
-    {
+    for column in opt_array(args, "group_by")? {
         query.group_by.push(
             column
                 .as_str()
@@ -957,11 +976,7 @@ fn query_table(state: &mut State, args: &Value) -> Result<String, String> {
                 .to_string(),
         );
     }
-    for aggregate in args
-        .get("aggregate")
-        .and_then(Value::as_array)
-        .unwrap_or(&vec![])
-    {
+    for aggregate in opt_array(args, "aggregate")? {
         query.aggregates.push(read_aggregate(aggregate)?);
     }
 
@@ -1332,6 +1347,19 @@ mod tests {
     fn a_number_where_a_string_belongs_is_refused_not_defaulted() {
         let err = opt_str(&json!({ "sheet": 3 }), "sheet").unwrap_err();
         assert!(err.contains("sheet") && err.contains("string"), "{err}");
+    }
+
+    #[test]
+    fn a_wrong_typed_list_argument_is_refused_rather_than_dropped() {
+        // The same rule as L8, on the arguments that carry a query. `where`
+        // sent as one object instead of a list of them used to become no
+        // conditions at all — and `query_table` then totalled the whole table
+        // and returned it as the answer to a filtered question.
+        let err = opt_array(&json!({ "where": { "column": "Type" } }), "where").unwrap_err();
+        assert!(err.contains("where") && err.contains("array"), "{err}");
+        assert!(opt_array(&json!({ "aggregate": "sum" }), "aggregate").is_err());
+        assert_eq!(opt_array(&json!({}), "where"), Ok(&[][..]));
+        assert_eq!(opt_array(&json!({ "where": null }), "where"), Ok(&[][..]));
     }
 
     #[test]

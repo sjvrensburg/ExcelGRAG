@@ -305,12 +305,19 @@ impl<'a> Parser<'a> {
             b';' => return Err(self.error("';' argument separator")),
             b':' => return Err(self.error("range operator on something that is not a reference")),
             b'<' | b'>' => {
-                let two = &self.src[self.pos..(self.pos + 2).min(self.src.len())];
-                let op = match two {
-                    "<=" => "<=",
-                    ">=" => ">=",
-                    "<>" => "<>",
-                    _ if c == b'<' => "<",
+                // One byte of lookahead, not a two-byte string slice:
+                // `self.pos + 2` can land *inside* a multi-byte character —
+                // `A1<é`, a comparison against a defined name that does not
+                // start with an ASCII letter — and slicing at a non-boundary
+                // panics rather than merely failing to match. Same trap
+                // `error_literal` guards against with `rest.get(..n)`, and a
+                // panic here would take down a whole `eg check` sweep, or the
+                // MCP server process, on one formula.
+                let op = match (c, b.get(self.pos + 1)) {
+                    (b'<', Some(b'=')) => "<=",
+                    (b'>', Some(b'=')) => ">=",
+                    (b'<', Some(b'>')) => "<>",
+                    (b'<', _) => "<",
                     _ => ">",
                 };
                 self.pos += op.len();
