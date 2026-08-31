@@ -31,6 +31,8 @@
 
 pub mod calc;
 pub mod parse;
+pub mod query;
+pub mod schema;
 pub mod trace;
 pub mod whatif;
 
@@ -39,6 +41,8 @@ pub use calc::{
     Outcome, Overrides, Recomputed, Unsupported,
 };
 pub use parse::{parse, BinOp, Expr, ParseError, UnaryOp};
+pub use query::{query, Aggregate, Answer, Filter, Group, Query, QueryError, Test};
+pub use schema::{infer_schema, Lookup, LookupKind, Schema};
 pub use trace::{
     cell, cells_in, dependents_of, precedents_of, CellFact, Reference, ScanReport, Target,
 };

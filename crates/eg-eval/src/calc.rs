@@ -1159,7 +1159,7 @@ fn compare(lhs: &CellValue, rhs: &CellValue) -> std::cmp::Ordering {
 /// point and true in every spreadsheet ever written, and a formula that tests
 /// it — an ageing bucket picking a label, say — takes the other branch if we
 /// compare the raw doubles.
-fn shown(n: f64) -> f64 {
+pub(crate) fn shown(n: f64) -> f64 {
     if n.is_finite() {
         format!("{n:.14e}").parse().unwrap_or(n)
     } else {
