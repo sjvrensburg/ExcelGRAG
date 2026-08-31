@@ -95,13 +95,14 @@ into one edge carrying their count. A column of 100,000 formulas reading a looku
 table becomes one edge of weight 100,000 — smaller than 100,000 edges, and a
 better answer, because the weight says how much rests on that table.
 
-On the real 170 MB workbook: **464,863 nodes and 926,970 edges in 10.7s**, using
-119 MiB. Drop the formula-group nodes and it is **732 nodes, 892 edges, 0.1 MiB**
-— with the identical dependency layer, because lifting reads formula cells and
-not group nodes.
+On the real 170 MB workbook: **2,007 nodes and 3,271 edges in 10.3s**, adding
+0.4 MiB to the 6 GB the workbook itself occupies. Drop the formula-group nodes
+and it is **735 nodes, 951 edges** — with the identical dependency layer,
+because lifting reads formula cells and not group nodes.
 
-That dependency layer is 161 edges, standing for 2.6 million references. Most
-references never leave the region they are written in.
+That dependency layer is 212 edges standing for 3.76 million references, out of
+24.5 million scanned: 22.2 million never leave the region they are written in,
+which is what makes a region-level graph small enough to hold.
 
 ```sh
 cargo run --release -p eg-graph --example graph -- private/book.xlsb
@@ -111,6 +112,56 @@ cargo run --release -p eg-graph --example graph -- private/book.xlsb --no-groups
 The example reports node and edge counts by kind, the reference breakdown,
 measured memory, the degree distribution, references to sheets the workbook does
 not have, and whether every invariant holds.
+
+### Checking the lifted edges against the cells
+
+`check` proves the graph is *self-consistent* — nothing orphaned, every node on
+one sheet, every edge standing for at least one reference — and it says plainly
+what that misses. An edge lifted to the **wrong** region is still reachable,
+still on one sheet, still positively weighted, and every invariant passes. An
+earlier phase shipped exactly that bug.
+
+So the edges are checked against the thing they were derived from. `audit` reads
+every formula in the workbook, resolves every reference, and attaches each to
+the regions it lands in — taking those regions out of the *graph's own nodes*,
+not out of the builder's internals — then compares the two multisets both ways
+round. An expected edge the graph lacks is a reference that lost its edge; an
+edge nothing expects is one pointing where no formula does; a weight that
+disagrees is an edge whose evidence is miscounted, which is what ranks it in
+retrieval.
+
+On the reference workbook, over 6,793,166 formulas and 24,480,367 references:
+
+| | Edges | References behind them |
+|---|---|---|
+| the workbook expects | 212 | 3,760,745 |
+| the graph holds | 212 | 3,760,745 |
+| agreed exactly | **212** (100.0%) | — |
+
+It takes 2.7s, against 7.0s to build the graph in the first place, so it is
+cheap enough to run on every workbook indexed rather than saved for a special
+occasion.
+
+What it does *not* check matters more than the number. Reference scanning, range
+geometry and region detection are one implementation each, used by both sides,
+so a defect in any of them is invisible here — parity against a second reader
+and the recompute sweep are what cover those. What is genuinely re-derived is
+the lifting itself: which region owns a formula, which regions its references
+land in, whether a self-reference is dropped, how the counts accumulate. Those
+are the steps that pick a region, and picking the wrong one was the bug.
+
+Because it reads regions and edges out of a graph rather than a builder, it
+audits one loaded back from the corpus as readily as a freshly built one, which
+puts the store's round-trip under the same check.
+
+`cargo test -p eg-graph --test audit` breaks a correct graph five ways — an edge
+moved to another region, an edge deleted, a weight falsified, one dependency
+split across two parallel edges, two regions laid over one cell — and asserts
+for each that `check` stays silent and the audit does not.
+
+```sh
+cargo run --release -p eg-graph --example lifting -- private/book.xlsb
+```
 
 ## The corpus
 
@@ -624,6 +675,12 @@ already caught three real bugs — see `docs/upstream-issues.md`.
 
 Fixtures live in `tests/fixtures/vendor` and were authored by real Excel, because
 no open-source tool can write XLSB.
+
+Two further checks stand behind the layers above the reader: the graph's lifted
+edges are re-derived from the cells and compared, in [Checking the lifted edges
+against the cells](#checking-the-lifted-edges-against-the-cells), and every
+formula is recomputed and compared with what Excel cached, in [What the workbook
+says about itself](#what-the-workbook-says-about-itself).
 
 ### Asking a second reader
 

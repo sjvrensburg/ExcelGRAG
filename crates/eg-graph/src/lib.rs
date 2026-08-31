@@ -20,12 +20,14 @@
 //! # Ok::<(), eg_ingest::IngestError>(())
 //! ```
 
+pub mod audit;
 pub mod build;
 pub mod check;
 pub mod node;
 pub mod report;
 pub mod store;
 
+pub use audit::{audit, AuditOptions, AuditReport, Finding, FindingKind};
 pub use build::{
     build, build_with, nodes_of_kind, reachable_from, BuiltGraph, Graph, GraphOptions,
 };
