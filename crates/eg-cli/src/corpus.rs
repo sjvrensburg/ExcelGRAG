@@ -8,7 +8,7 @@ use eg_graph::{build_with, AuditOptions, GraphOptions, NodeKind, MAX_STORED_FORM
 use eg_index::vector::{embeddable, VectorIndex};
 use eg_index::{Embedder, SearchOptions, TextIndex};
 use eg_ingest::{load_with, LoadOptions};
-use eg_retrieve::{expand, find, render, ExpandOptions, RenderOptions};
+use eg_retrieve::{expand, find, render, ExpandOptions, Fusion, RenderOptions};
 
 /// Read workbooks into the corpus, then bring both indexes up to date.
 ///
@@ -194,6 +194,14 @@ pub fn index(
     Ok(())
 }
 
+/// The defaults, with the semantic half turned off on request.
+fn fusion(lexical_only: bool) -> Fusion {
+    Fusion {
+        lexical_only,
+        ..Default::default()
+    }
+}
+
 pub struct AskOptions {
     pub seeds: usize,
     pub hops: usize,
@@ -209,8 +217,8 @@ pub fn ask(dir: &str, query: &str, options: AskOptions) -> Result<(), String> {
         limit: options.seeds.max(1),
         ..Default::default()
     };
-    let hits =
-        find(dir, query, &search_options, options.lexical_only).map_err(|e| e.to_string())?;
+    let hits = find(dir, query, &search_options, &fusion(options.lexical_only))
+        .map_err(|e| e.to_string())?;
     if hits.is_empty() {
         println!("{query:?} — nothing matched.");
         return Ok(());
@@ -268,7 +276,7 @@ pub fn search(
         sheet,
         ..Default::default()
     };
-    let hits = find(dir, query, &options, lexical_only).map_err(|e| e.to_string())?;
+    let hits = find(dir, query, &options, &fusion(lexical_only)).map_err(|e| e.to_string())?;
     if hits.is_empty() {
         println!("{query:?} — nothing matched.");
         return Ok(());
