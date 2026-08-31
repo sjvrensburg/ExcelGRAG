@@ -909,13 +909,34 @@ the way the sheet is spelled, and an assertion that the passage answers all of
 them and that MRR stays above 0.85. It runs by word only, because a model
 download is not something a test may depend on.
 
+That workbook has four columns and no depth, so it can only catch what a toy
+can show. `cargo test -p eg-retrieve --test demo_answers` scores the same
+pipeline against the generated demo workbook — two thousand rows, formula
+columns, a banding, a defined name, cross-sheet dependencies and prose — from a
+question file that is committed beside it:
+
 ```sh
-cargo run --release -p eg-retrieve --example answers -- corpus/ questions.json
+cargo run --release -p eg-retrieve --example answers -- \
+  corpus/ tests/fixtures/demo/answers.json
 ```
 
-The example is the same scoring against a real corpus and a question file of
-your own — which is where the interesting answers are, and which is why the
-question file for the reference workbook lives in `private/` with the workbook.
+One file, two consumers: the committed floor and the scorer anyone can run read
+the same questions, so a number quoted from one means the same thing in the
+other. Each question carries the nodes any reader would accept as its answer
+and *why* — a question nobody can justify should not quietly become the
+standard — and, where retrieval is known not to answer it, a recorded gap.
+
+The gaps are the point of the file. A question dropped for being inconvenient
+is a gap nobody is measuring, so they stay in, still asked and still scored,
+and the suite asserts the misses are **exactly** the recorded ones. A new miss
+fails; so does a recorded gap that starts working and nobody updated. The demo
+workbook currently records one, and it is the same gap the made-up workbook
+found: a table's key column is read as row labels, so it heads nothing, gets no
+node, and no ranking can return it. Asking a table about the column it is keyed
+by is an ordinary question and it does not work.
+
+The example also takes a question file of your own, against your own corpus,
+which is where the interesting answers are.
 
 **Two things it found immediately.** Neither was visible before there was a
 number:
