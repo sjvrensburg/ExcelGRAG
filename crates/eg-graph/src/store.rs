@@ -88,6 +88,11 @@ pub enum StoreError {
         #[source]
         source: serde_json::Error,
     },
+    /// Something was offered for a workbook this corpus does not hold. The
+    /// manifest is the corpus — a file written beside it for a hash it does
+    /// not list is unreachable, not stored.
+    #[error("{content_hash} is not in this corpus: store the graph before what hangs off it")]
+    NotInCorpus { content_hash: String },
 }
 
 fn io_err(context: impl Into<String>) -> impl FnOnce(io::Error) -> StoreError {
@@ -366,12 +371,25 @@ impl Corpus {
     /// Separate from [`Corpus::put`] because it is separately refusable: a
     /// corpus can hold every graph and no profile, which is what a caller that
     /// will not write cell values to disk wants.
+    ///
+    /// "Already in the corpus" is checked, not assumed. [`Corpus::profiles`]
+    /// reads through the manifest, so a file written for a hash the manifest
+    /// does not list could never be read back — and this is the one file the
+    /// store writes that holds the workbook's own values, sitting in
+    /// `profiles/` where [`Corpus::forget`] will never reach it, because
+    /// `forget` works from the manifest too. Refused before anything is
+    /// written rather than after.
     pub fn put_profiles(
         &mut self,
         content_hash: &str,
         path: &str,
         profiles: &Profiles,
     ) -> Result<(), StoreError> {
+        if !self.manifest.workbooks.contains_key(content_hash) {
+            return Err(StoreError::NotInCorpus {
+                content_hash: content_hash.to_string(),
+            });
+        }
         let stored = StoredProfiles {
             version: FORMAT_VERSION,
             content_hash: content_hash.to_string(),
@@ -380,10 +398,13 @@ impl Corpus {
         };
         let bytes = serde_json::to_vec(&stored).expect("profiles of plain data serialise");
         write_atomically(&self.profiles_path(content_hash), &bytes)?;
-        if let Some(entry) = self.manifest.workbooks.get_mut(content_hash) {
-            entry.profiled_columns = profiles.len() as u64;
-            entry.profile_values = profiles.values;
-        }
+        let entry = self
+            .manifest
+            .workbooks
+            .get_mut(content_hash)
+            .expect("checked before the write");
+        entry.profiled_columns = profiles.len() as u64;
+        entry.profile_values = profiles.values;
         self.write_manifest()
     }
 
