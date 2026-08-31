@@ -51,7 +51,12 @@ above it.
 
 - `eg-model` — addresses (`CellRef`, `RangeRef`, A1 parse/quote), `CellValue`,
   formula scanning (`scan_references`, `to_r1c1_shape`), `Workbook`. Dependency-light
-  and side-effect free; every other crate speaks these types.
+  and side-effect free; every other crate speaks these types. It also settles
+  **which sheets a reference names** (`ParsedRef::spanned_sheets`, returning a
+  `SheetSpan`), because a 3-D reference answered two ways is two answers: the
+  graph lifted `Jan:Dec!B2` to every sheet it spans while the cell layer read
+  it as `Jan!B2`, and a what-if then reported the other sheets' readers as
+  unaffected.
 - `eg-ingest` — one entry point, `load()`, for all five formats, plus
   `Capabilities` saying what a format could not provide. calamine exposes **no
   cell styling for any format**, so structural analysis may never depend on

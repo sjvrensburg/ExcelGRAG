@@ -289,6 +289,101 @@ impl ParsedRef {
     pub fn is_whole_row(&self) -> bool {
         self.left == 0 && self.right == MAX_COL as u16
     }
+
+    /// Every sheet this reference names.
+    ///
+    /// One sheet for an ordinary reference; every sheet between the two named
+    /// ones, inclusive, for a 3-D reference (`Jan:Dec!A1`). `from` is the
+    /// sheet the formula lives on, which is what an unqualified reference
+    /// names.
+    ///
+    /// This lives on the parsed reference itself because which sheets a 3-D
+    /// reference names has to be decided in exactly one place. The graph's
+    /// lifting and the audit that checks it already shared one function for
+    /// it; the cell layer quietly kept a second answer — the start sheet, and
+    /// nothing else — which is how a what-if came to report the rest of a
+    /// span as unaffected.
+    ///
+    /// `lookup` maps a sheet name to its id, and is a closure rather than a
+    /// `&Workbook` because every caller runs this per reference over millions
+    /// of formulas and each already keeps the sheet index it wants to use.
+    /// Excel matches sheet names without regard to case, so a lookup that
+    /// does not is a phantom broken reference.
+    ///
+    /// `Err` names the one sheet — start or end — that `lookup` did not know.
+    pub fn spanned_sheets(
+        &self,
+        from: SheetId,
+        lookup: impl Fn(&str) -> Option<SheetId>,
+    ) -> Result<SheetSpan, &str> {
+        let start = match &self.sheet_name {
+            None => from,
+            Some(name) => lookup(name).ok_or(name.as_str())?,
+        };
+        match &self.end_sheet_name {
+            None => Ok(SheetSpan::one(start)),
+            Some(name) => Ok(SheetSpan::between(
+                start,
+                lookup(name).ok_or(name.as_str())?,
+            )),
+        }
+    }
+}
+
+/// The sheets one reference names, as a span of workbook (tab) order.
+///
+/// Two bounds rather than a list: [`SheetId`] *is* tab order, so the sheets
+/// between the two a 3-D reference names are a contiguous range whichever end
+/// was written first — and a scan that resolves every reference in a workbook
+/// must not allocate merely to say that one names a single sheet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SheetSpan {
+    first: SheetId,
+    last: SheetId,
+}
+
+impl SheetSpan {
+    /// What an ordinary reference names: one sheet.
+    pub fn one(sheet: SheetId) -> Self {
+        Self {
+            first: sheet,
+            last: sheet,
+        }
+    }
+
+    /// Both ends of a 3-D reference, inclusive, written in either order.
+    pub fn between(a: SheetId, b: SheetId) -> Self {
+        Self {
+            first: SheetId(a.0.min(b.0)),
+            last: SheetId(a.0.max(b.0)),
+        }
+    }
+
+    /// The first sheet in tab order — the only one, unless this is 3-D.
+    pub fn first(&self) -> SheetId {
+        self.first
+    }
+
+    /// The last sheet in tab order.
+    pub fn last(&self) -> SheetId {
+        self.last
+    }
+
+    /// Whether more than one sheet is named, i.e. whether this came from a
+    /// 3-D reference.
+    pub fn is_multi_sheet(&self) -> bool {
+        self.first != self.last
+    }
+
+    /// How many sheets are named. Never zero.
+    pub fn count(&self) -> usize {
+        (self.last.0 - self.first.0) as usize + 1
+    }
+
+    /// Every sheet named, in tab order.
+    pub fn iter(&self) -> impl Iterator<Item = SheetId> {
+        (self.first.0..=self.last.0).map(SheetId)
+    }
 }
 
 /// Parse a full A1 reference, optionally sheet- and workbook-qualified.
@@ -1090,5 +1185,69 @@ mod tests {
         let a = R1C1Ref::from_parsed(&parse_a1("A1").unwrap(), CellRef::new(S0, 0, 1));
         let b = R1C1Ref::from_parsed(&parse_a1("A1").unwrap(), CellRef::new(S0, 0, 2));
         assert_ne!(a, b, "different column offsets must not collapse");
+    }
+
+    #[test]
+    fn a_reference_names_every_sheet_it_spans() {
+        // Tab order, by name, as a workbook would hand them over.
+        let tabs = ["Jan", "Feb", "Mar", "Summary"];
+        let lookup = |name: &str| {
+            tabs.iter()
+                .position(|t| t.eq_ignore_ascii_case(name))
+                .map(|i| SheetId(i as u16))
+        };
+        let here = SheetId(3);
+
+        // An unqualified reference names the sheet it was written on.
+        let span = parse_a1("B2")
+            .unwrap()
+            .spanned_sheets(here, lookup)
+            .unwrap();
+        assert_eq!(span.first(), here);
+        assert!(!span.is_multi_sheet());
+        assert_eq!(span.iter().collect::<Vec<_>>(), vec![here]);
+
+        // A qualified one names the sheet it names.
+        let span = parse_a1("Feb!B2")
+            .unwrap()
+            .spanned_sheets(here, lookup)
+            .unwrap();
+        assert_eq!(span.iter().collect::<Vec<_>>(), vec![SheetId(1)]);
+
+        // A 3-D one names every sheet between its ends, inclusive.
+        let span = parse_a1("Jan:Mar!B2")
+            .unwrap()
+            .spanned_sheets(here, lookup)
+            .unwrap();
+        assert!(span.is_multi_sheet());
+        assert_eq!(span.count(), 3);
+        assert_eq!(
+            span.iter().collect::<Vec<_>>(),
+            vec![SheetId(0), SheetId(1), SheetId(2)]
+        );
+        assert_eq!((span.first(), span.last()), (SheetId(0), SheetId(2)));
+
+        // Written back to front, it is the same span: tab order decides, not
+        // which end the formula happened to put first.
+        let span = parse_a1("Mar:Jan!B2")
+            .unwrap()
+            .spanned_sheets(here, lookup)
+            .unwrap();
+        assert_eq!(span.count(), 3);
+        assert_eq!(span.first(), SheetId(0));
+
+        // Either end going missing breaks the whole span, and says which end.
+        assert_eq!(
+            parse_a1("Jan:Gone!B2")
+                .unwrap()
+                .spanned_sheets(here, lookup),
+            Err("Gone")
+        );
+        assert_eq!(
+            parse_a1("Gone:Mar!B2")
+                .unwrap()
+                .spanned_sheets(here, lookup),
+            Err("Gone")
+        );
     }
 }

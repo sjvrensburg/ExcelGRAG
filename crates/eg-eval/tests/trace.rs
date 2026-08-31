@@ -58,10 +58,88 @@ fn targets(refs: &[eg_eval::Reference]) -> Vec<String> {
     refs.iter()
         .map(|r| match &r.target {
             Target::Cells(range) => range.to_a1(),
+            // Sheet ids spelled out: the ranges of a 3-D span differ only by
+            // the sheet they are on, so `to_a1` alone would render them
+            // identically and assert nothing.
+            Target::Spanned(ranges) => ranges
+                .iter()
+                .map(|r| format!("#{}!{}", r.sheet.0, r.to_a1()))
+                .collect::<Vec<_>>()
+                .join("+"),
             Target::UnknownSheet(name) => format!("#REF:{name}"),
             Target::ExternalWorkbook(token) => format!("#EXT:{token}"),
         })
         .collect()
+}
+
+/// Three month sheets and a summary that adds one cell across all of them.
+fn months() -> Workbook {
+    Workbook {
+        path: "book.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash".into(),
+        sheets: vec![
+            grid(0, "Jan", &[". .", ". 1"]),
+            grid(1, "Feb", &[". .", ". 2"]),
+            grid(2, "Mar", &[". .", ". 3"]),
+            grid(3, "Summary", &["=SUM(Jan:Mar!B2)"]),
+        ],
+        defined_names: Vec::new(),
+        external_links: Vec::new(),
+    }
+}
+
+#[test]
+fn a_3d_reference_names_every_sheet_it_spans() {
+    // `Jan:Mar!B2` reads three cells, and resolving it to `Jan!B2` alone —
+    // which this layer did, while the graph beside it got it right — makes
+    // every reader on the other sheets invisible to `dependents_of` and to
+    // the what-if walk built on it.
+    let wb = months();
+    let refs = precedents_of(&wb, at(3, 0, 0));
+    assert_eq!(targets(&refs), vec!["#0!B2+#1!B2+#2!B2"]);
+    assert_eq!(
+        refs[0].target.ranges().len(),
+        3,
+        "one reference, three ranges"
+    );
+}
+
+#[test]
+fn a_middle_sheet_of_a_span_has_the_summary_as_a_dependent() {
+    // The direction that costs a full scan, and the one a what-if is built
+    // on: Feb is neither end of `Jan:Mar`, so a resolver that keeps only the
+    // sheet written first misses this entirely.
+    let wb = months();
+    let feb_b2 = RangeRef::new(SheetId(1), 1, 1, 1, 1);
+    let (refs, report) = dependents_of(&wb, feb_b2, 10);
+    assert_eq!(report.matches, 1);
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].from, at(3, 0, 0), "Summary!A1 reads Feb!B2");
+    assert_eq!(refs[0].text, "Jan:Mar!B2");
+
+    // And it is reported once, not once per sheet of the span.
+    let jan_to_mar = RangeRef::new(SheetId(0), 1, 1, 1, 1);
+    let (refs, report) = dependents_of(&wb, jan_to_mar, 10);
+    assert_eq!((report.matches, refs.len()), (1, 1));
+}
+
+#[test]
+fn a_3d_reference_with_a_missing_end_is_a_ref_break() {
+    // Half a span is not a span: `Jan:Gone!B2` names a sheet the workbook
+    // does not have, and reading it as `Jan!B2` would invent a dependency
+    // the formula does not have and hide a real `#REF!`.
+    let mut wb = months();
+    wb.sheet_mut(SheetId(3)).unwrap().set(
+        0,
+        0,
+        eg_model::Cell {
+            value: CellValue::Number(0.0),
+            formula: Some("SUM(Jan:Gone!B2)".into()),
+            format: Default::default(),
+        },
+    );
+    assert_eq!(targets(&precedents_of(&wb, at(3, 0, 0))), vec!["#REF:Gone"]);
 }
 
 #[test]

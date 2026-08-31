@@ -17,9 +17,7 @@
 
 use eg_eval::query::{query as query_run, Aggregate, Filter, Query, Test};
 use eg_eval::whatif::{what_if, Blocked, Change, WhatIfOptions};
-use eg_eval::{
-    cell as cell_fact, cells_in, dependents_of, precedents_of, recompute, Outcome, Target,
-};
+use eg_eval::{cell as cell_fact, cells_in, dependents_of, precedents_of, recompute, Outcome};
 use eg_eval::{infer_schema, Lookup};
 use eg_index::SearchOptions;
 use eg_model::{parse_a1, redact_formula_literals, CellValue, RangeRef, Workbook};
@@ -610,13 +608,7 @@ fn precedents(state: &mut State, args: &Value) -> Result<String, String> {
                 out.push_str("  … more, raise limit\n");
                 return Ok(out);
             }
-            let target = match &reference.target {
-                Target::Cells(r) => workbook.cite_range(*r),
-                Target::UnknownSheet(name) => format!("#REF! — no sheet called {name:?}"),
-                Target::ExternalWorkbook(token) => {
-                    format!("another workbook, written as [{token}]")
-                }
-            };
+            let target = reference.target.cite(workbook);
             out.push_str(&format!(
                 "  {:<24} {} → {target}\n",
                 workbook.cite(at),

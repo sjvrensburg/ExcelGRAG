@@ -621,3 +621,84 @@ fn a_cell_that_reverts_still_makes_its_readers_revisit() {
     assert_eq!(after(&impact, "Main!D1"), Some(CellValue::Number(-5.0)));
     assert_eq!(after(&impact, "Main!E1"), Some(CellValue::Number(-5.0)));
 }
+
+// ---- a 3-D reference in the closure walk -----------------------------------
+
+#[test]
+fn every_sheet_of_a_3d_span_reaches_its_reader() {
+    // `=SUM(Jan:Mar!B2)` reads a cell on three sheets. The cell layer used to
+    // resolve that reference to `Jan!B2` alone — the sheet written first —
+    // so substituting into Feb or Mar never put the summary on the frontier
+    // and it came back *unaffected*: the one verdict this walk may not give a
+    // cell it did not evaluate. The evaluator refuses a 3-D formula by name,
+    // so the honest answer here is Blocked, not a number.
+    let mut summary = Sheet::new(SheetId(3), "Summary");
+    summary.set(0, 0, formula("SUM(Jan:Mar!B2)", 6.0)); // A1
+    summary.set(0, 1, formula("A1*2", 12.0)); // B1, reads the blocked cell
+    let month = |id: u16, name: &str, n: f64| {
+        let mut sheet = Sheet::new(SheetId(id), name);
+        sheet.set(1, 1, literal(n)); // B2
+        sheet
+    };
+    let wb = Workbook {
+        path: "book.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash".into(),
+        sheets: vec![
+            month(0, "Jan", 1.0),
+            month(1, "Feb", 2.0),
+            month(2, "Mar", 3.0),
+            summary,
+        ],
+        defined_names: Vec::new(),
+        external_links: Vec::new(),
+    };
+
+    // Feb is the middle of the span: neither the sheet the reference was
+    // written with first nor the one it ends on.
+    let impact = what_if(
+        &wb,
+        &[Change::new(
+            CellRef::new(SheetId(1), 1, 1),
+            CellValue::Number(20.0),
+        )],
+        &WhatIfOptions::default(),
+    );
+
+    let summary_a1 = impact
+        .unanswered
+        .iter()
+        .find(|u| u.a1 == "Summary!A1")
+        .expect("Summary!A1 reads Feb!B2 through the span and must be reported");
+    assert!(matches!(summary_a1.reason, Blocked::Formula(_)));
+    assert!(
+        impact.moved.iter().all(|m| m.a1 != "Summary!A1"),
+        "must not also appear as Moved"
+    );
+    assert_eq!(
+        impact
+            .unanswered
+            .iter()
+            .find(|u| u.a1 == "Summary!B1")
+            .map(|u| u.reason.clone()),
+        Some(Blocked::Upstream("Summary!A1".into())),
+        "and what reads the blocked cell is blocked in turn, not guessed"
+    );
+
+    // Each end of the span reaches it too, and the answer does not depend on
+    // which end was written first.
+    for sheet in [SheetId(0), SheetId(2)] {
+        let impact = what_if(
+            &wb,
+            &[Change::new(
+                CellRef::new(sheet, 1, 1),
+                CellValue::Number(20.0),
+            )],
+            &WhatIfOptions::default(),
+        );
+        assert!(
+            impact.unanswered.iter().any(|u| u.a1 == "Summary!A1"),
+            "a change on {sheet} must reach the summary"
+        );
+    }
+}
