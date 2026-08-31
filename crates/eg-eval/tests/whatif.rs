@@ -359,3 +359,50 @@ fn a_cell_reached_early_still_sees_an_input_that_moves_later() {
         "a cell judged again is corrected in place, not listed twice"
     );
 }
+
+#[test]
+fn a_lookup_column_that_moves_mid_walk_is_not_answered_from_the_old_index() {
+    // Past 512 rows a lookup is answered from a map built out of the column as
+    // it read at the time, and the walk now holds one evaluator for its whole
+    // run rather than an index per cell. So a key that moves *after* the map
+    // was built has to drop it.
+    //
+    // `Main!B1` reads the changed cell directly, so it is judged at level 1 and
+    // builds the map. `Rates!A9` is three hops away and only moves at level 3.
+    // `Main!C1` reads that column and nothing nearer, so it is first judged at
+    // level 4 — by which time the map it would otherwise be answered from is
+    // two levels out of date.
+    let mut main = Sheet::new(SheetId(0), "Main");
+    main.set(0, 0, literal(0.0));
+    main.set(0, 1, formula("VLOOKUP(7,Rates!A1:B600,2,FALSE)+A1", 70.0));
+    main.set(0, 2, formula("VLOOKUP(999,Rates!A1:B600,2,FALSE)", 0.0));
+    let mut rates = Sheet::new(SheetId(1), "Rates");
+    for row in 0..600u32 {
+        rates.set(row, 0, Cell::literal(CellValue::Number(f64::from(row))));
+        rates.set(row, 1, literal(f64::from(row) * 10.0));
+    }
+    // Three hops from the change, ending in a key of the lookup column.
+    rates.set(0, 2, formula("Main!A1", 0.0));
+    rates.set(1, 2, formula("C1", 0.0));
+    rates.set(8, 0, formula("C2+8", 8.0));
+    let wb = Workbook {
+        path: "lookup.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash".into(),
+        sheets: vec![main, rates],
+        defined_names: Vec::new(),
+        external_links: Vec::new(),
+    };
+
+    let impact = what_if(&wb, &[change(0, 0, 991.0)], &WhatIfOptions::default());
+    assert_eq!(
+        after(&impact, "Rates!A9"),
+        Some(CellValue::Number(999.0)),
+        "the key moves at level 3"
+    );
+    assert_eq!(
+        after(&impact, "Main!C1"),
+        Some(CellValue::Number(80.0)),
+        "and the lookup for it finds row 9, not the map built before it moved"
+    );
+}

@@ -35,8 +35,8 @@ pub mod trace;
 pub mod whatif;
 
 pub use calc::{
-    check, evaluate, evaluate_over, recompute, recompute_over, CheckReport, Input, Outcome,
-    Overrides, Recomputed, Unsupported,
+    check, evaluate, evaluate_over, recompute, recompute_over, CheckReport, Evaluator, Input,
+    Outcome, Overrides, Recomputed, Unsupported,
 };
 pub use parse::{parse, BinOp, Expr, ParseError, UnaryOp};
 pub use trace::{

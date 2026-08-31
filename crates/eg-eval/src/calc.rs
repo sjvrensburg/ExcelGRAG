@@ -29,6 +29,7 @@
 //! "differs" would be the wrong verdict even when both numbers are right.
 
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::fmt;
 
 use eg_model::{CellRef, CellValue, ErrorKind, ParsedRef, RangeRef, SheetId, ValueKind, Workbook};
@@ -219,6 +220,65 @@ pub fn recompute_over(
         &mut LookupIndex::default(),
         overrides,
     ))
+}
+
+/// A workbook set up to be recomputed many times over.
+///
+/// [`recompute_over`] is a whole standing start: the sheet-name map is built and
+/// an empty lookup index allocated for one cell. That is right for one cell and
+/// wrong a million times in a row, which is what a what-if does — so the walk
+/// holds one of these instead, exactly as [`check`] holds its own.
+///
+/// The lookup index is the reason this is a type rather than a pair of
+/// arguments. It caches a lookup column as it was read, so a substitution
+/// *into* such a column would be answered from a map that predates it. The
+/// caller says when that happens, with [`Evaluator::invalidate`], and the
+/// cached column is dropped.
+pub struct Evaluator<'a> {
+    workbook: &'a Workbook,
+    sheets: FxHashMap<String, SheetId>,
+    index: LookupIndex,
+}
+
+impl<'a> Evaluator<'a> {
+    pub fn new(workbook: &'a Workbook) -> Self {
+        Evaluator {
+            workbook,
+            sheets: sheet_ids(workbook),
+            index: LookupIndex::default(),
+        }
+    }
+
+    /// As [`recompute_over`], reusing everything that does not depend on the
+    /// cell.
+    pub fn recompute_over(&mut self, at: CellRef, overrides: &Overrides) -> Option<Recomputed> {
+        let cell = self.workbook.sheet(at.sheet)?.get_ref(at)?;
+        let formula = cell.formula.clone()?;
+        let stored = cell.value.clone();
+        Some(recompute_with(
+            self.workbook,
+            at,
+            &formula,
+            &stored,
+            &self.sheets,
+            &mut self.index,
+            overrides,
+        ))
+    }
+
+    /// Forget any cached lookup column that `at` sits in.
+    ///
+    /// Called by whoever changes an override, because a cached column is only
+    /// as good as the values it was built from. Cheap: a workbook has a handful
+    /// of tables it looks things up in, not one per formula.
+    pub fn invalidate(&mut self, at: CellRef) {
+        if self.index.columns.is_empty() {
+            return;
+        }
+        self.index.columns.retain(|&(sheet, col, top, bottom), _| {
+            !(sheet == at.sheet && col == at.col && (top..=bottom).contains(&at.row))
+        });
+    }
 }
 
 /// Evaluate arbitrary formula text as if it sat in `at`, without comparing it
@@ -451,6 +511,17 @@ impl Key {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Overrides {
     values: FxHashMap<CellRef, CellValue>,
+    /// The same addresses, ordered by column and then row within each sheet, so
+    /// that reading a *range* costs a bounded lookup rather than a walk over
+    /// every substitution.
+    ///
+    /// Column-major because a spreadsheet range is usually tall and narrow: in
+    /// row order, a one-column range's own cells are separated by every
+    /// substitution on the rows between them. Needed because a what-if's
+    /// overlay is not the handful of cells this type was first written for —
+    /// the walk puts every cell it recomputes into it, which on the reference
+    /// workbook is 1.2 million.
+    index: FxHashMap<SheetId, BTreeSet<(u16, u32)>>,
 }
 
 impl Overrides {
@@ -460,7 +531,12 @@ impl Overrides {
 
     /// Substitute `value` for whatever `at` holds.
     pub fn set(&mut self, at: CellRef, value: CellValue) {
-        self.values.insert(at, value);
+        if self.values.insert(at, value).is_none() {
+            self.index
+                .entry(at.sheet)
+                .or_default()
+                .insert((at.col, at.row));
+        }
     }
 
     pub fn get(&self, at: CellRef) -> Option<&CellValue> {
@@ -487,17 +563,42 @@ impl Overrides {
     }
 
     /// The substitutions inside `range`, for a read that walks cells rather
-    /// than naming one. Linear in the substitutions, which are few — a what-if
-    /// sets a handful of cells and asks about millions.
-    fn in_range(&self, range: RangeRef) -> impl Iterator<Item = (CellRef, &CellValue)> + '_ {
-        self.values
-            .iter()
-            .filter(move |(at, _)| {
-                at.sheet == range.sheet
-                    && (range.top..=range.bottom).contains(&at.row)
-                    && (range.left..=range.right).contains(&at.col)
-            })
-            .map(|(at, v)| (*at, v))
+    /// than naming one.
+    ///
+    /// Returned as a vector because the two ways of finding them have different
+    /// shapes, and because the answer is empty for almost every range — an
+    /// empty `Vec` allocates nothing, which is what this costs on the reads
+    /// that have no substitution in them.
+    fn in_range(&self, range: RangeRef) -> Vec<(CellRef, &CellValue)> {
+        let Some(index) = self.index.get(&range.sheet) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut push = |col: u16, row: u32| {
+            let at = CellRef::new(range.sheet, row, col);
+            if let Some(value) = self.values.get(&at) {
+                out.push((at, value));
+            }
+        };
+        let columns = usize::from(range.right - range.left) + 1;
+        if columns >= index.len() {
+            // A range wider than the sheet has substitutions — a whole-row or
+            // whole-sheet reference — is cheaper walked than probed per column.
+            for &(col, row) in index.iter() {
+                if (range.left..=range.right).contains(&col)
+                    && (range.top..=range.bottom).contains(&row)
+                {
+                    push(col, row);
+                }
+            }
+        } else {
+            for col in range.left..=range.right {
+                for &(_, row) in index.range((col, range.top)..=(col, range.bottom)) {
+                    push(col, row);
+                }
+            }
+        }
+        out
     }
 }
 
@@ -776,6 +877,7 @@ impl<'a> Eval<'a> {
             extra.extend(
                 overrides
                     .in_range(range)
+                    .into_iter()
                     .filter(|(at, _)| sheet.map(|s| s.get_ref(*at).is_none()).unwrap_or(true)),
             );
             extra.sort_unstable_by_key(|(at, _)| (at.row, at.col));

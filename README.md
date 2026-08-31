@@ -585,7 +585,8 @@ design:
   distance from the change, not a rank. In `D=A+C` where `C=B` and `B=A`, `D` is
   reached at level 1 and reads a cell that only moves at level 2. So a cell is
   judged again whenever an input of it moves, and holds what the last visit
-  said. That is most of what the full closure costs, and the alternative is a
+  said. It is cheaper than it sounds — on the reference workbook it is 234,000
+  extra evaluations against 1.2 million cells — and the alternative is a
   confidently wrong number: judged once, `D` would report the sum of the new `A`
   and the *stored* `C`, with nothing marking it as provisional. What cannot be
   ordered at all is a cycle, and a cycle is reported rather than iterated to a
@@ -599,7 +600,7 @@ On the reference workbook, changing one interest rate — the one residential
 debtors are discounted at:
 
 ```
-1,197,300 cell(s) downstream over 6 level(s), 7 scans of 47.5M formulas in 747s
+1,197,300 cell(s) downstream over 6 level(s), 7 scans of 47.5M formulas in 25.5s
   moved           678,427
   unchanged       518,873
   blocked               0
@@ -629,15 +630,39 @@ moved" and "this did not look" are different answers:
   stopped at the ceiling on affected cells — the change reaches further than this
 ```
 
-The scans are the part that sounds expensive and is not: 47.5M formulas across
-seven of them is about 22s of the 747. What the walk still spends its time on is
-evaluation, because a cell is judged once per input of it that moves. Pruning is
-what keeps that bounded — a cell that recomputes to what it already held cannot
-move anything reading it, so it does not travel in the next frontier — and
-matching a reference against that frontier is the inner loop, tens of millions
-of times against a set of hundreds of thousands of cells. So the frontier is
-held as sorted rows per column, and a reference costs a bounding-box reject and
-then a binary search per column it spans, rather than a walk over either side.
+The cost is the scans, which is where it should be: 47.5M formulas across seven
+of them are most of the 25.5s. The walk keeps their number down by pruning — a
+cell that recomputes to what it already held cannot move anything reading it, so
+it does not travel in the next frontier — and matching a reference against that
+frontier is the inner loop, tens of millions of times against a set of hundreds
+of thousands of cells. So the frontier is held as sorted rows per column, and a
+reference costs a bounding-box reject and then a binary search per column it
+spans, rather than a walk over either side.
+
+### The quadratic that hid in the last two levels
+
+For a while that paragraph was false and the closure took **747s**, and how it
+got there is worth keeping. A substituted value lives in an overlay that every
+read goes through, and the overlay was written for what a caller substitutes —
+a handful of cells — so it answered "what have you got inside this range?" by
+looking at all of them. Its own comment said so. Then the walk began putting
+every cell it recomputes into that overlay, 1.2 million of them, and a scan that
+had been free became **205 billion cell comparisons**.
+
+None of it showed up until level 5. Nothing in the first four levels reads a
+*range* at all — they are `PV` and `VLOOKUP` over single cells — so the overlay
+was only ever asked for one address at a time, which is a hash lookup. Level 5
+is where the aggregation sheets start, and they read whole columns. Four levels
+in 14s, then two more in 733s.
+
+The overlay now carries a column-major index of its own addresses, so a range
+read costs a bounded lookup per column: column-major because a spreadsheet range
+is tall and narrow, and in row order a single column's own cells are separated
+by every substitution on the rows between them. The walk also holds one
+evaluator for its whole run instead of rebuilding the sheet-name map and an
+empty lookup index per cell, a million times over — which needs the walk to say
+when it overrides a cell, because a cached lookup column is only as good as the
+values it was built from. **747s to 25.5s**, with every count identical.
 
 ## One command
 

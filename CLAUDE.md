@@ -87,7 +87,13 @@ above it.
   scans every formula), and `recompute`/`check` which evaluate a formula and
   compare with the value Excel stored. `whatif::what_if` substitutes values
   through an `Overrides` overlay — the workbook is never mutated, since XLSB
-  cannot be written — and walks the closure a level per full formula scan.
+  cannot be written — and walks the closure a level per full formula scan. The
+  overlay is indexed by column: a what-if's overlay holds every cell it has
+  recomputed, not the handful a caller typed, so any range read over it must not
+  be a scan. `calc::Evaluator` is the reusable context the walk holds so it is
+  not rebuilding a sheet-name map and a lookup index per cell; tell it
+  `invalidate` whenever an override changes, or a cached lookup column outlives
+  the values behind it.
 - `eg-mcp` — MCP server over the whole stack (`workbooks`, `search`, `context`,
   `read_cells`, `precedents`, `dependents`, `recompute`, `what_if`). Hand-written stdio JSON
   protocol, no SDK, because the workspace is synchronous. A failing tool returns a
