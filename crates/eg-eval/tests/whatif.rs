@@ -327,3 +327,35 @@ fn the_workbook_is_not_touched() {
     let (cells, _) = eg_eval::cells_in(&wb, range, 100);
     assert_eq!(cells.len(), 5);
 }
+
+#[test]
+fn a_cell_reached_early_still_sees_an_input_that_moves_later() {
+    // The level a cell is first reached at is its *shortest* distance from the
+    // change, and a cell can read something further down a longer path. D1
+    // reads A1 directly, so it is reached at level 1 — and it also reads C1,
+    // which only moves at level 2. Judging D1 once, at level 1, would report a
+    // number computed from the stored C1: wrong, and silently so.
+    let mut wb = book();
+    let sheet = wb.sheet_mut(SheetId(0)).unwrap();
+    sheet.set(0, 3, formula("B1*10", 100.0)); // D1, level 2 behind B1
+    sheet.set(0, 4, formula("A1+D1", 100.1)); // E1, level 1 and reads D1
+
+    let impact = what_if(&wb, &[change(0, 0, 0.2)], &WhatIfOptions::default());
+    assert_eq!(after(&impact, "Main!D1"), Some(CellValue::Number(200.0)));
+    assert_eq!(
+        after(&impact, "Main!E1"),
+        Some(CellValue::Number(200.2)),
+        "0.2 plus the recomputed D1 of 200, not the stored 100"
+    );
+    // And it is one affected cell, not two: reached twice, judged twice,
+    // counted once.
+    assert_eq!(
+        impact.report.affected, 5,
+        "B1, B2, C1, D1 and E1, each once"
+    );
+    assert_eq!(
+        impact.moved.iter().filter(|m| m.a1 == "Main!E1").count(),
+        1,
+        "a cell judged again is corrected in place, not listed twice"
+    );
+}

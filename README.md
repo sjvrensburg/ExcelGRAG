@@ -581,9 +581,15 @@ design:
 - **Finding what is downstream.** Nothing records who reads a cell, so each
   level of the chain is a full scan of the workbook's formulas.
 - **Order.** A cell must not be computed before the cells it reads, so each
-  level is sorted by its own internal dependencies. What cannot be sorted is a
-  cycle, and a cycle is reported rather than iterated to a fixed point —
-  Excel's iterative calculation is a setting this cannot see.
+  level is sorted by its own internal dependencies — and a level is a *shortest*
+  distance from the change, not a rank. In `D=A+C` where `C=B` and `B=A`, `D` is
+  reached at level 1 and reads a cell that only moves at level 2. So a cell is
+  judged again whenever an input of it moves, and holds what the last visit
+  said. That is most of what the full closure costs, and the alternative is a
+  confidently wrong number: judged once, `D` would report the sum of the new `A`
+  and the *stored* `C`, with nothing marking it as provisional. What cannot be
+  ordered at all is a cycle, and a cycle is reported rather than iterated to a
+  fixed point — Excel's iterative calculation is a setting this cannot see.
 - **Saying what it could not answer.** A cell whose formula this crate does not
   model has no new value, and neither does anything reading it. Those come back
   as *no answer*, never as *unchanged* — leaving the stored value in place would
@@ -593,11 +599,14 @@ On the reference workbook, changing one interest rate — the one residential
 debtors are discounted at:
 
 ```
-1,197,300 cell(s) downstream over 6 level(s), 7 scans of 47.5M formulas in 207s
+1,197,300 cell(s) downstream over 6 level(s), 7 scans of 47.5M formulas in 747s
   moved           678,427
   unchanged       518,873
   blocked               0
 ```
+
+That is the whole closure, which is not what the default asks for: the ceiling
+on affected cells stops at 705,620 cells and four levels in **14s**, and says so.
 
 The half that does not move is the interesting half, and the first level shows
 it cleanly:
@@ -620,13 +629,15 @@ moved" and "this did not look" are different answers:
   stopped at the ceiling on affected cells — the change reaches further than this
 ```
 
-The cost is dominated by the scans, and the walk keeps them down by pruning:
-a cell that recomputes to what it already held cannot move anything reading it,
-so it does not travel in the next frontier. Matching a reference against that
-frontier is the inner loop — tens of millions of times against a set of
-hundreds of thousands of cells — so the frontier is held as sorted rows per
-column, and a reference costs a bounding-box reject and then a binary search
-per column it spans, rather than a walk over either side.
+The scans are the part that sounds expensive and is not: 47.5M formulas across
+seven of them is about 22s of the 747. What the walk still spends its time on is
+evaluation, because a cell is judged once per input of it that moves. Pruning is
+what keeps that bounded — a cell that recomputes to what it already held cannot
+move anything reading it, so it does not travel in the next frontier — and
+matching a reference against that frontier is the inner loop, tens of millions
+of times against a set of hundreds of thousands of cells. So the frontier is
+held as sorted rows per column, and a reference costs a bounding-box reject and
+then a binary search per column it spans, rather than a walk over either side.
 
 ## One command
 

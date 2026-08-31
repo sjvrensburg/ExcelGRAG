@@ -596,6 +596,14 @@ fn carries_dependency(graph: &Graph, node: NodeIndex, opts: &ExpandOptions) -> b
 /// ones a reader means when they ask what is in it, and an alphabetical or
 /// insertion order would be an arbitrary slice of 136.
 ///
+/// Columns come before formula groups regardless of size. A region contains
+/// both, and their sizes are not the same quantity — a column's is its rows, a
+/// group's is its area — so ranking them against each other lets a six-column
+/// group outrank every column in the table on a number that does not mean the
+/// same thing. What `children` was asked for is the shape of the table, which
+/// is its columns; the groups take what is left of the cap, and are reachable
+/// in their own right as search hits.
+///
 /// Returns false if the budget stopped it. Running out of children is not
 /// truncation: that is the cap doing its job.
 fn add_children(
@@ -611,15 +619,23 @@ fn add_children(
     if matches!(graph[of], Node::Workbook(_)) {
         return true;
     }
-    let mut children: Vec<(u64, NodeIndex)> = graph
+    let mut children: Vec<(bool, u64, NodeIndex)> = graph
         .edges_directed(of, Direction::Outgoing)
         .filter(|e| e.weight().kind == EdgeKind::Contains)
-        .map(|e| (cells(&graph[e.target()]), e.target()))
-        .filter(|(_, idx)| !got.taken.contains(idx))
+        .map(|e| {
+            let node = &graph[e.target()];
+            let group = node.kind() == NodeKind::FormulaGroup;
+            (group, cells(node), e.target())
+        })
+        .filter(|(_, _, idx)| !got.taken.contains(idx))
         .collect();
-    children.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.index().cmp(&b.1.index())));
+    children.sort_unstable_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| a.2.index().cmp(&b.2.index()))
+    });
 
-    for &(_, idx) in children.iter().take(opts.children) {
+    for &(_, _, idx) in children.iter().take(opts.children) {
         if got.full() {
             return false;
         }
