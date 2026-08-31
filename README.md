@@ -3,13 +3,16 @@
 Excel → Graph → GraphRAG. Turns spreadsheets into a queryable property graph so
 agents can explore them and ground answers in specific cells.
 
-Written in Rust, and the reason is XLSB. A 170 MB binary workbook with 43.5
-million populated cells loads in about 8 seconds. `openpyxl` cannot open XLSB at
-all, and the only Python library that can, `pyxlsb`, does not surface formulas.
+Written in Rust, and the reason is XLSB. A binary workbook of hundreds of
+megabytes and tens of millions of populated cells loads in seconds. `openpyxl`
+cannot open XLSB at all, and the only Python library that can, `pyxlsb`, does
+not surface formulas.
 
-Every measurement below is against that workbook. It is confidential, so its
-sheet names appear here as pseudonyms — consistently, so a name that recurs is
-the same sheet.
+Every decision below was measured, against a real workbook of that kind. It is
+confidential, so the figures are not repeated here: each example prints its own
+on the terminal, which is where the numbers belong and where anyone with a
+workbook of their own can reproduce them. Sheet names appear as pseudonyms —
+consistently, so a name that recurs is the same sheet.
 
 ## Status
 
@@ -44,15 +47,15 @@ branch; the workspace points at an `excelgrag` branch carrying all of them,
 because `[patch.crates-io]` takes a single source.
 
 The fork fixes two silent bugs in both binary formats: dropped shared and array
-formulas, and transposed `>=` / `>`. Without them 70% of the formulas in a real
+formulas, and transposed `>=` / `>`. Without them most of the formulas in a real
 XLSB workbook go missing, and every comparison is inverted.
 
 A third fix, submitted separately as
 [#713](https://github.com/tafia/calamine/pull/713), quotes sheet names that need
 quoting: `'Q3 SALES'!A1` was arriving as `Q3 SALES!A1`, reading as a sheet named
-`SALES`. On the reference workbook that lost 1,663 real references and
-fabricated 1,472 more, because the discarded prefix `TR450` is itself a valid
-cell reference.
+`SALES`. On a real workbook that both loses real references and fabricates
+others, because a discarded prefix like `TR450` is itself a valid cell
+reference.
 
 Submitted upstream as [tafia/calamine#712](https://github.com/tafia/calamine/pull/712).
 Once it lands in a published release, delete the `[patch.crates-io]` section.
@@ -64,12 +67,13 @@ A filled-down column is one idea written ten thousand times. `eg-structure`
 collapses it to a single node by normalising each formula to an R1C1 *shape*, so
 the graph is built over groups rather than cells.
 
-On a real 170 MB workbook: **6,793,166 formula cells become 1,272 groups**
-(5,340x), in 11s, with one group covering 690,018 cells and only 724 formulas
-one-off. It also finds cells that break a pattern — the classic hand-edited row
-in an otherwise uniform column, 401 of them here.
+On a real workbook the collapse is thousands-fold: millions of formula cells
+become a low thousands of groups, a single filled-down column accounting for
+much of one group, and only a handful of formulas genuinely one-off. It also
+finds the cells that break a pattern — the classic hand-edited row in an
+otherwise uniform column.
 
-That ratio used to read 464,131 groups and 14.6x. The difference is not this
+That ratio used to be two orders of magnitude worse. The difference is not this
 code: before the calamine fork's fixes, relative references in XLSB were decoded
 wrongly, so every row of a filled-down column normalised to a *different* shape
 and almost nothing grouped. Grouping was reporting a reader defect as a property
@@ -86,8 +90,8 @@ Recovering the tables and blocks a sheet is built from, so an answer can say
 
 It runs without styling, because calamine exposes none for any format — using
 blank rows and columns, value-kind contrast, and declared Excel tables where a
-format has them. On the real 170 MB workbook: **168 regions across 43.5M cells
-in 2.4s**, every populated cell covered by exactly one region.
+format has them. On a real workbook it recovers a couple of hundred regions in
+seconds, with every populated cell covered by exactly one of them.
 
 ```sh
 cargo run --release -p eg-structure --example regions -- private/book.xlsb
@@ -102,14 +106,16 @@ into one edge carrying their count. A column of 100,000 formulas reading a looku
 table becomes one edge of weight 100,000 — smaller than 100,000 edges, and a
 better answer, because the weight says how much rests on that table.
 
-On the real 170 MB workbook: **2,007 nodes and 3,271 edges in 10.3s**, adding
-0.4 MiB to the 6 GB the workbook itself occupies. Drop the formula-group nodes
-and it is **735 nodes, 951 edges** — with the identical dependency layer,
-because lifting reads formula cells and not group nodes.
+On a real workbook the whole graph is a couple of thousand nodes and edges,
+built in seconds, adding a rounding error to the gigabytes the workbook itself
+occupies. Drop the formula-group nodes and about a third of it remains — with
+the identical dependency layer, because lifting reads formula cells and not
+group nodes.
 
-That dependency layer is 212 edges standing for 3.76 million references, out of
-24.5 million scanned: 22.2 million never leave the region they are written in,
-which is what makes a region-level graph small enough to hold.
+That dependency layer is the striking part: a few hundred edges standing for
+millions of references, out of tens of millions scanned. The overwhelming
+majority never leave the region they are written in, which is what makes a
+region-level graph small enough to hold.
 
 ```sh
 cargo run --release -p eg-graph --example graph -- private/book.xlsb
@@ -137,28 +143,20 @@ edge nothing expects is one pointing where no formula does; a weight that
 disagrees is an edge whose evidence is miscounted, which is what ranks it in
 retrieval.
 
-On the reference workbook, over 6,793,166 formulas and 24,480,367 references:
+On a real workbook, over millions of formulas and tens of millions of
+references, the two multisets agree exactly — every edge the cells expect,
+every edge the graph holds, and every weight. The example prints both sides and
+their difference, so a disagreement arrives as a number rather than as a
+feeling.
 
-| | Edges | References behind them |
-|---|---|---|
-| the workbook expects | 212 | 3,760,745 |
-| the graph holds | 212 | 3,760,745 |
-| agreed exactly | **212** (100.0%) | — |
-
-It takes 2.7s, against 7.0s to build the graph in the first place, so `eg index`
-runs it — along with the structural invariants — on every workbook before
-storing it, rather than leaving it for whoever remembers the example:
-
-```
-  25 sheets, 43561729 cells read in 9.5s → 2007 nodes, 3271 edges in 12.8s
-  212 lifted edges agree with the cells they came from (2.6s)
-```
-
-A workbook that fails is still stored, loudly. The finding is about this code,
+It costs a fraction of what building the graph costs in the first place, so `eg
+index` runs it — along with the structural invariants — on every workbook
+before storing it, rather than leaving it for whoever remembers the example. A
+workbook that fails is still stored, loudly. The finding is about this code,
 not about the spreadsheet, and a corpus missing an edge is more use than no
 corpus at all.
 
-What it does *not* check matters more than the number. Reference scanning, range
+What it does *not* check matters more than the agreement. Reference scanning, range
 geometry and region detection are one implementation each, used by both sides,
 so a defect in any of them is invisible here — parity against a second reader
 and the recompute sweep are what cover those. What is genuinely re-derived is
@@ -210,19 +208,15 @@ matched nothing.
 hold an error value, and — where a column has few enough of them — its distinct
 values with counts, plus the range and total of a numeric one.
 
-```
-25 sheets, 43561729 cells read in 9.8s → 2007 nodes, 3271 edges in 18.7s
-952 column(s) profiled, 262 of them categorical
-```
-
-On the reference workbook: **952 columns in 6.0s, 376 KB**, of which 262 read as
-categories — few values, each repeated, which is what a question names. It found
-something else on the way: 67 columns hold nothing but error values, and one
-holds 46,386 of them in 46,528 cells.
+`eg index` reports how many columns it profiled and how many of them read as
+categories — few values, each repeated, which is what a question names. On a
+real workbook that is most of a second's work and a few hundred kilobytes, and
+it turned up something nobody had asked for on the way: whole columns holding
+nothing but error values.
 
 A profile is bounded on purpose. The distinct list is abandoned above a
-threshold, so a key column of 195,366 customer numbers profiles to a count and
-nothing else; listing it would be storing the column. Text values are cut to 64
+threshold, so a key column of customer numbers profiles to a count and nothing
+else; listing it would be storing the column. Text values are cut to 64
 characters and say that they were.
 
 **It is also the one thing a corpus holds that is the workbook's data.**
@@ -247,18 +241,17 @@ is the total debt outstanding for residential debtors", which is the question a
 person actually has — and which the workbook only answers if somebody already
 wrote a cell that computes it.
 
-`query_table` filters the rows of one table, groups them, and totals them. On
-the reference workbook, grouping 115,003 rows of the working sheet by debt
-category and summing the debt column produces six numbers that exist nowhere in
-the file.
+`query_table` filters the rows of one table, groups them, and totals them. On a
+real workbook, grouping the working sheet by debt category and summing the debt
+column produces a handful of numbers that exist nowhere in the file.
 
 It lives in `eg-eval` rather than beside `read_table` for one reason: the
 arithmetic has to be the *evaluator's*. A sheet carries fifteen significant
 digits, and a total here that used plain `f64` would disagree with the `SUM()`
 in the cell next to it — a second opinion that is wrong, which is the one thing
 this project must not produce. It accumulates raw and rounds once at the end;
-rounding every step would be a regime Excel does not have, and over 115,000 rows
-it would drift away from the sheet rather than towards it.
+rounding every step would be a regime Excel does not have, and over a column of
+that length it would drift away from the sheet rather than towards it.
 
 **Refusing is most of the design**, because the failure mode of a query engine
 over a spreadsheet is a confident wrong number.
@@ -273,8 +266,8 @@ over a spreadsheet is a confident wrong number.
 And every answer names the cells it was computed over:
 
 ```
-over 'Work Doc'!A2:BM115004
-115003 row(s) scanned, 115003 matched
+over 'Work Doc'!A2:BM…
+… row(s) scanned, … matched
 ```
 
 That is not decoration. Region boundaries are *inferred* from blank runs and
@@ -286,24 +279,20 @@ it against the sheet.
 
 A spreadsheet has no schema and states one anyway. `VLOOKUP(C2, $BR$4:$BS$12, 2,
 FALSE)` filled down a column is a declaration: *this column's values are keys
-into that table, and the answer is its second column.* The reference workbook
-writes that 115,566 times. Nothing had ever read it.
+into that table, and the answer is its second column.* A real workbook writes
+that hundreds of thousands of times. Nothing had ever read it.
 
 Formulas are already grouped by R1C1 shape, so recovering the schema costs
 parsing a few hundred representative formulas rather than millions, and the
 number of cells behind each relation comes free with the grouping.
 
-```
-formula groups examined: 1272
-of those, doing lookups: 503
-relations recovered:     501
-shapes not read:         0
-pointing outside:        2
-in:                      3.3s
-```
+The example reports how many groups were examined, how many of them do lookups,
+how many relations came back, and how many shapes it could not read — the last
+being the number that matters, since it is the one that says what the schema is
+missing.
 
-Each relation is a key column, a table and what comes back — `Debtors!E2:E195366`
-into `Rates!G1:H19`, returning column `H`, with 195,365 formula cells behind it.
+Each relation is a key column, a table and what comes back — `Debtors!E:E` into
+`Rates!G1:H19`, returning column `H`, with the formula cells behind it counted.
 The key is reported as its *column*, not as the cell the group's representative
 happened to sit on: the row is an accident of where the shape was sampled, and
 the column is the thing that joins.
@@ -323,52 +312,47 @@ cargo run --release -p eg-eval --example schema -- private/book.xlsb
 
 ## The corpus
 
-The graph of that 170 MB workbook is **520 KB of JSON**, so the store is a
-directory rather than a database: `manifest.json` plus one file per workbook,
-keyed by the blake3 of the source file. A workbook that has not changed is a hit
-however it was copied; one that has changed cannot be.
+The graph of a workbook whose ingest is measured in seconds is a few hundred
+kilobytes of JSON, so the store is a directory rather than a database:
+`manifest.json` plus one file per workbook, keyed by the blake3 of the source
+file. A workbook that has not changed is a hit however it was copied; one that
+has changed cannot be.
 
-| | Cold | Warm |
-|---|---|---|
-| 170 MB workbook | 19.9s | **1.4ms** |
-
-The 6 GB in-memory workbook is never touched to answer a corpus-level question,
-which is the whole reason to keep a store.
+Answering cold means that ingest. Answering warm is a file read of about a
+millisecond — four orders of magnitude apart, and the gigabytes the in-memory
+workbook occupies are never touched to answer a corpus-level question, which is
+the whole reason to keep a store.
 
 ### The formula groups, and a number that stopped being true
 
 For most of this project the formula-group layer was left out of the store, on a
-measured reason: 464,131 nodes and 119 MiB, near-identical text by construction,
-wanted only when drilling into one workbook. That reason no longer holds, and
-the way it stopped holding is worth writing down.
+measured reason: hundreds of thousands of nodes and a hundred-odd megabytes of
+near-identical text, wanted only when drilling into one workbook. That reason no
+longer holds, and the way it stopped holding is worth writing down.
 
-The 464,131 came from the reference workbook read through calamine *before* the
-fork's fixes. Mis-decoded relative references gave a filled-down column a
-different R1C1 shape on every row, so almost nothing grouped. Read correctly the
-same workbook has **1,272 groups**, compressing 6,793,166 formulas 5,340×, the
-largest of them 690,018 cells. The layer that was 119 MiB is 397 KB.
-
-| Stored | Nodes | Edges | JSON | Cold | Warm |
-|---|---|---|---|---|---|
-| regions only | 735 | 951 | 123 KB | 16.6s | 0.45ms |
-| with formula groups | 2,007 | 3,271 | 520 KB | 19.9s | 1.4ms |
+The measurement came from a workbook read through calamine *before* the fork's
+fixes. Mis-decoded relative references gave a filled-down column a different
+R1C1 shape on every row, so almost nothing grouped. Read correctly, the same
+workbook groups thousands-fold better, and the layer that was a hundred
+megabytes is a few hundred kilobytes — a fraction of a second to reload, on top
+of a store whose whole point is a warm read too fast to notice.
 
 So they are stored. What it buys is not the disk: rebuilding the layer costs a
-full ingest of the source file — ten seconds and 6 GB of memory — so without it
-no question about a formula could be answered from the corpus alone. With it,
-the lexical index holds every formula group in the workbook and `eg search` can
-find one when the file is not even present.
+full ingest of the source file — seconds of work and gigabytes of memory — so
+without it no question about a formula could be answered from the corpus alone.
+With it, the lexical index holds every formula group in the workbook and `eg
+search` can find one when the file is not even present.
 
-The old number is kept as the reason for a ceiling rather than a flat yes. This
+The old measurement is kept as the reason for a ceiling rather than a flat yes. This
 layer has no natural bound — a workbook of one-off formulas groups into nothing,
 and its group layer is as large as its formula count — so above
-`MAX_STORED_FORMULA_GROUPS` (20,000, fifteen times what the reference workbook
-needs) the layer is dropped at index time and rebuilt on demand, as the whole
-layer used to be. Each stored graph records which kind it is, so a loader never
-guesses.
+`MAX_STORED_FORMULA_GROUPS` (20,000, more than an order of magnitude above what
+a well-grouping workbook needs) the layer is dropped at index time and rebuilt
+on demand, as the whole layer used to be. Each stored graph records which kind
+it is, so a loader never guesses.
 
 Formula groups are still not *embedded*. That choice was made on the same stale
-number, but it survives the correction on its own merits: a formula is exact
+measurement, but it survives the correction on its own merits: a formula is exact
 tokens, not a sentence, and asking for one is a lexical query.
 
 ```sh
@@ -395,8 +379,9 @@ only — so `sheet` matches no sheet in the corpus. Each run is indexed whole
 *and* split at its case and letter/digit boundaries, then stemmed, so `net`,
 `revenue` and `netrevenue` all reach the same column.
 
-On the real 170 MB workbook the region-level index is **732 documents, 0.1 MiB,
-built in 0.04s**, and a query returns in **0.4ms**.
+On a real workbook the region-level index is a few hundred documents and a
+fraction of a megabyte, built and queried in well under a second — the layer
+that decides whether a question is answerable costs almost nothing to keep.
 
 ```sh
 cargo run --release -p eg-graph --example corpus -- index private/book.xlsb
@@ -411,9 +396,9 @@ under its old hash. It prints node labels and A1 ranges, never cell values.
 ### Indexing the formulas
 
 The formula-group layer is what lets a search reach an actual formula, and it is
-cheap to index: **2,007 documents in 0.01s, 0.3 MiB on disk**, with a search over
-them returning in **0.39ms**. That measurement is why the corpus stores the layer
-rather than rebuilding it.
+cheap to index: a couple of thousand documents, a fraction of a megabyte, and a
+search over them as fast as one over the regions. That measurement is why the
+corpus stores the layer rather than rebuilding it.
 
 ```sh
 cargo run --release -p eg-index --example formulas -- private/formulas private/book.xlsb vlookup
@@ -425,10 +410,10 @@ great many groups at the same BM25 score, and which ones surface is then
 arbitrary. Each node carries how many cells it stands for, and the score is
 multiplied by `1 + log10(1 + cells) / 4` — the same idea as an edge's weight,
 that how much of the workbook rests on something is part of how much it matters.
-The `vlookup` list leads with the group covering 195,366 cells. The multiplier
-tops out
-near 2.4x, far below the spread of real text scores, so it orders ties without
-ever putting a big irrelevant node above a small exact match.
+The `vlookup` list then leads with the group standing for the most cells. The
+multiplier tops out near 2.4x, far below the spread of real text scores, so it
+orders ties without ever putting a big irrelevant node above a small exact
+match.
 
 ## The vector index
 
@@ -463,30 +448,32 @@ the machine, which for the workbooks this is built for is not a preference.
 
 ### Why there is no vector database
 
-The nodes worth embedding — sheets, tables, columns, defined names — are **732
-on the reference workbook**, which at 384 dimensions is 1.07 MiB of `f32`, or
-**1.2 MiB on disk** with the metadata beside it. Fifty such workbooks are 36,600
-vectors and 56 MB. A full scan of the real corpus takes **0.11ms**, and it is
-exact. An approximate index would add a build step, a
+The nodes worth embedding — sheets, tables, columns, defined names — are a few
+hundred per workbook, which at the model's 384 dimensions is about a megabyte of
+`f32` with the metadata beside it. Fifty such workbooks are tens of thousands of
+vectors and a few tens of megabytes. A full scan of a real corpus takes a
+fraction of a millisecond, and it is exact. An approximate index would add a
+build step, a
 tuning parameter, a recall cliff and a second on-disk format in exchange for
 beating a number too small to see, so there is no HNSW here: an array of floats
 per workbook and a loop over it.
 
 Formula groups are stored and indexed lexically, and still not embedded. The
-old reason was volume — 463,570 groups, 713 MB of vectors — and that number came
-from the same pre-fork reader; the real figure is 1,272 groups and 2 MB, which
-would embed in seconds. The reason that survives the correction is the one about
-the text: `=VLOOKUP(S2,LOOKUP!E$1:F$1048576,2,FALSE)` is not a sentence, and a
-sentence embedding has nothing to say about it. Asking for it is a lexical
+old reason was volume — hundreds of thousands of groups and most of a gigabyte
+of vectors — and that number came from the same pre-fork reader; read correctly
+the layer is small enough to embed in seconds. The reason that survives the
+correction is the one about the text:
+`=VLOOKUP(S2,LOOKUP!E$1:F$1048576,2,FALSE)` is not a sentence, and a sentence
+embedding has nothing to say about it. Asking for it is a lexical
 query, and every group is in the lexical index.
 
-Embedding the 735 nodes takes **5.4s**, and the batching is why: batches are
+Embedding a workbook's nodes takes seconds, and the batching is why: batches are
 padded to the longest text in them, so one wide table, whose document carries
-every column header it has, was paying for the 255 short labels batched beside
-it. Sorting by length before batching took it from **9.5s to 5.2s**, measured
+every column header it has, was paying for all the short labels batched beside
+it. Sorting by length before batching cut that time by nearly half, measured
 around the model call alone — loading the graph and building the lexical index
-are another 0.04s together, and folding them in would report a throughput that
-is really a measure of tantivy.
+are noise beside it, and folding them in would report a throughput that is
+really a measure of tantivy.
 
 ## Retrieval
 
@@ -502,28 +489,28 @@ cargo run --release -p eg-retrieve --example retrieve -- index bad debt provisio
 cargo run --release -p eg-retrieve --example retrieve -- index --hops 3 --children 6 lookup rates
 ```
 
-On the real workbook an expansion is **0.4ms** over the stored graph, and the
-chain it prints is the point: a note headed *Provision for debtors with…* is
-read by the 115,004-row working table, which in turn reads a dozen rate tables
-on the TABLES sheet, each edge labelled with how many cell references stand
-behind it.
+On a real workbook an expansion is a fraction of a millisecond over the stored
+graph, and the chain it prints is the point: a note headed *Provision for
+debtors with…* is read by the working table, which in turn reads a dozen rate
+tables on the TABLES sheet, each edge labelled with how many cell references
+stand behind it.
 
 ### The measurement that shaped the walk
 
 The graph's degree distribution decides whether a bounded k-hop expansion is
 cheap or explosive, which is why `eg-graph` has been collecting it since P3a.
-On the reference workbook the dependency layer is **212 edges across 735 nodes**
-— sparse, with a maximum in-degree of 13. But the most connected nodes have
-out-degrees of **136, 92, 91, 74 and 71**, and every one of them is a region
-pointing at its own columns.
+On a real workbook the dependency layer is sparse — a few hundred edges over a
+few hundred nodes, with a maximum in-degree in the low tens. The most connected
+nodes have out-degrees an order of magnitude larger than that, and every one of
+them is a region pointing at its own columns.
 
 So the explosion is real and lives entirely in `CONTAINS`. A plain k-hop walk
-from a column reaches its region in one hop and that region's 136 columns in
-two: 19% of the workbook, none of it asked for. Containment is therefore
-followed *inwards* — a column's table, its sheet, the workbook, a path of at
-most three that costs no hop, because naming a node is not travelling away from
-it — and outwards only when asked, and never from the workbook root, whose
-children are the whole file.
+from a column reaches its region in one hop and every column of that region in
+two — a large fraction of the workbook, none of it asked for. Containment is
+therefore followed *inwards* — a column's table, its sheet, the workbook, a
+path of at most three that costs no hop, because naming a node is not
+travelling away from it — and outwards only when asked, and never from the
+workbook root, whose children are the whole file.
 
 Dependencies are followed in both directions, nearest first and heaviest within
 a distance. Weight is the number of cell references behind the edge, so the
@@ -547,22 +534,22 @@ Each node is listed once with a number, and relations are given as numbers:
 ```
 [1]  * region "Provision for debtors with:"   SIGNALS!A45:D47
        in: SIGNALS
-       read by: [7] (115,003 refs, another sheet), [26] (390 refs, another sheet)
-[7]    region    'TR450-6-WORK DOC'!A1:BM115004
+       read by: [7] (… refs, another sheet), [26] (… refs, another sheet)
+[7]    region    'TR450-6-WORK DOC'!A1:BM…
        in: TR450-6-WORK DOC
-       reads: [9] (460,004 refs, another sheet), [11] (345,005 refs), [1] (115,003 refs, …)
+       reads: [9] (… refs, another sheet), [11] (… refs), [1] (… refs, …)
 ```
 
 Nesting each node under whatever reached it would repeat the same table once per
 path that found it, and an agent reading that cannot tell two mentions are one
 table. Numbering also gives it a handle: *"the figure comes from [4]"* is
 checkable against the list in a way that *"the figure comes from the rates
-table"* is not. On the real workbook, 30 nodes render to **3.6 KB in 0.04ms**,
-with the citations handed back as a list so a caller can check an answer's
-references against what it was actually given.
+table"* is not. A passage of a few dozen nodes renders to a few kilobytes in
+well under a millisecond, with the citations handed back as a list so a caller
+can check an answer's references against what it was actually given.
 
-No cell values appear. The workbook is 6 GB in memory and the ranges are one
-read away, so a passage that inlined values would be both enormous and stale.
+No cell values appear. The workbook is gigabytes in memory and the ranges are
+one read away, so a passage that inlined values would be both enormous and stale.
 This says where to look; P6 is what looks.
 
 ### Where the granularity bites
@@ -592,9 +579,10 @@ cargo run --release -p eg-eval --example trace -- private/book.xlsb "'TR450-6-WO
 cargo run --release -p eg-eval --example trace -- private/book.xlsb 'TABLES!AE53:AG89' --dependents
 ```
 
-On the real workbook, after a 9.8s load: precedents come back in **0.08ms**;
-dependents take **2.4s to scan 6,793,166 formulas** and find 115,566 references
-into that one lookup table.
+The asymmetry is what the measurements show. After a load counted in seconds,
+precedents come back in microseconds, because they are in the formula's own
+text. Dependents take seconds, because every formula in the file has to be
+scanned — and they find every reference into that one lookup table.
 
 That closes the loop from the retrieval layer. Searching for "bad debt
 provision" surfaces `TABLES!AE53:AG89` as the RATES table; this says which cells
@@ -641,68 +629,63 @@ empty instead of filling with dust.
 
 ### What the workbook says about itself
 
-Sweeping the reference workbook is one pass, and it costs about as much as
-loading it:
-
-```
-6,793,166 formulas in 25.1s (271,000 per second)
-  agreed         6,792,963 (100.0%)
-  differed             0 ( 0.0%)
-  unsupported        203 ( 0.0%)
-```
+Sweeping a real workbook is one pass, and it costs about as much as loading it.
+The sweep reports how many formulas agreed with the value stored beside them,
+how many differed, and how many it could not evaluate at all.
 
 Zero disagreements. Every formula this crate can evaluate computes exactly what
-Excel stored, to the last digit, six and three-quarter million times. What is
-left unsupported is two honest gaps: 191 `GETPIVOTDATA()`, which asks a pivot
-table rather than the grid, and 12 references into workbooks that are not open.
+Excel stored, to the last digit, millions of times over. What is left
+unsupported is two honest gaps: `GETPIVOTDATA()`, which asks a pivot table
+rather than the grid, and references into workbooks that are not open.
 
-The 115,566 that were unsupported until recently were all one function. `PV()`
-discounts an overdue amount by the days it has been outstanding, which is the
-arithmetic this workbook exists to do: the impairment on a debtor is the
-difference between what is owed and what that is worth now. Modelling one
-function moved the sweep from 98.3% of formulas evaluated to 100.0%, and every
-one of those 115,566 agrees with the value Excel stored beside it.
+A whole column of a real workbook was unsupported until recently, and it was one
+function. `PV()` discounts an overdue amount by the days it has been
+outstanding, which is the arithmetic such a workbook exists to do: the
+impairment on a debtor is the difference between what is owed and what that is
+worth now. Modelling one function closed nearly all of what was left, and every
+one of those formulas agrees with the value Excel stored beside it.
 
-It did not start out that way. The first sweep agreed with 71.9%, and the
-distance from there to here is four defects in the XLSB *reader* and one in
-this crate. None of them failed. Each was found by the same method — recompute
-a formula and disagree with the number Excel had cached — and none of them
-could have been found by reading formulas, because a wrong formula looks
-exactly like a right one.
+It did not start out that way. The first sweep agreed with well under
+three-quarters of what it read, and the distance from there to here is four
+defects in the XLSB *reader* and one in this crate. None of them failed. Each
+was found by the same method — recompute a formula and disagree with the number
+Excel had cached — and none of them could have been found by reading formulas,
+because a wrong formula looks exactly like a right one.
 
-| | agreed |
-|---|---|
-| first sweep | 71.9% |
-| relativity flags no longer read as part of a column | 83.8% |
-| the two flags read the right way round | 97.6% |
-| formula cells whose cached value is an error no longer skipped | 98.3% |
-| references into other workbooks no longer resolved against this one | 98.3%, and nothing left disagreeing |
-| `PV()` modelled rather than refused | **100.0%**, with 203 formulas left unevaluable |
+Five fixes, in the order they were found, each one moving the agreement up:
+
+1. relativity flags no longer read as part of a column
+2. the two flags read the right way round
+3. formula cells whose cached value is an error no longer skipped
+4. references into other workbooks no longer resolved against this one — after
+   which nothing disagreed at all
+5. `PV()` modelled rather than refused, which cleared most of what was left
+   unevaluable
 
 Two of those are worth the detail. An XLSB reference stores its column in 14
 bits and its relativity in the other two, and three of the four decoding paths
 read the field whole, so a relative column 2 arrived as column 16,386 —
 `=VLOOKUP(B2,HQ880_20240630!$XFF$1:$XFM$1048576,5,FALSE)`, where Excel's last
-column is `XFD`. Masking the flags off made 855,637 formulas readable and
-*raised* the disagreement count, because the two flags then turned out to mean
-the opposite of what the reader believed:
+column is `XFD`. Masking the flags off made a large fraction of the workbook's
+formulas readable and *raised* the disagreement count, because the two flags
+then turned out to mean the opposite of what the reader believed:
 
 ```
-=V5*BQ$1     column relative, row absolute — 589.12 × 159.49    = 93,958
-=V5*$AH5     column absolute, row relative — 589.12 × 0.502222  = 295.86915555555555
+=V5*BQ$1     column relative, row absolute — an ageing bucket × a rate
+=V5*$AH5     column absolute, row relative — an ageing bucket × a percentage
 ```
 
-Excel stored 295.86915555555555. `AH` is that sheet's "% to provide" column, and
-ageing bucket times percentage is what a provision is. Two bits, 934,118
-formulas.
+Only the second is what Excel had stored. `AH` is that sheet's "% to provide"
+column, and ageing bucket times percentage is what a provision is. Two bits,
+deciding the meaning of an entire column of the workbook.
 
 The last one is the quietest defect in this repository. A reference into another
 workbook carries two indices — which workbook, and which sheet of it — and only
 the second was being used, so a sheet index meant for last year's copy of this
 file named a sheet of *this* one. `JOURNAL_PROV!$D$21` was a real sheet, a real
-cell, and a dependency the graph recorded and nobody could have questioned. Ten
-formulas gave the wrong number and two gave the right one by coincidence, the
-local cell happening to hold what the foreign cell held.
+cell, and a dependency the graph recorded and nobody could have questioned. A
+handful of formulas gave the wrong number and a couple gave the right one by
+coincidence, the local cell happening to hold what the foreign cell held.
 
 `docs/upstream-issues.md` has all seven, and the four found this way are in the
 calamine fork.
@@ -736,8 +719,8 @@ design:
   distance from the change, not a rank. In `D=A+C` where `C=B` and `B=A`, `D` is
   reached at level 1 and reads a cell that only moves at level 2. So a cell is
   judged again whenever an input of it moves, and holds what the last visit
-  said. It is cheaper than it sounds — on the reference workbook it is 234,000
-  extra evaluations against 1.2 million cells — and the alternative is a
+  said. It is cheaper than it sounds — the revisits are a fraction of the cells
+  the walk visits at all — and the alternative is a
   confidently wrong number: judged once, `D` would report the sum of the new `A`
   and the *stored* `C`, with nothing marking it as provisional. What cannot be
   ordered at all is a cycle, and a cycle is reported rather than iterated to a
@@ -747,32 +730,20 @@ design:
   as *no answer*, never as *unchanged* — leaving the stored value in place would
   report a smaller impact than the change really has.
 
-On the reference workbook, changing one interest rate — the one residential
-debtors are discounted at:
-
-```
-1,197,300 cell(s) downstream over 6 level(s), 7 scans of 47.5M formulas in 25.5s
-  moved           678,427
-  unchanged       518,873
-  blocked               0
-```
-
-That is the whole closure, which is not what the default asks for: the ceiling
-on affected cells stops at 705,620 cells and four levels in **14s**, and says so.
+On a real workbook, changing one interest rate — the one residential debtors are
+discounted at — reaches over a million cells across six levels, and the report
+says how many of them moved, how many held still, and how many it could not
+answer for. That is the whole closure, which is not what the default asks for:
+the ceiling on affected cells stops it a few levels in, at a fraction of the
+cost, and says so.
 
 The half that does not move is the interesting half, and the first level shows
-it cleanly:
-
-```
-115,566 cell(s) downstream over 1 level(s): 98,374 moved, 17,192 unchanged
-```
-
-That level is exactly the `PV()` column. Every one of those formulas looks the
-rate up in the whole table, `$BR$4:$BS$12`, so every one of them reads the cell
-that changed — but 17,192 of them are looking up a different category and come
-back with the number they had. A dependency graph is right that all 115,566
-depend on that cell; only recomputing can say which of them a change actually
-reaches.
+it cleanly. That level is exactly the `PV()` column. Every one of those formulas
+looks the rate up in the whole table, `$BR$4:$BS$12`, so every one of them reads
+the cell that changed — and yet a sixth of them are looking up a different
+category and come back with the number they had. A dependency graph is right
+that all of them depend on that cell; only recomputing can say which of them a
+change actually reaches.
 
 A walk that has to stop says which limit stopped it, because "nothing else
 moved" and "this did not look" are different answers:
@@ -781,8 +752,9 @@ moved" and "this did not look" are different answers:
   stopped at the ceiling on affected cells — the change reaches further than this
 ```
 
-The cost is the scans, which is where it should be: 47.5M formulas across seven
-of them are most of the 25.5s. The walk keeps their number down by pruning — a
+The cost is the scans, which is where it should be: tens of millions of formulas
+across seven of them are most of the run. The walk keeps their number down by
+pruning — a
 cell that recomputes to what it already held cannot move anything reading it, so
 it does not travel in the next frontier — and matching a reference against that
 frontier is the inner loop, tens of millions of times against a set of hundreds
@@ -792,19 +764,20 @@ spans, rather than a walk over either side.
 
 ### The quadratic that hid in the last two levels
 
-For a while that paragraph was false and the closure took **747s**, and how it
-got there is worth keeping. A substituted value lives in an overlay that every
+For a while that paragraph was false and the closure took half an hour, and how
+it got there is worth keeping. A substituted value lives in an overlay that every
 read goes through, and the overlay was written for what a caller substitutes —
 a handful of cells — so it answered "what have you got inside this range?" by
 looking at all of them. Its own comment said so. Then the walk began putting
-every cell it recomputes into that overlay, 1.2 million of them, and a scan that
-had been free became **205 billion cell comparisons**.
+every cell it recomputes into that overlay, over a million of them, and a scan
+that had been free became billions of cell comparisons.
 
 None of it showed up until level 5. Nothing in the first four levels reads a
 *range* at all — they are `PV` and `VLOOKUP` over single cells — so the overlay
 was only ever asked for one address at a time, which is a hash lookup. Level 5
-is where the aggregation sheets start, and they read whole columns. Four levels
-in 14s, then two more in 733s.
+is where the aggregation sheets start, and they read whole columns. The first
+four levels were quick; the last two took longer than everything before them put
+together, many times over.
 
 The overlay now carries a column-major index of its own addresses, so a range
 read costs a bounded lookup per column: column-major because a spreadsheet range
@@ -813,7 +786,8 @@ by every substitution on the rows between them. The walk also holds one
 evaluator for its whole run instead of rebuilding the sheet-name map and an
 empty lookup index per cell, a million times over — which needs the walk to say
 when it overrides a cell, because a cached lookup column is only as good as the
-values it was built from. **747s to 25.5s**, with every count identical.
+values it was built from. Half an hour became well under a minute, with every
+count identical.
 
 ## One command
 
@@ -875,16 +849,16 @@ is also what makes the answer checkable.
 Three resources with three costs sit behind that, which is why this is a server
 and not a command. The corpus and the lexical index are memory-mapped and
 cheap. The embedder is loaded on the first question that needs meaning rather
-than words. A workbook is the expensive one — ten seconds and six gigabytes for
-the reference file — so it is opened only when a tool needs cells, and then held:
-the second question about a workbook is far likelier than the first.
+than words. A workbook is the expensive one — seconds of ingest and gigabytes of
+memory for a large file — so it is opened only when a tool needs cells, and then
+held: the second question about a workbook is far likelier than the first.
 
 ```
-read_cells  INDICATORS!A45:D47   (opened private/book.xlsb in 9.7s)
+read_cells  INDICATORS!A45:D47   (opened private/book.xlsb in …s)
 recompute   'TR450-6-WORK DOC'!AJ5   =V5*$AH5
-              agrees with the stored value 295.86915555555555
-                V5      589.12
-                $AH5    0.5022222222222222
+              agrees with the stored value
+                V5      …
+                $AH5    …
 ```
 
 Start it with `--redact-values` and every value becomes its kind — `<number>`,
@@ -939,12 +913,12 @@ question file for the reference workbook lives in `private/` with the workbook.
 **Two things it found immediately.** Neither was visible before there was a
 number:
 
-- **Fusing the two searches was costing precision.** On twelve questions,
-  searching by word alone put the right node first eight times; fusing word and
-  meaning put it first five, demoted seven answers, and rescued exactly one the
-  lexical half missed entirely. Context recall favoured the fusion, 83% against
-  75%, so it was a trade — but it was being made blind. See below for what it
-  turned out to be.
+- **Fusing the two searches was costing precision.** Over a question file for a
+  real corpus, searching by word alone put the right node first markedly more
+  often than fusing word and meaning did; the fusion demoted most of a dozen
+  answers and rescued exactly one the lexical half missed entirely. Context
+  recall favoured the fusion, so it was a trade — but it was being made blind.
+  See below for what it turned out to be.
 - **A question about the column a table is keyed by cannot be answered.** Region
   detection reads the leftmost column as row labels, so it heads nothing and
   gets no node: asking a debtors table about "customer" returns everything
@@ -953,7 +927,7 @@ number:
   known gaps — so it fails if a new one appears, and also if this one starts
   working and nobody updated the record.
 
-Twelve questions is a baseline, not a verdict.
+A dozen questions is a baseline, not a verdict.
 
 ### Failing loudly
 
@@ -966,7 +940,7 @@ Warning whenever a question uses a word the workbook does not fires on four
 questions in five — "present value of expected receipts" is a rank-one hit on a
 workbook containing neither "present" nor "value". Thresholding instead on how
 much of the question the top result accounts for flags a rank-one answer whose
-column happens to be named in two words out of five. Twelve questions cannot
+column happens to be named in two words out of five. A dozen questions cannot
 calibrate a classifier and pretending otherwise would just move the silent
 failure somewhere else.
 
@@ -1006,9 +980,9 @@ millisecond against a search already under one.
 The obvious suspect was `K`, the rank-fusion constant, at the published 60.
 Over a ranking of eight, `1/(60+1)` to `1/(60+8)` spans 11% while a second
 appearance adds 100%, so rank looks like noise and the fusion looks like a vote
-on set membership. The span is real. The effect is not: sweeping `K` from 0 to
-60 moves MRR by 0.005. It stays at 60, because changing a constant that buys
-nothing is a second number to explain.
+on set membership. The span is real. The effect is not: sweeping `K` across its
+whole plausible range moves MRR by a rounding error. It stays at 60, because
+changing a constant that buys nothing is a second number to explain.
 
 Two other things did matter.
 
@@ -1025,17 +999,16 @@ scored a tie and broke it on the label. On a spreadsheet the words are the
 better evidence: a column really is called `Total Debt`. Weighting them at 2
 settles that tie the right way.
 
-| | hit@1 | MRR | passage cites it |
-|---|---|---|---|
-| by word only | 66.7% | 0.694 | 75.0% |
-| as shipped before | 41.7% | 0.562 | 83.3% |
-| depth 50, words weighted 2 | **58.3%** | **0.665** | **83.3%** |
+Scored three ways — by word only, as the fusion first shipped, and at depth 50
+with words weighted 2 — the last recovers most of the lexical half's precision
+while keeping the passage recall that made the fusion worth running. Word-only
+still ranks best on its own terms and cites worst, which is the trade in one
+line.
 
-Most of the lexical half's precision back, with the recall that made the fusion
-worth running. The weight plateaus from 1.5 to 3 and the questions cannot tell
-those apart, so it is set to 2 — the middle of the plateau rather than its peak.
-At 5 the semantic half stops rescuing the questions it exists for and passage
-recall falls back to 75%.
+The weight plateaus from 1.5 to 3 and the questions cannot tell those apart, so
+it is set to 2 — the middle of the plateau rather than its peak. Push it to 5
+and the semantic half stops rescuing the questions it exists for, with passage
+recall falling back to where word-only search had it.
 
 ```sh
 cargo run --release -p eg-retrieve --example answers -- corpus/ questions.json --sweep
@@ -1070,11 +1043,12 @@ node ../sheet-oracle/bin/sheet-oracle.js private/book.xlsb \
 node ../sheet-oracle/bin/sheet-oracle-compare.js ours.json theirs.json
 ```
 
-On 10,137 formulas of the reference workbook the two agree on 9,543. Of the
-rest, 590 are SheetJS naming a column past `XFD` — the same defect this reader
-had, in the same field, found the same way — and 4 are the two of them
-spelling "a sheet in a workbook that is not open" differently. Neither reader
-is an authority. They simply do not have the same bugs in the same places.
+Over the ten thousand-odd formulas of a sheet, the two agree on all but a few
+hundred. Almost every remaining difference is SheetJS naming a column past `XFD`
+— the same defect this reader had, in the same field, found the same way — and a
+handful are the two of them spelling "a sheet in a workbook that is not open"
+differently. Neither reader is an authority. They simply do not have the same
+bugs in the same places.
 
 `--no-values` dumps formulas and value kinds without the data, for a workbook
 that is confidential.
