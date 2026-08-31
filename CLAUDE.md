@@ -121,7 +121,8 @@ above it.
   `invalidate` whenever an override changes, or a cached lookup column outlives
   the values behind it.
 - `eg-mcp` — MCP server over the whole stack (`workbooks`, `search`, `context`,
-  `read_cells`, `precedents`, `dependents`, `recompute`, `what_if`). Hand-written stdio JSON
+  `read_cells`, `precedents`, `dependents`, `recompute`, `tables`, `query_table`,
+  `schema`, `what_if`). Hand-written stdio JSON
   protocol, no SDK, because the workspace is synchronous. A failing tool returns a
   *result* with `isError`, never a protocol error.
 - `eg-cli` — `eg`.

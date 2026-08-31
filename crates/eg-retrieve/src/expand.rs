@@ -66,7 +66,7 @@
 //! inputs, because lifting threw away which cell fed which — deliberately, and
 //! recovering it is P6's job against the workbook itself.
 
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, VecDeque};
 
 use eg_graph::store::{Corpus, StoredGraph};
 use eg_graph::{EdgeKind, Graph, Node, NodeKind};
@@ -208,6 +208,13 @@ pub struct WorkbookContext {
     /// rather than hidden: a truncated expansion is a partial answer, and a
     /// caller that cannot tell will present it as a complete one.
     pub truncated: bool,
+    /// Seed node indices the index ranked that no longer exist in this
+    /// workbook's stored graph — the lexical or vector index is stale
+    /// against a graph rebuilt smaller since. Named rather than silently
+    /// skipped, the same way [`Retrieved::missing_workbooks`] names a
+    /// workbook the index still thinks is in the corpus: fewer results than
+    /// the search ranked is a real condition, not a quieter one.
+    pub stale_seeds: Vec<u32>,
 }
 
 impl WorkbookContext {
@@ -390,13 +397,21 @@ fn expand_one(stored: &StoredGraph, hits: &[&Hit], opts: &ExpandOptions) -> Work
     let mut queue: BinaryHeap<Step> = BinaryHeap::new();
     // The flag says whether the caller asked about this node, or whether it is
     // context added to name one. Only the former is descended from.
-    let mut pending: Vec<(NodeIndex, usize, bool)> = Vec::new();
+    //
+    // A FIFO, not a stack: seeds are pushed in rank order, and a budget that
+    // runs out must spend on the best-ranked seed's ancestry and children
+    // first, not on whichever was pushed last. Popping from the back would
+    // drain the worst-ranked seed's context before the best-ranked one ever
+    // gets a look in.
+    let mut pending: VecDeque<(NodeIndex, usize, bool)> = VecDeque::new();
     let mut truncated = false;
+    let mut stale_seeds = Vec::new();
 
     // Seeds first, in the order the index ranked them, so a budget that runs
     // out never costs a better-ranked hit for a worse one.
     for hit in hits {
         let Some(idx) = valid_index(graph, hit.node) else {
+            stale_seeds.push(hit.node);
             continue;
         };
         if got.full() {
@@ -404,14 +419,14 @@ fn expand_one(stored: &StoredGraph, hits: &[&Hit], opts: &ExpandOptions) -> Work
             break;
         }
         if got.add(graph, idx, &sheets, Role::Seed, 0, Some(hit.score)) {
-            pending.push((idx, 0, true));
+            pending.push_back((idx, 0, true));
         }
     }
 
     loop {
         // Everything newly included gets named, and everything that names it
         // becomes somewhere to walk from.
-        while let Some((idx, hops, asked_about)) = pending.pop() {
+        while let Some((idx, hops, asked_about)) = pending.pop_front() {
             if walked.insert(idx) && hops < opts.hops {
                 push_dependencies(graph, idx, hops, opts, &mut queue);
                 let descend = if asked_about {
@@ -434,7 +449,7 @@ fn expand_one(stored: &StoredGraph, hits: &[&Hit], opts: &ExpandOptions) -> Work
                         of: idx.index() as u32,
                     };
                     if got.add(graph, child, &sheets, role, hops, None) {
-                        pending.push((child, hops, true));
+                        pending.push_back((child, hops, true));
                     }
                 }
             }
@@ -472,7 +487,7 @@ fn expand_one(stored: &StoredGraph, hits: &[&Hit], opts: &ExpandOptions) -> Work
             }
         };
         if got.add(graph, step.to, &sheets, role, step.hops, None) {
-            pending.push((step.to, step.hops, true));
+            pending.push_back((step.to, step.hops, true));
         }
     }
 
@@ -481,6 +496,7 @@ fn expand_one(stored: &StoredGraph, hits: &[&Hit], opts: &ExpandOptions) -> Work
         path: stored.path.clone(),
         nodes: got.nodes,
         truncated,
+        stale_seeds,
     }
 }
 

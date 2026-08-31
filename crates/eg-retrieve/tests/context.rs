@@ -461,6 +461,7 @@ fn wide_workbook(n: usize) -> Retrieved {
             path: "wide.xlsx".into(),
             nodes,
             truncated: false,
+            stale_seeds: Vec::new(),
         }],
         missing_workbooks: Vec::new(),
     }

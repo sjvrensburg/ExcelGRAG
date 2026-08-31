@@ -20,7 +20,7 @@
 use std::time::Instant;
 
 use eg_model::formula::{scan_names_into, scan_references_into};
-use eg_model::{CellRef, NameSpan, RangeRef, ReferenceSpan, Sheet, SheetId, Workbook};
+use eg_model::{CellRef, NameSpan, ParsedRef, RangeRef, ReferenceSpan, Sheet, SheetId, Workbook};
 use eg_structure::{detect_regions_with, group_formulas, Region, RegionOptions};
 use petgraph::graph::{DiGraph, NodeIndex};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -271,6 +271,15 @@ impl<'a> Builder<'a> {
                                 .add_edge(column, node, Edge::new(EdgeKind::HeaderOf));
                         }
                     }
+                    // The group is wired to this one region regardless — see
+                    // `find_region`'s call site above — even when its own
+                    // rectangle reaches past this region's, into whatever
+                    // abuts it. Region detection never emits two regions
+                    // touching with no gap today, so this should stay zero
+                    // (V2, `docs/audit-2026-08-31.md`).
+                    if !entry.range.contains(range.bottom_right()) {
+                        self.report.formula_groups_spanning_regions += 1;
+                    }
                     entry.node
                 }
                 None => {
@@ -371,73 +380,88 @@ impl<'a> Builder<'a> {
             return;
         }
 
-        let target_sheet = match &span.parsed.sheet_name {
-            None => sheet.id,
-            Some(name) => match self.workbook.sheet_id_by_name(name) {
-                Some(id) => id,
-                None => {
-                    self.report.references_dangling += 1;
-                    // Cloned only the first time the name is seen: one deleted
-                    // sheet accounts for millions of these.
-                    match self.unknown_sheets.get_mut(name) {
-                        Some(count) => *count += 1,
-                        None => {
-                            self.unknown_sheets.insert(name.clone(), 1);
-                        }
+        let target_sheets = match spanned_sheets(self.workbook, sheet.id, &span.parsed) {
+            Ok(sheets) => sheets,
+            Err(name) => {
+                self.report.references_dangling += 1;
+                // Cloned only the first time the name is seen: one deleted
+                // sheet accounts for millions of these.
+                match self.unknown_sheets.get_mut(name) {
+                    Some(count) => *count += 1,
+                    None => {
+                        self.unknown_sheets.insert(name.to_string(), 1);
                     }
-                    self.record_dangling(|| DanglingRef {
-                        from: at,
-                        text: span.text(formula).to_string(),
-                        reason: DanglingReason::UnknownSheet(name.clone()),
-                    });
-                    return;
                 }
-            },
+                self.record_dangling(|| DanglingRef {
+                    from: at,
+                    text: span.text(formula).to_string(),
+                    reason: DanglingReason::UnknownSheet(name.to_string()),
+                });
+                return;
+            }
         };
 
-        let range = span.parsed.resolve(target_sheet);
-        let cross = target_sheet != sheet.id;
-        let kind = if cross {
-            EdgeKind::CrossSheetRef
-        } else {
-            EdgeKind::DependsOn
-        };
+        // A 3-D reference (`Jan:Dec!A1`) is every sheet it spans getting the
+        // same treatment an ordinary one gets, not just the sheet it happens
+        // to be written with first — `target_sheets` has one entry for an
+        // ordinary reference and one per spanned sheet for a 3-D one.
+        let mut any_edges = false;
+        let mut any_hit = false;
+        let mut any_cross = false;
+        for target_sheet in &target_sheets {
+            let target_sheet = *target_sheet;
+            let range = span.parsed.resolve(target_sheet);
+            let cross = target_sheet != sheet.id;
+            let kind = if cross {
+                EdgeKind::CrossSheetRef
+            } else {
+                EdgeKind::DependsOn
+            };
 
-        // A range can straddle regions, and every region it touches is a real
-        // dependency, so every one gets an edge. The hint makes the common case
-        // — the same target as the previous formula — a single range test.
-        let entries: &[RegionEntry] = regions.get(target_sheet.0 as usize).map_or(&[], |e| e);
-        let mut hit = false;
-        let mut edges = 0u32;
-        let start = if *hint < entries.len() { *hint } else { 0 };
-        for k in 0..entries.len() {
-            let i = (start + k) % entries.len();
-            let entry = &entries[i];
-            if !entry.range.intersects(&range) {
-                continue;
+            // A range can straddle regions, and every region it touches is a
+            // real dependency, so every one gets an edge. The hint makes the
+            // common case — the same target as the previous formula — a
+            // single range test.
+            let entries: &[RegionEntry] = regions.get(target_sheet.0 as usize).map_or(&[], |e| e);
+            let mut hit = false;
+            let start = if *hint < entries.len() { *hint } else { 0 };
+            for k in 0..entries.len() {
+                let i = (start + k) % entries.len();
+                let entry = &entries[i];
+                if !entry.range.intersects(&range) {
+                    continue;
+                }
+                if !hit {
+                    *hint = i;
+                    hit = true;
+                }
+                // A region depending on itself is the ordinary case — a
+                // filled column reads the row above — and a self-loop on
+                // every region tells a traversal nothing it can use. Counted,
+                // then dropped.
+                if entry.node == source {
+                    continue;
+                }
+                *self.lifted.entry((source, entry.node, kind)).or_default() += 1;
+                any_edges = true;
+                if cross {
+                    any_cross = true;
+                }
             }
-            if !hit {
-                *hint = i;
-                hit = true;
+            if hit {
+                any_hit = true;
             }
-            // A region depending on itself is the ordinary case — a filled
-            // column reads the row above — and a self-loop on every region
-            // tells a traversal nothing it can use. Counted, then dropped.
-            if entry.node == source {
-                continue;
-            }
-            *self.lifted.entry((source, entry.node, kind)).or_default() += 1;
-            edges += 1;
         }
 
         // Each reference lands in exactly one of these, which is what makes
-        // the totals checkable against `references_scanned`.
-        if edges > 0 {
+        // the totals checkable against `references_scanned` — one reference,
+        // one outcome, whatever number of sheets it happened to span.
+        if any_edges {
             self.report.references_lifted += 1;
-            if cross {
+            if any_cross {
                 self.report.references_cross_sheet += 1;
             }
-        } else if hit {
+        } else if any_hit {
             self.report.references_within_source_region += 1;
         } else {
             // Legal and common: a formula reading cells that hold nothing.
@@ -446,11 +470,14 @@ impl<'a> Builder<'a> {
             // a reference to the source sheet, which is exactly wrong when the
             // formula wrote `Other!$D$21`. Built lazily — formatting a citation
             // per reference, for millions of references whose examples are
-            // long since capped, is pure waste.
+            // long since capped, is pure waste. The first spanned sheet stands
+            // for the whole reference; a 3-D one this deep into "found
+            // nothing" is not worth a citation per sheet.
             let workbook = self.workbook;
+            let cite_sheet = target_sheets[0];
             self.record_dangling(|| DanglingRef {
                 from: at,
-                text: workbook.cite_range(range),
+                text: workbook.cite_range(span.parsed.resolve(cite_sheet)),
                 reason: DanglingReason::UnpopulatedTarget,
             });
         }
@@ -563,6 +590,42 @@ fn find_region<'e>(
         }
     }
     None
+}
+
+/// Every sheet a reference names, by tab order.
+///
+/// One sheet for an ordinary reference; every sheet between the two named
+/// ones, inclusive, for a 3-D reference (`Jan:Dec!A1`) — `SheetId` *is* tab
+/// order (see its own doc comment), so the span is a contiguous index range,
+/// whichever end was written first.
+///
+/// Shared between [`crate::build`] and [`crate::audit`] on purpose: which
+/// sheets a 3-D reference lifts to must be decided in exactly one place, not
+/// re-derived twice and trusted to agree — the mistake that let earlier
+/// defects in *this* kind of decision go uncaught by an audit re-deriving its
+/// own, subtly different, answer.
+///
+/// `Err` names the one sheet (start or end) that does not exist in this
+/// workbook.
+pub(crate) fn spanned_sheets<'a>(
+    workbook: &Workbook,
+    from: SheetId,
+    parsed: &'a ParsedRef,
+) -> Result<Vec<SheetId>, &'a str> {
+    let start = match &parsed.sheet_name {
+        None => from,
+        Some(name) => workbook.sheet_id_by_name(name).ok_or(name.as_str())?,
+    };
+    match &parsed.end_sheet_name {
+        None => Ok(vec![start]),
+        Some(end_name) => {
+            let end = workbook
+                .sheet_id_by_name(end_name)
+                .ok_or(end_name.as_str())?;
+            let (lo, hi) = (start.0.min(end.0), start.0.max(end.0));
+            Ok((lo..=hi).map(SheetId).collect())
+        }
+    }
 }
 
 /// Nodes of one kind, for callers walking a single layer.

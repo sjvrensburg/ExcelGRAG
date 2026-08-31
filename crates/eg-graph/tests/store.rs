@@ -375,6 +375,87 @@ fn profiles_are_stored_beside_the_graph_and_not_inside_it() {
 }
 
 #[test]
+fn forgetting_a_workbook_removes_its_profiles_too() {
+    // A "forgotten" workbook's cell values must not go on being served: the
+    // manifest is what `profiles()` now consults first, but the file itself
+    // must also be gone, not just orphaned on disk.
+    let root = dir();
+    let wb = workbook("hash-forget-profiles");
+    let built = build(&wb);
+    let profiles = eg_structure::Profiles {
+        columns: vec![eg_structure::ColumnProfile {
+            header: "Debt Type".into(),
+            range: eg_model::RangeRef::new(SheetId(0), 1, 1, 3, 1),
+            kind: eg_structure::ColumnKind::Text,
+            populated: 3,
+            empty: 0,
+            errors: 0,
+            distinct: Some(vec![eg_structure::ValueCount {
+                value: "Residential".into(),
+                count: 2,
+                truncated: false,
+            }]),
+            distinct_count: Some(1),
+            numeric: None,
+        }],
+        values: true,
+    };
+
+    let mut corpus = Corpus::open(&root).unwrap();
+    corpus
+        .put(&wb.content_hash, &wb.path, 1, 3, true, &built)
+        .unwrap();
+    corpus
+        .put_profiles(&wb.content_hash, &wb.path, &profiles)
+        .unwrap();
+    assert!(corpus.profiles_path(&wb.content_hash).exists());
+
+    assert!(corpus.forget(&wb.content_hash).unwrap());
+    assert!(
+        !corpus.profiles_path(&wb.content_hash).exists(),
+        "the profiles file must not outlive the workbook it describes"
+    );
+    assert_eq!(corpus.profiles(&wb.content_hash).unwrap(), None);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn profiles_are_a_miss_when_the_manifest_does_not_list_them() {
+    // `profiles()` must consult the manifest before reading the file — a stray
+    // or stale file on disk with no matching manifest entry (an orphan left by
+    // a partial write, or a filename-prefix collision) must never be served.
+    let root = dir();
+    let wb = workbook("hash-orphan-profile");
+    let built = build(&wb);
+    let profiles = eg_structure::Profiles {
+        columns: Vec::new(),
+        values: true,
+    };
+
+    let mut corpus = Corpus::open(&root).unwrap();
+    corpus
+        .put(&wb.content_hash, &wb.path, 1, 3, true, &built)
+        .unwrap();
+    corpus
+        .put_profiles(&wb.content_hash, &wb.path, &profiles)
+        .unwrap();
+    corpus.forget_profiles(&wb.content_hash).unwrap();
+
+    // The file may still exist on disk (forget_profiles removes it too, so
+    // recreate it directly to simulate an orphan/collision) but the manifest
+    // no longer claims it.
+    std::fs::write(corpus.profiles_path(&wb.content_hash), b"{}").unwrap();
+    assert_eq!(
+        corpus.profiles(&wb.content_hash).unwrap(),
+        None,
+        "a file with no manifest entry must not be served"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn a_corpus_written_before_profiles_existed_still_opens() {
     // The manifest gained two fields. Defaulting them rather than bumping the
     // format is the difference between reading an old corpus as "no profiles"

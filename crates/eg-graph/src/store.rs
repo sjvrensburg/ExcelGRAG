@@ -352,6 +352,12 @@ impl Corpus {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(io_err(format!("removing {}", path.display()))(e)),
         }
+        let profiles_path = self.profiles_path(content_hash);
+        match fs::remove_file(&profiles_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io_err(format!("removing {}", profiles_path.display()))(e)),
+        }
         Ok(true)
     }
 
@@ -385,7 +391,21 @@ impl Corpus {
     ///
     /// `Ok(None)` for a workbook profiled by nobody, which is an ordinary state
     /// and not an error — the graph is the corpus, the profiles are an extra.
+    ///
+    /// Checked against the manifest first, the same way [`Corpus::get`] is: a
+    /// hash forgotten (or never profiled) is a miss even if a stale file
+    /// happens to sit on disk, and the `content_hash` inside the file is
+    /// compared too, so a filename-prefix collision cannot serve the wrong
+    /// workbook's values.
     pub fn profiles(&self, content_hash: &str) -> Result<Option<Profiles>, StoreError> {
+        if !self
+            .manifest
+            .workbooks
+            .get(content_hash)
+            .is_some_and(|e| e.profile_values || e.profiled_columns > 0)
+        {
+            return Ok(None);
+        }
         let file = self.profiles_path(content_hash);
         let bytes = match fs::read(&file) {
             Ok(bytes) => bytes,
@@ -400,6 +420,9 @@ impl Corpus {
                 path: file.display().to_string(),
                 source,
             })?;
+        if stored.content_hash != content_hash {
+            return Ok(None);
+        }
         Ok(Some(stored.profiles))
     }
 
@@ -453,8 +476,16 @@ impl Corpus {
 
 /// Write through a temporary file and rename, so an interrupted write leaves
 /// the previous version rather than a truncated one.
+///
+/// V3: the corpus has no inter-process lock, so two `eg index` runs against
+/// the same directory can both reach here for the same path (`manifest.json`,
+/// most likely) at once. The tmp name is uniquified per process so the two
+/// writes cannot interleave into one file before either renames — the last
+/// `rename` still wins the race for the real path, same as any single-writer
+/// assumption broken by two writers, but at least it is a clean last-write,
+/// not a torn one.
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
-    let tmp = path.with_extension("tmp");
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
     fs::write(&tmp, bytes).map_err(io_err(format!("writing {}", tmp.display())))?;
     fs::rename(&tmp, path).map_err(io_err(format!("renaming into {}", path.display())))
 }

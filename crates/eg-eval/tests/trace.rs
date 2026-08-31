@@ -195,6 +195,24 @@ fn cells_come_back_populated_only_and_in_reading_order() {
 }
 
 #[test]
+fn a_whole_column_range_is_clipped_to_what_the_sheet_uses() {
+    // `Sheet1!A:A` now parses (C1), so this is reachable from a citation the
+    // way `A1:D4` always was. Without clipping to the sheet's used range
+    // first, this would probe every one of 1,048,576 rows through
+    // `iter_range` — the exact perf regression the fix exists to avoid.
+    let wb = book();
+    // Column B (index 1) of Main, top to the sheet's last row — the shape
+    // `A:A`/`Sheet1!B:B` resolves to, built by hand since the fixture has no
+    // formula that produces one.
+    let whole_column = RangeRef::new(SheetId(0), 0, 1, eg_model::MAX_ROW, 1);
+    let (cells, capped) = cells_in(&wb, whole_column, 100);
+    assert!(!capped);
+    // Column B on Main has three populated cells (B2, B3, B4) plus its
+    // header (B1) — none past row 4, which is all `used_range` covers.
+    assert_eq!(cells.len(), 4);
+}
+
+#[test]
 fn a_cell_fact_carries_its_own_citation_and_formula() {
     let wb = book();
     let fact = cell(&wb, at(0, 1, 1)).expect("Main!B2 is populated");

@@ -120,6 +120,22 @@ impl CellValue {
     }
 }
 
+/// A number as a spreadsheet carries it: 15 significant decimal digits.
+///
+/// Comparisons are made on this rather than on the raw double, because Excel
+/// does and workbooks depend on it. `10.13+6.75=16.88` is false in binary
+/// floating point and true in every spreadsheet ever written. The same
+/// rounding is what display code should render through, too — the shortest
+/// round-trip form of an unrounded double shows the arithmetic noise past
+/// the fifteenth digit (`0.30000000000000004`) that a sheet never would.
+pub fn shown(n: f64) -> f64 {
+    if n.is_finite() {
+        format!("{n:.14e}").parse().unwrap_or(n)
+    } else {
+        n
+    }
+}
+
 /// Render a float the way a spreadsheet would: no trailing `.0` on integers.
 fn format_number(n: f64) -> String {
     if n.is_finite() && n.fract() == 0.0 && n.abs() < 1e15 {

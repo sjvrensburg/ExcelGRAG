@@ -91,6 +91,12 @@ enum Command {
         /// Ceiling on the passage, in characters.
         #[arg(long, default_value_t = 8000)]
         chars: usize,
+        /// Restrict to one workbook, by content hash (or a prefix of it).
+        #[arg(long)]
+        workbook: Option<String>,
+        /// Restrict to one sheet, by exact name.
+        #[arg(long)]
+        sheet: Option<String>,
         #[arg(long)]
         lexical_only: bool,
     },
@@ -102,6 +108,9 @@ enum Command {
         query: Vec<String>,
         #[arg(long, default_value_t = 8)]
         limit: usize,
+        /// Restrict to one workbook, by content hash (or a prefix of it).
+        #[arg(long)]
+        workbook: Option<String>,
         /// Restrict to one sheet, by exact name.
         #[arg(long)]
         sheet: Option<String>,
@@ -136,6 +145,9 @@ enum Command {
     },
 
     /// Recompute formulas and say whether they agree with their stored values.
+    ///
+    /// Exits 2 if any formula disagreed, so CI can gate on it without parsing
+    /// stdout; exits 1 on a tool error (e.g. the workbook could not be read).
     Check {
         workbook: String,
         /// Confine the sweep to one range, e.g. "'Q3 Sales'!A1:Z999".
@@ -188,6 +200,10 @@ struct Privacy {
 
 fn main() {
     let cli = Cli::parse();
+    // Set only by `Check`, when the sweep found a disagreement — CLAUDE.md
+    // calls that a regression, and a caller (CI, most of all) cannot gate on
+    // it from stdout alone.
+    let mut disagreements = false;
     let result = match cli.command {
         Command::Index {
             dir,
@@ -212,6 +228,8 @@ fn main() {
             budget,
             children,
             chars,
+            workbook,
+            sheet,
             lexical_only,
         } => corpus::ask(
             &dir,
@@ -222,6 +240,8 @@ fn main() {
                 budget,
                 children,
                 chars,
+                workbook,
+                sheet,
                 lexical_only,
             },
         ),
@@ -229,9 +249,10 @@ fn main() {
             dir,
             query,
             limit,
+            workbook,
             sheet,
             lexical_only,
-        } => corpus::search(&dir, &query.join(" "), limit, sheet, lexical_only),
+        } => corpus::search(&dir, &query.join(" "), limit, workbook, sheet, lexical_only),
         Command::Workbooks { dir } => corpus::workbooks(&dir),
         Command::Cells {
             workbook,
@@ -250,7 +271,8 @@ fn main() {
             scope,
             limit,
             privacy,
-        } => workbook::check(&workbook, scope.as_deref(), limit, privacy.redact_values),
+        } => workbook::check(&workbook, scope.as_deref(), limit, privacy.redact_values)
+            .map(|found_disagreements| disagreements = found_disagreements),
         Command::WhatIf {
             workbook,
             changes,
@@ -272,6 +294,9 @@ fn main() {
     if let Err(message) = result {
         eprintln!("eg: {message}");
         std::process::exit(1);
+    }
+    if disagreements {
+        std::process::exit(2);
     }
 }
 

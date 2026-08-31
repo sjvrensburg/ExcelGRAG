@@ -22,7 +22,7 @@ use eg_eval::{
 };
 use eg_eval::{infer_schema, Lookup};
 use eg_index::SearchOptions;
-use eg_model::{parse_a1, CellValue, RangeRef, Workbook};
+use eg_model::{parse_a1, redact_formula_literals, CellValue, RangeRef, Workbook};
 use eg_retrieve::{expand, find_in, render, ExpandOptions, Fusion, RenderOptions, Search};
 use eg_structure::{detect_regions, read_table, Table};
 use serde_json::{json, Value};
@@ -74,6 +74,8 @@ pub const TOOLS: &[Tool] = &[
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "The question, in words." },
+                    "workbook": { "type": "string", "description": "Restrict to one workbook (content hash, path or file name)." },
+                    "sheet": { "type": "string", "description": "Restrict to one sheet, by exact name." },
                     "seeds": { "type": "integer", "description": "How many hits to expand from, default 5." },
                     "hops": { "type": "integer", "description": "Dependency hops from a seed, default 2." },
                     "budget": { "type": "integer", "description": "Most nodes per workbook, default 40." },
@@ -261,19 +263,50 @@ fn want_str(args: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{key} is required, as a string"))
 }
 
-fn opt_str(args: &Value, key: &str) -> Option<String> {
-    args.get(key).and_then(Value::as_str).map(str::to_string)
+/// What `json!` calls a value, for an error a caller can act on.
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
 }
 
-fn opt_usize(args: &Value, key: &str, default: usize) -> usize {
-    args.get(key)
-        .and_then(Value::as_u64)
-        .map(|n| n as usize)
-        .unwrap_or(default)
+/// An absent or `null` argument is the default; a *present* one of the wrong
+/// JSON type is refused rather than silently treated as absent — a caller
+/// that sent `"limit": "3"` typo'd a type, and finding out from a wrong
+/// answer instead of an error is worse than a schema was supposed to allow.
+fn opt_str(args: &Value, key: &str) -> Result<Option<String>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(other) => Err(format!("{key} must be a string, got {}", json_kind(other))),
+    }
 }
 
-fn opt_bool(args: &Value, key: &str) -> bool {
-    args.get(key).and_then(Value::as_bool).unwrap_or(false)
+fn opt_usize(args: &Value, key: &str, default: usize) -> Result<usize, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(Value::Number(n)) => n
+            .as_u64()
+            .map(|n| n as usize)
+            .ok_or_else(|| format!("{key} must be a non-negative integer, got {n}")),
+        Some(other) => Err(format!(
+            "{key} must be an integer, got {}",
+            json_kind(other)
+        )),
+    }
+}
+
+fn opt_bool(args: &Value, key: &str) -> Result<bool, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(other) => Err(format!("{key} must be a boolean, got {}", json_kind(other))),
+    }
 }
 
 // ---- tools --------------------------------------------------------------
@@ -304,7 +337,12 @@ fn workbooks(state: &mut State) -> Result<String, String> {
 ///
 /// This used to be a third copy of the pipeline, and the copy is how the
 /// fusion weighting came to be missing from the surface an agent talks to.
-fn find(state: &mut State, query: &str, opts: &SearchOptions, lexical_only: bool) -> Search {
+fn find(
+    state: &mut State,
+    query: &str,
+    opts: &SearchOptions,
+    lexical_only: bool,
+) -> Result<Search, String> {
     let fusion = Fusion {
         lexical_only,
         ..Default::default()
@@ -316,22 +354,22 @@ fn find(state: &mut State, query: &str, opts: &SearchOptions, lexical_only: bool
     let semantic = held
         .as_mut()
         .map(|(embedder, vectors)| (&mut **embedder, &*vectors));
-    find_in(text, semantic, query, opts, &fusion)
+    find_in(text, semantic, query, opts, &fusion).map_err(|e| e.to_string())
 }
 
 fn search(state: &mut State, args: &Value) -> Result<String, String> {
     let query = want_str(args, "query")?;
-    let workbook = match opt_str(args, "workbook") {
+    let workbook = match opt_str(args, "workbook")? {
         Some(want) => Some(state.resolve(Some(&want))?.0),
         None => None,
     };
     let opts = SearchOptions {
-        limit: opt_usize(args, "limit", 8).clamp(1, 100),
+        limit: opt_usize(args, "limit", 8)?.clamp(1, 100),
         workbook,
-        sheet: opt_str(args, "sheet"),
+        sheet: opt_str(args, "sheet")?,
         ..Default::default()
     };
-    let found = find(state, &query, &opts, opt_bool(args, "lexical_only"));
+    let found = find(state, &query, &opts, opt_bool(args, "lexical_only")?)?;
     let warning = found.warning();
     let evidence = found.evidence();
     if found.is_empty() {
@@ -367,12 +405,18 @@ fn search(state: &mut State, args: &Value) -> Result<String, String> {
 
 fn context(state: &mut State, args: &Value) -> Result<String, String> {
     let query = want_str(args, "query")?;
-    let seeds = opt_usize(args, "seeds", 5).clamp(1, 50);
+    let seeds = opt_usize(args, "seeds", 5)?.clamp(1, 50);
+    let workbook = match opt_str(args, "workbook")? {
+        Some(want) => Some(state.resolve(Some(&want))?.0),
+        None => None,
+    };
     let opts = SearchOptions {
         limit: seeds,
+        workbook,
+        sheet: opt_str(args, "sheet")?,
         ..Default::default()
     };
-    let found = find(state, &query, &opts, opt_bool(args, "lexical_only"));
+    let found = find(state, &query, &opts, opt_bool(args, "lexical_only")?)?;
     let warning = found.warning();
     let evidence = found.evidence();
     if found.is_empty() {
@@ -381,9 +425,9 @@ fn context(state: &mut State, args: &Value) -> Result<String, String> {
     let hits = found.hits;
 
     let expand_opts = ExpandOptions {
-        hops: opt_usize(args, "hops", 2),
-        budget: opt_usize(args, "budget", 40).max(1),
-        children: opt_usize(args, "children", 0),
+        hops: opt_usize(args, "hops", 2)?,
+        budget: opt_usize(args, "budget", 40)?.max(1),
+        children: opt_usize(args, "children", 0)?,
         ..Default::default()
     };
     let found =
@@ -391,7 +435,7 @@ fn context(state: &mut State, args: &Value) -> Result<String, String> {
     let rendered = render(
         &found,
         &RenderOptions {
-            max_chars: opt_usize(args, "max_chars", 8000).max(200),
+            max_chars: opt_usize(args, "max_chars", 8000)?.max(200),
             ..Default::default()
         },
     );
@@ -420,6 +464,16 @@ fn context(state: &mut State, args: &Value) -> Result<String, String> {
             &hash[..hash.len().min(12)]
         ));
     }
+    for workbook in &found.workbooks {
+        if !workbook.stale_seeds.is_empty() {
+            out.push_str(&format!(
+                "\n{}: {} seed(s) the index ranked no longer exist in the stored \
+                 graph — reindex to refresh it",
+                &workbook.content_hash[..workbook.content_hash.len().min(12)],
+                workbook.stale_seeds.len()
+            ));
+        }
+    }
     out.push('\n');
     Ok(out)
 }
@@ -431,7 +485,7 @@ fn located(
     args: &Value,
 ) -> Result<(std::sync::Arc<eg_ingest::Loaded>, RangeRef, String), String> {
     let citation = want_str(args, "citation")?;
-    let (_, path) = state.resolve(opt_str(args, "workbook").as_deref())?;
+    let (_, path) = state.resolve(opt_str(args, "workbook")?.as_deref())?;
     let (loaded, load_seconds) = state.workbook(&path)?;
     let range = resolve_range(&loaded.workbook, &citation)?;
     let note = match load_seconds {
@@ -470,8 +524,22 @@ fn show(value: &CellValue, redact: bool) -> String {
     }
 }
 
+/// A formula's text, with its own literals hidden the same way a value is.
+///
+/// A formula's literals are the workbook's data as much as any cell's value
+/// is — `=IF(A2="Smith, John",B2*0.15,0)` names a person and a rate — so
+/// printing it unredacted while the value column shows `<number>` would leak
+/// exactly what `--redact-values` exists to withhold.
+fn show_formula(formula: &str, redact: bool) -> String {
+    if redact {
+        redact_formula_literals(formula)
+    } else {
+        formula.to_string()
+    }
+}
+
 fn read_cells(state: &mut State, args: &Value) -> Result<String, String> {
-    let limit = opt_usize(args, "limit", 40).clamp(1, 500);
+    let limit = opt_usize(args, "limit", 40)?.clamp(1, 500);
     let redact = state.redact_values;
     let (loaded, range, note) = located(state, args)?;
     let workbook = &loaded.workbook;
@@ -486,7 +554,7 @@ fn read_cells(state: &mut State, args: &Value) -> Result<String, String> {
     for fact in &cells {
         out.push_str(&format!("  {:<24}", fact.a1));
         if let Some(formula) = &fact.formula {
-            out.push_str(&format!(" ={formula}"));
+            out.push_str(&format!(" ={}", show_formula(formula, redact)));
         }
         out.push_str(&format!("  {}\n", show(&fact.value, redact)));
     }
@@ -497,7 +565,7 @@ fn read_cells(state: &mut State, args: &Value) -> Result<String, String> {
 }
 
 fn precedents(state: &mut State, args: &Value) -> Result<String, String> {
-    let limit = opt_usize(args, "limit", 40).clamp(1, 500);
+    let limit = opt_usize(args, "limit", 40)?.clamp(1, 500);
     let (loaded, range, note) = located(state, args)?;
     let workbook = &loaded.workbook;
 
@@ -538,7 +606,7 @@ fn precedents(state: &mut State, args: &Value) -> Result<String, String> {
 }
 
 fn dependents(state: &mut State, args: &Value) -> Result<String, String> {
-    let limit = opt_usize(args, "limit", 40).clamp(1, 500);
+    let limit = opt_usize(args, "limit", 40)?.clamp(1, 500);
     let (loaded, range, note) = located(state, args)?;
     let workbook = &loaded.workbook;
 
@@ -565,7 +633,7 @@ fn dependents(state: &mut State, args: &Value) -> Result<String, String> {
 }
 
 fn recompute_tool(state: &mut State, args: &Value) -> Result<String, String> {
-    let limit = opt_usize(args, "limit", 40).clamp(1, 500);
+    let limit = opt_usize(args, "limit", 40)?.clamp(1, 500);
     let redact = state.redact_values;
     let (loaded, range, note) = located(state, args)?;
     let workbook = &loaded.workbook;
@@ -585,7 +653,11 @@ fn recompute_tool(state: &mut State, args: &Value) -> Result<String, String> {
             break;
         }
         printed += 1;
-        out.push_str(&format!("{}\n  ={}\n", result.a1, result.formula));
+        out.push_str(&format!(
+            "{}\n  ={}\n",
+            result.a1,
+            show_formula(&result.formula, redact)
+        ));
         out.push_str(&match &result.outcome {
             Outcome::Agrees(value) => {
                 format!("  agrees with the stored value {}\n", show(value, redact))
@@ -645,8 +717,8 @@ fn cell_value(value: &Value) -> Result<CellValue, String> {
 
 fn what_if_tool(state: &mut State, args: &Value) -> Result<String, String> {
     let redact = state.redact_values;
-    let levels = opt_usize(args, "levels", 8).clamp(1, 32);
-    let limit = opt_usize(args, "limit", 40).clamp(1, 500);
+    let levels = opt_usize(args, "levels", 8)?.clamp(1, 32);
+    let limit = opt_usize(args, "limit", 40)?.clamp(1, 500);
     let requested = args
         .get("changes")
         .and_then(Value::as_array)
@@ -655,7 +727,7 @@ fn what_if_tool(state: &mut State, args: &Value) -> Result<String, String> {
         return Err("changes is empty — name at least one cell to change".to_string());
     }
 
-    let (_, path) = state.resolve(opt_str(args, "workbook").as_deref())?;
+    let (_, path) = state.resolve(opt_str(args, "workbook")?.as_deref())?;
     let (loaded, load_seconds) = state.workbook(&path)?;
     let workbook = &loaded.workbook;
 
@@ -700,7 +772,7 @@ fn what_if_tool(state: &mut State, args: &Value) -> Result<String, String> {
             show(&applied.after, redact)
         ));
         if let Some(formula) = &applied.replaced_formula {
-            out.push_str(&format!("  replacing ={formula}\n"));
+            out.push_str(&format!("  replacing ={}\n", show_formula(formula, redact)));
         }
     }
     out.push_str(&format!(
@@ -721,7 +793,11 @@ fn what_if_tool(state: &mut State, args: &Value) -> Result<String, String> {
             report.moved
         ));
         for moved in &impact.moved {
-            out.push_str(&format!("  {:<24} ={}\n", moved.a1, moved.formula));
+            out.push_str(&format!(
+                "  {:<24} ={}\n",
+                moved.a1,
+                show_formula(&moved.formula, redact)
+            ));
             out.push_str(&format!(
                 "    {} → {}   (level {}){}\n",
                 show(&moved.before, redact),
@@ -768,10 +844,10 @@ fn what_if_tool(state: &mut State, args: &Value) -> Result<String, String> {
 
 /// The tables of a workbook, which is what a query names its columns from.
 fn tables(state: &mut State, args: &Value) -> Result<String, String> {
-    let (_, path) = state.resolve(opt_str(args, "workbook").as_deref())?;
+    let (_, path) = state.resolve(opt_str(args, "workbook")?.as_deref())?;
     let (loaded, load_seconds) = state.workbook(&path)?;
-    let only = opt_str(args, "sheet");
-    let limit = opt_usize(args, "limit", 40).clamp(1, 500);
+    let only = opt_str(args, "sheet")?;
+    let limit = opt_usize(args, "limit", 40)?.clamp(1, 500);
 
     let mut out = String::new();
     if let Some(seconds) = load_seconds {
@@ -854,12 +930,12 @@ fn table_at(loaded: &eg_ingest::Loaded, citation: &str) -> Result<(usize, Table)
 
 fn query_table(state: &mut State, args: &Value) -> Result<String, String> {
     let citation = want_str(args, "table")?;
-    let (_, path) = state.resolve(opt_str(args, "workbook").as_deref())?;
+    let (_, path) = state.resolve(opt_str(args, "workbook")?.as_deref())?;
     let (loaded, load_seconds) = state.workbook(&path)?;
     let (_, table) = table_at(&loaded, &citation)?;
 
     let mut query = Query {
-        limit: opt_usize(args, "limit", 20).clamp(1, 200),
+        limit: opt_usize(args, "limit", 20)?.clamp(1, 200),
         ..Default::default()
     };
     for filter in args
@@ -1033,10 +1109,10 @@ fn read_aggregate(value: &Value) -> Result<Aggregate, String> {
 }
 
 fn schema(state: &mut State, args: &Value) -> Result<String, String> {
-    let (_, path) = state.resolve(opt_str(args, "workbook").as_deref())?;
+    let (_, path) = state.resolve(opt_str(args, "workbook")?.as_deref())?;
     let (loaded, load_seconds) = state.workbook(&path)?;
-    let only = opt_str(args, "sheet");
-    let limit = opt_usize(args, "limit", 25).clamp(1, 200);
+    let only = opt_str(args, "sheet")?;
+    let limit = opt_usize(args, "limit", 25)?.clamp(1, 200);
 
     let found = infer_schema(&loaded.workbook);
     let wanted: Vec<&Lookup> = found
@@ -1102,4 +1178,176 @@ fn schema(state: &mut State, args: &Value) -> Result<String, String> {
         out.push_str("no lookup relations here\n");
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formula_redaction_drops_literals_the_way_read_cells_and_recompute_print_them() {
+        // The exact site `read_cells`/`recompute`/`what_if` all call before
+        // splicing a formula into a result: a redacted formula must carry no
+        // literal a redacted value wouldn't have shown either.
+        let formula = "IF(A2=\"Smith, John\",B2*0.15,0)";
+        assert_eq!(show_formula(formula, false), formula);
+        assert_eq!(
+            show_formula(formula, true),
+            "IF(A2=<text>,B2*<number>,<number>)"
+        );
+        assert_eq!(
+            show_formula("VLOOKUP(A1,Rates!A1:B9,2,FALSE)", true),
+            "VLOOKUP(A1,Rates!A1:B9,<number>,FALSE)"
+        );
+    }
+
+    fn grid(id: u16, name: &str, rows: &[&str]) -> eg_model::Sheet {
+        let mut sheet = eg_model::Sheet::new(eg_model::SheetId(id), name);
+        for (r, line) in rows.iter().enumerate() {
+            for (c, tok) in line.split_whitespace().enumerate() {
+                let value = match tok.parse::<f64>() {
+                    Ok(n) => CellValue::Number(n),
+                    Err(_) => CellValue::Text(tok.to_string()),
+                };
+                sheet.set(r as u32, c as u16, eg_model::Cell::literal(value));
+            }
+        }
+        sheet
+    }
+
+    fn one_sheet_workbook(hash: &str, path: &str, sheet_name: &str) -> Workbook {
+        Workbook {
+            path: path.into(),
+            format: Some(eg_model::WorkbookFormat::Xlsx),
+            content_hash: hash.into(),
+            sheets: vec![grid(
+                0,
+                sheet_name,
+                // "Region" heads the leftmost column, which region detection
+                // reads as row labels rather than a headed column (a
+                // documented gap, see eg-retrieve's answers test) — so
+                // "Revenue" is put over the second column instead, to be sure
+                // it gets an actual column node to search on.
+                &["Region Revenue", "North 10", "South 20", "East 30"],
+            )],
+            defined_names: Vec::new(),
+            external_links: Vec::new(),
+        }
+    }
+
+    /// A corpus of two workbooks, each with a "Revenue" column on a
+    /// differently-named sheet, so a search for "revenue" with no filter
+    /// finds both and a `workbook` filter should find only one.
+    fn two_workbook_state() -> (State, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().to_str().expect("utf-8 path");
+
+        let mut corpus = eg_graph::store::Corpus::open(path).expect("corpus opens");
+        let mut text = eg_index::TextIndex::open(path).expect("text index opens");
+        for wb in [
+            one_sheet_workbook("hash-alpha", "alpha.xlsx", "Alpha Sales"),
+            one_sheet_workbook("hash-beta", "beta.xlsx", "Beta Sales"),
+        ] {
+            let built = eg_graph::build(&wb);
+            corpus
+                .put(
+                    &wb.content_hash,
+                    &wb.path,
+                    wb.sheets.len(),
+                    wb.total_cells() as u64,
+                    true,
+                    &built,
+                )
+                .expect("stored");
+            text.index_built(&built, &wb.content_hash, &wb.path)
+                .expect("indexed");
+        }
+        // Tantivy allows one writer on a directory at a time; `State::open`
+        // opens its own.
+        drop(text);
+
+        let state = State::open(path, false).expect("state opens over what was just indexed");
+        (state, dir)
+    }
+
+    #[test]
+    fn context_can_be_scoped_to_one_workbook() {
+        let (mut state, _dir) = two_workbook_state();
+
+        let unscoped = context(
+            &mut state,
+            &json!({ "query": "revenue", "lexical_only": true }),
+        )
+        .expect("answered");
+        assert!(unscoped.contains("alpha.xlsx") || unscoped.contains("Alpha"));
+        assert!(unscoped.contains("beta.xlsx") || unscoped.contains("Beta"));
+
+        let scoped = context(
+            &mut state,
+            &json!({ "query": "revenue", "workbook": "hash-alpha", "lexical_only": true }),
+        )
+        .expect("answered");
+        assert!(
+            scoped.contains("Alpha") || scoped.contains("alpha.xlsx"),
+            "{scoped}"
+        );
+        assert!(
+            !scoped.contains("Beta") && !scoped.contains("beta.xlsx"),
+            "a workbook filter must not let the other workbook's nodes into the passage: {scoped}"
+        );
+    }
+
+    #[test]
+    fn a_string_where_an_integer_belongs_is_refused_not_defaulted() {
+        // L8: `opt_usize`/`opt_bool`/`opt_str` used to substitute the default
+        // for any wrong-typed value, so `"limit": "3"` silently became the
+        // default limit instead of an error — indistinguishable from a
+        // caller who never set it at all.
+        let err = opt_usize(&json!({ "limit": "3" }), "limit", 8).unwrap_err();
+        assert!(err.contains("limit") && err.contains("integer"), "{err}");
+    }
+
+    #[test]
+    fn a_negative_number_for_an_integer_argument_is_refused() {
+        let err = opt_usize(&json!({ "limit": -3 }), "limit", 8).unwrap_err();
+        assert!(err.contains("limit"), "{err}");
+    }
+
+    #[test]
+    fn a_fractional_number_for_an_integer_argument_is_refused() {
+        let err = opt_usize(&json!({ "limit": 3.5 }), "limit", 8).unwrap_err();
+        assert!(err.contains("limit"), "{err}");
+    }
+
+    #[test]
+    fn a_number_where_a_boolean_belongs_is_refused_not_defaulted() {
+        let err = opt_bool(&json!({ "lexical_only": 1 }), "lexical_only").unwrap_err();
+        assert!(
+            err.contains("lexical_only") && err.contains("boolean"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_number_where_a_string_belongs_is_refused_not_defaulted() {
+        let err = opt_str(&json!({ "sheet": 3 }), "sheet").unwrap_err();
+        assert!(err.contains("sheet") && err.contains("string"), "{err}");
+    }
+
+    #[test]
+    fn an_absent_or_null_argument_still_takes_its_default() {
+        assert_eq!(opt_usize(&json!({}), "limit", 8), Ok(8));
+        assert_eq!(opt_usize(&json!({ "limit": null }), "limit", 8), Ok(8));
+        assert_eq!(opt_bool(&json!({}), "lexical_only"), Ok(false));
+        assert_eq!(opt_str(&json!({}), "sheet"), Ok(None));
+        assert_eq!(opt_str(&json!({ "sheet": null }), "sheet"), Ok(None));
+    }
+
+    #[test]
+    fn a_tool_call_surfaces_the_type_error_rather_than_a_wrong_answer() {
+        let (mut state, _dir) = two_workbook_state();
+        let err = search(&mut state, &json!({ "query": "revenue", "limit": "3" }))
+            .expect_err("a string limit must be refused");
+        assert!(err.contains("limit"), "{err}");
+    }
 }

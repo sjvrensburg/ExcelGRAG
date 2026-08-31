@@ -39,8 +39,8 @@
 //! # Ok::<(), eg_ingest::IngestError>(())
 //! ```
 
-use eg_model::formula::scan_references_into;
-use eg_model::{CellRef, CellValue, RangeRef, ReferenceSpan, SheetId, Workbook};
+use eg_model::formula::{scan_names_into, scan_references_into};
+use eg_model::{CellRef, CellValue, NameSpan, RangeRef, ReferenceSpan, SheetId, Workbook};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
@@ -247,6 +247,10 @@ pub fn what_if(workbook: &Workbook, changes: &[Change], opts: &WhatIfOptions) ->
     }
 
     let sheets = sheet_ids(workbook);
+    // What every name in the workbook touches, resolved once: a name-mediated
+    // dependency (`=Tax_Rate*A1`) is otherwise invisible to the frontier and
+    // blocked-cell matching every scan below does.
+    let names = name_targets(workbook, &sheets);
     // What the next scan is looking for: cells whose value has just moved.
     // A cell that recomputed to what it already held is dropped here, because
     // nothing reading it can move either.
@@ -281,12 +285,30 @@ pub fn what_if(workbook: &Workbook, changes: &[Change], opts: &WhatIfOptions) ->
     // either rather than being handed a stale value.
     let mut blocked: FxHashMap<CellRef, String> = FxHashMap::default();
     let mut reasons: FxHashMap<String, u64> = FxHashMap::default();
+    // A dependency graph over the affected closure, built incrementally as
+    // cells are visited — `depends_on[X]` is the cells X's formula names that
+    // are already part of this closure. `order_within`'s own cycle detection
+    // only sees edges *within one level*, which is why a cycle whose members
+    // sit at different distances from the change (`B=A+C`, `C=B`) ping-pongs
+    // between levels instead of being caught: B and C are never in the same
+    // level's member set. This graph spans the whole walk, so the edge that
+    // closes such a loop is recognised the moment it is added, whichever
+    // level that happens on.
+    let mut depends_on: FxHashMap<CellRef, FxHashSet<CellRef>> = FxHashMap::default();
+    let mut depended_on_by: FxHashMap<CellRef, FxHashSet<CellRef>> = FxHashMap::default();
 
     for level in 1..=opts.max_levels {
         if frontier.is_empty() {
             break;
         }
-        let found = readers_of(workbook, &sheets, &frontier, &substituted, &mut report);
+        let found = readers_of(
+            workbook,
+            &sheets,
+            &names,
+            &frontier,
+            &substituted,
+            &mut report,
+        );
         report.scans += 1;
         if found.is_empty() {
             break;
@@ -296,7 +318,7 @@ pub fn what_if(workbook: &Workbook, changes: &[Change], opts: &WhatIfOptions) ->
         // Within one level a cell may read another: both read the frontier, and
         // one also reads the other. Ordering by dependency inside the level is
         // what keeps a cell from being computed before its input.
-        let ordered = order_within(workbook, &sheets, &found);
+        let ordered = order_within(workbook, &sheets, &names, &found);
         // What the next scan looks for: cells whose value moved here, and cells
         // that lost their answer here. Both change what reads them.
         let mut moved_here = CellSet::default();
@@ -329,8 +351,49 @@ pub fn what_if(workbook: &Workbook, changes: &[Change], opts: &WhatIfOptions) ->
                 );
                 continue;
             }
+            // A cross-level cycle: not visible to `order_within` (its edges
+            // are scoped to one level), but visible here, since the graph
+            // below spans the whole walk. Every member of the cycle is
+            // blocked together, not just `at` — a partner reached in an
+            // earlier level must not be left standing as `Moved` on a value
+            // that was never going to settle.
+            if let Some(cycle) = close_cycle(
+                &sheets,
+                at,
+                &formula,
+                &status,
+                &mut depends_on,
+                &mut depended_on_by,
+            ) {
+                for member in cycle {
+                    let (member_formula, member_a1) = match member == at {
+                        true => (formula.clone(), workbook.cite(at)),
+                        false => (
+                            workbook
+                                .sheet(member.sheet)
+                                .and_then(|s| s.get_ref(member))
+                                .and_then(|c| c.formula.clone())
+                                .unwrap_or_default(),
+                            workbook.cite(member),
+                        ),
+                    };
+                    status.insert(member, Status::Blocked);
+                    moved_here.insert(member);
+                    record_blocked(
+                        &mut impact,
+                        &mut reasons,
+                        &mut blocked,
+                        opts,
+                        member,
+                        member_a1,
+                        member_formula,
+                        Blocked::Cycle,
+                    );
+                }
+                continue;
+            }
             // A cell reading one this could not answer has no answer either.
-            if let Some(cause) = blocking_input(&sheets, at, &formula, &blocked) {
+            if let Some(cause) = blocking_input(&sheets, &names, at, &formula, &blocked) {
                 status.insert(at, Status::Blocked);
                 moved_here.insert(at);
                 record_blocked(
@@ -355,9 +418,18 @@ pub fn what_if(workbook: &Workbook, changes: &[Change], opts: &WhatIfOptions) ->
                     // workbook stores has stopped moving; the override goes
                     // back to the stored value so nothing downstream reads the
                     // one it had in between.
+                    let reverted = matches!(status.get(&at), Some(Status::Moved));
                     overrides.set(at, value);
                     evaluator.invalidate(at);
                     status.insert(at, Status::Unchanged);
+                    // A revert is still a change to the overlay: a reader that
+                    // consumed this cell's earlier, intermediate moved value
+                    // read a value that no longer stands, and must be judged
+                    // again against the reverted one — even though, from here,
+                    // this cell itself looks unchanged.
+                    if reverted {
+                        moved_here.insert(at);
+                    }
                 }
                 Outcome::Differs { computed, stored } => {
                     overrides.set(at, computed.clone());
@@ -484,6 +556,7 @@ fn record_blocked(
 /// Whether this cell reads one that has no answer, and which.
 fn blocking_input(
     sheets: &FxHashMap<String, SheetId>,
+    names: &NameTargets,
     at: CellRef,
     formula: &str,
     blocked: &FxHashMap<CellRef, String>,
@@ -491,27 +564,189 @@ fn blocking_input(
     if blocked.is_empty() {
         return None;
     }
-    let mut spans = Vec::new();
-    scan_references_into(formula, &mut spans);
-    for span in &spans {
-        if let crate::trace::Target::Cells(range) = resolve(at, span, formula, sheets).target {
-            // The overwhelmingly common reference is one cell, and answering
-            // that by hash keeps a workbook with many blocked cells from
-            // costing every one of them per reference of every formula.
-            if range.cell_count() == 1 {
-                if let Some(a1) = blocked.get(&range.top_left()) {
-                    return Some(a1.clone());
-                }
-                continue;
+    let mut ref_spans = Vec::new();
+    let mut name_spans = Vec::new();
+    let mut deps = Vec::new();
+    dependency_ranges(
+        at,
+        formula,
+        sheets,
+        names,
+        &mut ref_spans,
+        &mut name_spans,
+        &mut deps,
+    );
+    for range in deps {
+        // The overwhelmingly common reference is one cell, and answering
+        // that by hash keeps a workbook with many blocked cells from
+        // costing every one of them per reference of every formula.
+        if range.cell_count() == 1 {
+            if let Some(a1) = blocked.get(&range.top_left()) {
+                return Some(a1.clone());
             }
-            for (cell, a1) in blocked {
-                if overlaps(RangeRef::single(*cell), range) {
-                    return Some(a1.clone());
-                }
+            continue;
+        }
+        for (cell, a1) in blocked {
+            if overlaps(RangeRef::single(*cell), range) {
+                return Some(a1.clone());
             }
         }
     }
     None
+}
+
+/// Record `at`'s single-cell dependencies that are already part of the
+/// affected closure, and report the full cross-level cycle through `at` if
+/// adding them just closed one.
+///
+/// Only single-cell references are tracked — the overwhelmingly common case,
+/// and the shape the failure mode this exists for actually takes (`B=A+C`,
+/// `C=B`). A cycle mediated only through a multi-cell range is not caught
+/// here; that is a narrower, rarer gap than the one this closes; such a
+/// cycle still stops eventually, at [`Stopped::Levels`], the same as every
+/// cycle did before this fix.
+fn close_cycle(
+    sheets: &FxHashMap<String, SheetId>,
+    at: CellRef,
+    formula: &str,
+    status: &FxHashMap<CellRef, Status>,
+    depends_on: &mut FxHashMap<CellRef, FxHashSet<CellRef>>,
+    depended_on_by: &mut FxHashMap<CellRef, FxHashSet<CellRef>>,
+) -> Option<Vec<CellRef>> {
+    let mut spans = Vec::new();
+    scan_references_into(formula, &mut spans);
+    for span in &spans {
+        if let crate::trace::Target::Cells(range) = resolve(at, span, formula, sheets).target {
+            if range.cell_count() != 1 {
+                continue;
+            }
+            let dep = range.top_left();
+            if dep != at && status.contains_key(&dep) {
+                depends_on.entry(at).or_default().insert(dep);
+                depended_on_by.entry(dep).or_default().insert(at);
+            }
+        }
+    }
+
+    // `at` is in a cycle exactly when it can reach itself by following what
+    // it depends on — a path of at least one edge back to where it started.
+    let forward = reachable_beyond(depends_on, at);
+    if !forward.contains(&at) {
+        return None;
+    }
+    // The rest of the cycle is whatever is reachable both ways: downstream of
+    // `at` in `depends_on` (what `at` needs) and downstream of `at` in the
+    // reversed graph (what needs `at`) — the strongly connected component
+    // `at` sits in, not merely everything it happens to touch.
+    let backward = reachable_beyond(depended_on_by, at);
+    let mut members: Vec<CellRef> = forward.intersection(&backward).copied().collect();
+    members.sort_unstable_by_key(|c| (c.sheet.0, c.row, c.col));
+    Some(members)
+}
+
+/// Every node reachable from `start` by following at least one edge of
+/// `graph` — `start` itself only if a cycle leads back to it.
+fn reachable_beyond(
+    graph: &FxHashMap<CellRef, FxHashSet<CellRef>>,
+    start: CellRef,
+) -> FxHashSet<CellRef> {
+    let mut seen: FxHashSet<CellRef> = FxHashSet::default();
+    let mut stack: Vec<CellRef> = graph.get(&start).into_iter().flatten().copied().collect();
+    while let Some(cur) = stack.pop() {
+        if !seen.insert(cur) {
+            continue;
+        }
+        if let Some(next) = graph.get(&cur) {
+            stack.extend(next.iter().copied());
+        }
+    }
+    seen
+}
+
+/// What a defined name's own text touches, keyed the way Excel scopes names:
+/// a sheet-scoped name only under its own sheet, a workbook-scoped one under
+/// `None`.
+///
+/// Deliberately structural rather than evaluative. `Eval::defined_name`
+/// (`calc.rs`) refuses to evaluate *through* a name that stands for a formula
+/// or a constant rather than a plain reference — following it would mean
+/// evaluating a second formula in the first one's cell — and that refusal is
+/// reused here unchanged, not forked: this map exists only so the *closure
+/// walk* can tell that a formula naming `Tax_Rate` might depend on whatever
+/// `Tax_Rate`'s own text references, the same way it already tells that from
+/// an ordinary cell reference. A plain-reference name (`Tax_Rate` =
+/// `Rates!$B$4`) contributes that one cell; a formula name (`=A1+1`)
+/// contributes `A1` even though evaluating through it is still refused; a
+/// pure constant (`=1.5`) contributes nothing, correctly.
+type NameTargets = FxHashMap<(Option<SheetId>, String), Vec<RangeRef>>;
+
+fn name_targets(workbook: &Workbook, sheets: &FxHashMap<String, SheetId>) -> NameTargets {
+    let mut out: NameTargets = FxHashMap::default();
+    let mut spans: Vec<ReferenceSpan> = Vec::new();
+    for defined in &workbook.defined_names {
+        let refers_to = defined.refers_to.trim_start_matches('=');
+        // A name's own text is anchored nowhere in particular; in practice
+        // it is almost always `$`-absolute, so the anchor only matters for
+        // the rare relative one, where row/col zero of its scope sheet (or
+        // the workbook's first sheet, for a workbook-scoped name) is as
+        // defensible a guess as any — this is best-effort discovery of what
+        // the name touches, not an evaluation of it.
+        let anchor = CellRef::new(defined.scope.unwrap_or(SheetId(0)), 0, 0);
+        scan_references_into(refers_to, &mut spans);
+        let mut ranges = Vec::new();
+        for span in &spans {
+            if let crate::trace::Target::Cells(range) =
+                resolve(anchor, span, refers_to, sheets).target
+            {
+                ranges.push(range);
+            }
+        }
+        out.insert((defined.scope, defined.name.to_uppercase()), ranges);
+    }
+    out
+}
+
+/// The ranges a name token in a formula reaches, resolved the way Excel
+/// scopes names: the formula's own sheet first, then the workbook.
+fn resolve_name<'a>(
+    names: &'a NameTargets,
+    at_sheet: SheetId,
+    name: &str,
+) -> Option<&'a [RangeRef]> {
+    let upper = name.to_uppercase();
+    names
+        .get(&(Some(at_sheet), upper.clone()))
+        .or_else(|| names.get(&(None, upper)))
+        .map(Vec::as_slice)
+}
+
+/// Every range `at`'s formula depends on — by ordinary reference, and by
+/// name. A name-mediated dependency (`=Tax_Rate*A1`, `Tax_Rate` =
+/// `Rates!$B$4`) is otherwise invisible to the frontier/level/blocked-cell
+/// matching every caller below does, which is C2: a reader reached only
+/// through a name was silently reported unaffected.
+fn dependency_ranges(
+    at: CellRef,
+    formula: &str,
+    sheets: &FxHashMap<String, SheetId>,
+    names: &NameTargets,
+    ref_spans: &mut Vec<ReferenceSpan>,
+    name_spans: &mut Vec<NameSpan>,
+    out: &mut Vec<RangeRef>,
+) {
+    out.clear();
+    scan_references_into(formula, ref_spans);
+    for span in ref_spans.iter() {
+        if let crate::trace::Target::Cells(range) = resolve(at, span, formula, sheets).target {
+            out.push(range);
+        }
+    }
+    scan_names_into(formula, name_spans);
+    for name in name_spans.iter() {
+        if let Some(ranges) = resolve_name(names, at.sheet, name.text(formula)) {
+            out.extend(ranges.iter().copied());
+        }
+    }
 }
 
 /// The formula cells reading anything in `frontier`, excluding the substituted
@@ -522,12 +757,15 @@ fn blocking_input(
 fn readers_of(
     workbook: &Workbook,
     sheets: &FxHashMap<String, SheetId>,
+    names: &NameTargets,
     frontier: &CellSet,
     substituted: &FxHashSet<CellRef>,
     report: &mut ImpactReport,
 ) -> Vec<CellRef> {
     let mut out = Vec::new();
-    let mut spans: Vec<ReferenceSpan> = Vec::new();
+    let mut ref_spans: Vec<ReferenceSpan> = Vec::new();
+    let mut name_spans: Vec<NameSpan> = Vec::new();
+    let mut deps: Vec<RangeRef> = Vec::new();
     for sheet in &workbook.sheets {
         for (at, cell) in sheet.iter() {
             let Some(formula) = cell.formula.as_deref() else {
@@ -537,16 +775,17 @@ fn readers_of(
             if substituted.contains(&at) {
                 continue;
             }
-            scan_references_into(formula, &mut spans);
-            for span in &spans {
-                if let crate::trace::Target::Cells(range) =
-                    resolve(at, span, formula, sheets).target
-                {
-                    if frontier.hits(range) {
-                        out.push(at);
-                        break;
-                    }
-                }
+            dependency_ranges(
+                at,
+                formula,
+                sheets,
+                names,
+                &mut ref_spans,
+                &mut name_spans,
+                &mut deps,
+            );
+            if deps.iter().any(|&range| frontier.hits(range)) {
+                out.push(at);
             }
         }
     }
@@ -563,6 +802,7 @@ fn readers_of(
 fn order_within(
     workbook: &Workbook,
     sheets: &FxHashMap<String, SheetId>,
+    names: &NameTargets,
     cells: &[CellRef],
 ) -> Vec<(CellRef, bool)> {
     let mut members = CellSet::default();
@@ -571,7 +811,9 @@ fn order_within(
     }
     members.seal();
     let mut waits_for: FxHashMap<CellRef, Vec<CellRef>> = FxHashMap::default();
-    let mut spans: Vec<ReferenceSpan> = Vec::new();
+    let mut ref_spans: Vec<ReferenceSpan> = Vec::new();
+    let mut name_spans: Vec<NameSpan> = Vec::new();
+    let mut deps: Vec<RangeRef> = Vec::new();
 
     for &at in cells {
         let Some(formula) = workbook
@@ -581,20 +823,26 @@ fn order_within(
         else {
             continue;
         };
-        scan_references_into(formula, &mut spans);
+        dependency_ranges(
+            at,
+            formula,
+            sheets,
+            names,
+            &mut ref_spans,
+            &mut name_spans,
+            &mut deps,
+        );
         let mut inputs = Vec::new();
-        for span in &spans {
-            if let crate::trace::Target::Cells(range) = resolve(at, span, formula, sheets).target {
-                // Only cells of this level can hold this one up, and the index
-                // hands back exactly those: a reference over a million rows
-                // costs the few of them that are in the level.
-                members.for_each_in(range, |other| {
-                    if other != at {
-                        inputs.push(other);
-                    }
-                    true
-                });
-            }
+        for &range in deps.iter() {
+            // Only cells of this level can hold this one up, and the index
+            // hands back exactly those: a reference over a million rows
+            // costs the few of them that are in the level.
+            members.for_each_in(range, |other| {
+                if other != at {
+                    inputs.push(other);
+                }
+                true
+            });
         }
         if !inputs.is_empty() {
             inputs.sort_unstable_by_key(|c| (c.sheet.0, c.row, c.col));

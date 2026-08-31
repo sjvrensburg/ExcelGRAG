@@ -38,6 +38,12 @@ pub struct State {
 }
 
 impl State {
+    /// Opens (creating if absent) the corpus at `dir`. The two binary entry
+    /// points — `eg serve` and standalone `eg-mcp` — refuse a directory with
+    /// no `manifest.json` before calling this, the same guard `eg ask`/
+    /// `search`/`workbooks` apply (see `require_corpus` in `eg-cli`); this
+    /// constructor stays permissive so tests can build a `State` over a fresh
+    /// empty corpus without indexing a workbook first.
     pub fn open(dir: &str, redact_values: bool) -> Result<State, String> {
         let corpus = Corpus::open(dir).map_err(|e| format!("could not open the corpus: {e}"))?;
         let text =
@@ -111,25 +117,61 @@ impl State {
         if let Some(loaded) = self.workbooks.get(path) {
             return Ok((Arc::clone(loaded), None));
         }
-        if !Path::new(path).exists() {
-            return Err(format!(
-                "the corpus indexed {path}, and there is no file there now. \
-                 The graph remembers where a workbook was, not where it went."
-            ));
-        }
+        let resolved = self.resolve_workbook_path(path)?;
         let started = Instant::now();
         let loaded = load_with(
-            path,
+            &resolved,
             &LoadOptions {
                 max_cells: None,
                 ..Default::default()
             },
         )
-        .map_err(|e| format!("could not load {path}: {e}"))?;
+        .map_err(|e| format!("could not load {resolved}: {e}"))?;
         let seconds = started.elapsed().as_secs_f64();
         let loaded = Arc::new(loaded);
+        // Cached under the path as stored — a caller always asks by that
+        // same string, whatever location it actually resolved to.
         self.workbooks.insert(path.to_string(), Arc::clone(&loaded));
         Ok((loaded, Some(seconds)))
+    }
+
+    /// Where the stored path actually points.
+    ///
+    /// Indexing now stores an absolute path (see `eg-cli`'s `corpus::index`),
+    /// so this fallback exists for corpora indexed before that fix, or with a
+    /// relative path passed some other way. A relative path is relative to
+    /// wherever `eg index` was run — not necessarily this process's own
+    /// working directory, since the documented MCP deployment starts the
+    /// server with the *client's* cwd — so its most likely surviving location
+    /// is beside the corpus directory, or beside whatever holds that.
+    fn resolve_workbook_path(&self, path: &str) -> Result<String, String> {
+        if Path::new(path).exists() {
+            return Ok(path.to_string());
+        }
+        if Path::new(path).is_absolute() {
+            return Err(format!(
+                "the corpus indexed {path}, and there is no file there now. \
+                 The graph remembers where a workbook was, not where it went — \
+                 re-run `eg index` if it has moved."
+            ));
+        }
+        let corpus_dir = Path::new(&self.dir);
+        for candidate_dir in [Some(corpus_dir), corpus_dir.parent()]
+            .into_iter()
+            .flatten()
+        {
+            let candidate = candidate_dir.join(path);
+            if candidate.exists() {
+                return Ok(candidate.to_string_lossy().into_owned());
+            }
+        }
+        Err(format!(
+            "the corpus indexed {path} (a relative path), which resolves from \
+             neither this process's working directory nor the corpus directory. \
+             Either the file is actually gone, or this server is simply running \
+             from somewhere other than where `eg index` was run — re-index with \
+             an absolute path to fix it for good."
+        ))
     }
 
     /// Resolve a workbook the caller named, or the only one there is.
@@ -172,5 +214,74 @@ impl State {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(corpus_dir: &Path) -> State {
+        State::open(corpus_dir.to_str().unwrap(), false).expect("an empty corpus opens")
+    }
+
+    #[test]
+    fn a_relative_path_resolves_beside_the_corpus_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let corpus_dir = root.path().join("corpus");
+        std::fs::create_dir_all(&corpus_dir).unwrap();
+        // The workbook sits next to the corpus directory, the way `eg index
+        // mycorpus/ book.xlsx` leaves things when both are typed relative to
+        // the same invocation directory.
+        std::fs::write(root.path().join("book.xlsx"), b"not a real workbook").unwrap();
+
+        let state = state(&corpus_dir);
+        let resolved = state.resolve_workbook_path("book.xlsx").unwrap();
+        assert!(Path::new(&resolved).is_absolute());
+        assert!(Path::new(&resolved).exists());
+    }
+
+    #[test]
+    fn a_relative_path_resolves_inside_the_corpus_directory_too() {
+        let root = tempfile::tempdir().unwrap();
+        let corpus_dir = root.path().join("corpus");
+        std::fs::create_dir_all(&corpus_dir).unwrap();
+        std::fs::write(corpus_dir.join("book.xlsx"), b"not a real workbook").unwrap();
+
+        let state = state(&corpus_dir);
+        let resolved = state.resolve_workbook_path("book.xlsx").unwrap();
+        assert!(Path::new(&resolved).exists());
+    }
+
+    #[test]
+    fn an_absolute_path_that_is_actually_gone_says_so_without_a_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let corpus_dir = root.path().join("corpus");
+        std::fs::create_dir_all(&corpus_dir).unwrap();
+        let state = state(&corpus_dir);
+
+        let missing = root.path().join("nowhere").join("book.xlsx");
+        let err = state
+            .resolve_workbook_path(missing.to_str().unwrap())
+            .unwrap_err();
+        assert!(err.contains("there is no file there now"), "{err}");
+        assert!(!err.contains("resolves from neither"), "{err}");
+    }
+
+    #[test]
+    fn a_relative_path_that_resolves_nowhere_names_the_ambiguity() {
+        let root = tempfile::tempdir().unwrap();
+        let corpus_dir = root.path().join("corpus");
+        std::fs::create_dir_all(&corpus_dir).unwrap();
+        let state = state(&corpus_dir);
+
+        let err = state
+            .resolve_workbook_path("eg-mcp-test-fixture-that-does-not-exist-anywhere.xlsx")
+            .unwrap_err();
+        assert!(
+            err.contains("resolves from neither"),
+            "must distinguish this from a plainly-gone absolute path: {err}"
+        );
+        assert!(err.contains("re-index"), "{err}");
     }
 }

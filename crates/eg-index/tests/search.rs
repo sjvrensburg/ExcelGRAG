@@ -454,9 +454,8 @@ fn the_index_reopens_over_what_is_already_there() {
         .is_empty());
 }
 
-#[test]
-fn an_index_written_by_another_schema_is_rebuilt_rather_than_read() {
-    let root = dir("schema");
+fn a_schema_mismatch(tag: &str) -> std::path::PathBuf {
+    let root = dir(tag);
     {
         let mut index = TextIndex::open(&root).unwrap();
         let wb = sales();
@@ -473,12 +472,45 @@ fn an_index_written_by_another_schema_is_rebuilt_rather_than_read() {
     let mut other = tantivy::schema::Schema::builder();
     other.add_text_field("something-else", tantivy::schema::TEXT);
     tantivy::Index::create_in_dir(root.join("text"), other.build()).unwrap();
+    root
+}
 
-    let index = TextIndex::open(&root).unwrap();
+#[test]
+fn open_refuses_a_stale_schema_rather_than_silently_discarding_it() {
+    // `open` is what a read-only verb like `ask` calls: it must not delete
+    // yesterday's index out from under a question just because this version
+    // of `eg` writes a different schema. `open_or_reset` is the only place
+    // that decision belongs, and only the indexing path calls it.
+    let root = a_schema_mismatch("schema-readonly");
+    let before: Vec<_> = std::fs::read_dir(root.join("text"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+
+    match TextIndex::open(&root) {
+        Err(IndexError::StaleSchema { .. }) => {}
+        Ok(_) => panic!("a stale schema must be refused, not opened"),
+        Err(other) => panic!("wrong error: {other}"),
+    }
+
+    let after: Vec<_> = std::fs::read_dir(root.join("text"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        before, after,
+        "a refusal must not have touched the directory"
+    );
+}
+
+#[test]
+fn open_or_reset_rebuilds_over_a_stale_schema() {
+    let root = a_schema_mismatch("schema-reset");
+    let index = TextIndex::open_or_reset(&root).unwrap();
     assert_eq!(
         index.len().unwrap(),
         0,
-        "the stale index was read, not rebuilt"
+        "rebuilt empty, which only the indexing path may do"
     );
 }
 

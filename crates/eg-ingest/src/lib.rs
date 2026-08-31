@@ -48,12 +48,10 @@ pub enum IngestError {
     UnsupportedFormat(PathBuf),
     #[error("failed to open workbook {path}: {message}")]
     Open { path: PathBuf, message: String },
-    #[error("failed to read sheet {sheet:?}: {message}")]
-    Sheet { sheet: String, message: String },
-    #[error(
-        "stopped at {found} populated cells, over the configured limit of {limit}; \
-         raise LoadOptions::max_cells to load it anyway"
-    )]
+    // `eg` and `eg-mcp` both call in with no limit, so this is only reachable
+    // through a caller that set `LoadOptions::max_cells` itself — there is no
+    // CLI flag to name here, so the message stays limited to what happened.
+    #[error("stopped at {found} populated cells, over the configured limit of {limit}")]
     TooLarge { found: u64, limit: u64 },
     #[error("sheet count {0} exceeds the addressable maximum of 65536")]
     TooManySheets(usize),
@@ -71,6 +69,12 @@ pub struct Capabilities {
     pub declared_tables: bool,
     pub cell_styling: bool,
     pub writable: bool,
+    /// Whether `Workbook::external_links` is actually populated. calamine
+    /// exposes no external-link data for any format today, so this is
+    /// `false` everywhere — a gap that should be said out loud rather than
+    /// left for a caller to discover as an always-empty list that looks like
+    /// "this workbook links to nothing."
+    pub external_links: bool,
 }
 
 impl Capabilities {
@@ -83,6 +87,7 @@ impl Capabilities {
             // calamine exposes no styling for any format.
             cell_styling: false,
             writable: format.is_writable(),
+            external_links: false,
         }
     }
 
@@ -100,6 +105,9 @@ impl Capabilities {
         }
         if !self.writable {
             out.push("this format cannot be written back; edits stay in memory");
+        }
+        if !self.external_links {
+            out.push("links to other workbooks are not readable; external_links is always empty");
         }
         out
     }
@@ -221,11 +229,13 @@ pub fn load_with(path: impl AsRef<Path>, opts: &LoadOptions) -> Result<Loaded, I
         // back. Omitting this silently misplaces every cell on any sheet whose
         // content does not begin at A1 — which is most real sheets.
         let (value_row0, value_col0) = values.start().unwrap_or((0, 0));
+        let mut corrupt_coords = 0u32;
         for (row, col, value) in values.used_cells() {
             let (Some(row), Some(col)) = (
                 fit_row(row + value_row0 as usize),
                 fit_col(col + value_col0 as usize),
             ) else {
+                corrupt_coords += 1;
                 continue;
             };
             let (value, format) = convert::convert_value(value);
@@ -251,9 +261,31 @@ pub fn load_with(path: impl AsRef<Path>, opts: &LoadOptions) -> Result<Loaded, I
 
         if opts.read_formulas {
             match sheets.worksheet_formula(name) {
-                Ok(formulas) => attach_formulas(&mut sheet, &formulas),
+                Ok(formulas) => corrupt_coords += attach_formulas(&mut sheet, &formulas),
                 Err(e) => warnings.push(format!("no formulas for sheet {name:?}: {e}")),
             }
+            // `attach_formulas` can add cells the value loop above never saw
+            // — a formula whose cached value is blank creates a fresh entry
+            // rather than being dropped, since it is still a node in the
+            // dependency graph. Left unchecked, a sheet of such formulas
+            // could grow past `max_cells` without the budget ever firing.
+            if let Some(limit) = opts.max_cells {
+                let found = total_cells + sheet.len() as u64;
+                if found > limit {
+                    return Err(IngestError::TooLarge { found, limit });
+                }
+            }
+        }
+
+        // Corrupt-coordinate cells are dropped rather than loaded (see
+        // `fit_row`/`fit_col`), but silently is not this crate's contract for
+        // a non-fatal problem — said once per sheet, not once per cell, since
+        // a truncated or malformed file can produce a great many of them.
+        if corrupt_coords > 0 {
+            warnings.push(format!(
+                "sheet {name:?}: {corrupt_coords} cell(s) had a coordinate past Excel's \
+                 addressable range and were dropped"
+            ));
         }
 
         sheet.merges = merges.get(index).cloned().unwrap_or_default();
@@ -285,16 +317,20 @@ pub fn load_with(path: impl AsRef<Path>, opts: &LoadOptions) -> Result<Loaded, I
 /// blank — a formula evaluating to the empty string, for instance. Those cells
 /// are created here rather than dropped, because a blank-valued formula is still
 /// a node in the dependency graph.
-fn attach_formulas(sheet: &mut Sheet, formulas: &calamine::Range<String>) {
+///
+/// Returns how many formula cells had to be dropped for a corrupt coordinate.
+fn attach_formulas(sheet: &mut Sheet, formulas: &calamine::Range<String>) -> u32 {
     // As with values, these coordinates are relative to the formula range's own
     // origin, which is generally *not* the same as the value range's origin.
     let (row0, col0) = formulas.start().unwrap_or((0, 0));
+    let mut corrupt_coords = 0u32;
     for (row, col, text) in formulas.used_cells() {
         if text.is_empty() {
             continue;
         }
         let (Some(row), Some(col)) = (fit_row(row + row0 as usize), fit_col(col + col0 as usize))
         else {
+            corrupt_coords += 1;
             continue;
         };
         // calamine strips the leading '='; normalise in case a backend keeps it.
@@ -312,6 +348,7 @@ fn attach_formulas(sheet: &mut Sheet, formulas: &calamine::Range<String>) {
             }
         }
     }
+    corrupt_coords
 }
 
 /// Narrow a calamine column index to `u16`, dropping anything past XFD.
@@ -404,20 +441,34 @@ where
             continue;
         };
         let columns = table.columns().to_vec();
-        // calamine's table range covers the data body; the header row sits
-        // directly above it when the table declares one.
-        let has_header_row = !columns.is_empty();
+        // `tableColumn` names exist even for a table declared with "My table
+        // has headers" unchecked — Excel auto-names them Column1, Column2, …
+        // — so their presence says nothing about whether there is an actual
+        // header row. `headerRowCount`/`totalsRowCount`, the table's own
+        // declaration, are what calamine's fork now exposes for this.
+        let has_header_row = table.has_header_row();
+        let has_totals_row = table.has_totals_row();
+        // calamine's table range covers only the data body; the header and
+        // totals rows sit directly above and below it, one row each when
+        // declared, and are folded back in so `range` is the table's whole
+        // declared extent — the shape `Region::body()` expects, the same way
+        // it already excludes a detected title or header from its range.
         let top = if has_header_row {
             body_top.saturating_sub(1)
         } else {
             body_top
+        };
+        let bottom = if has_totals_row {
+            bottom.saturating_add(1).min(eg_model::MAX_ROW)
+        } else {
+            bottom
         };
         out[i].push(ExcelTable {
             name: table.name().to_string(),
             range: RangeRef::new(SheetId(i as u16), top, left, bottom, right),
             columns,
             has_header_row,
-            has_totals_row: false,
+            has_totals_row,
         });
     }
     out
@@ -487,9 +538,51 @@ mod tests {
     }
 
     #[test]
+    fn external_links_are_disclosed_as_a_gap_not_left_silent() {
+        // L22: `Workbook::external_links` is always empty — calamine never
+        // populates it — and that used to be undisclosed, reading exactly
+        // like "this workbook links to nothing" instead of "this reader
+        // cannot tell you."
+        for f in [
+            WorkbookFormat::Xlsx,
+            WorkbookFormat::Xlsm,
+            WorkbookFormat::Xlsb,
+            WorkbookFormat::Xls,
+            WorkbookFormat::Ods,
+        ] {
+            let caps = Capabilities::for_format(f);
+            assert!(!caps.external_links, "{f}");
+            assert!(
+                caps.limitations().iter().any(|n| n.contains("external")),
+                "{f}"
+            );
+        }
+    }
+
+    #[test]
     fn unsupported_extensions_are_rejected() {
         let err = load("nope.csv").unwrap_err();
         assert!(matches!(err, IngestError::UnsupportedFormat(_)));
+    }
+
+    #[test]
+    fn corrupt_formula_coordinates_are_counted_not_silently_dropped() {
+        // L22: a formula landing past Excel's addressable range (calamine's
+        // own coordinates are wider than that, so this is reachable without
+        // a hand-corrupted file) used to vanish with no trace at all.
+        let cells = vec![
+            calamine::Cell::new((0u32, 0u32), "A1".to_string()),
+            calamine::Cell::new((0u32, 100_000u32), "OUT".to_string()),
+        ];
+        let formulas = calamine::Range::from_sparse(cells);
+        let mut sheet = Sheet::new(SheetId(0), "Sheet1");
+        let dropped = attach_formulas(&mut sheet, &formulas);
+        assert_eq!(dropped, 1, "the out-of-range formula cell is counted");
+        assert_eq!(
+            sheet.get(0, 0).and_then(|c| c.formula.as_deref()),
+            Some("A1"),
+            "the in-range one still lands"
+        );
     }
 
     #[test]

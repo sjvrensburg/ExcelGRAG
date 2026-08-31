@@ -2,21 +2,23 @@
 //!
 //! Usage: `eg-mcp <corpus-dir> [--redact-values]`
 //!
-//! The corpus is the directory built by `eg-graph`'s `corpus` example and
-//! indexed by `eg-index`; it holds the graphs and the search indexes. Workbooks
-//! themselves are opened lazily, from the paths the corpus recorded, and only
-//! when a tool needs cells.
+//! The corpus is a directory built by `eg index` (see the `eg-cli` crate); it
+//! holds the graphs and the search indexes. Workbooks themselves are opened
+//! lazily, from the paths the corpus recorded, and only when a tool needs
+//! cells.
 //!
 //! ```sh
-//! cargo run --release -p eg-graph --example corpus -- index private/book.xlsb
-//! cargo run --release -p eg-index --example semantic -- index warm up the indexes
-//! cargo run --release -p eg-mcp -- index
+//! cargo run --release -p eg-cli -- index corpus/ book.xlsb
+//! cargo run --release -p eg-mcp -- corpus/
 //! ```
+//!
+//! (`eg serve corpus/` runs the same server as a subcommand of `eg`, without a
+//! second binary.)
 //!
 //! Then, from a client:
 //!
 //! ```sh
-//! claude mcp add excelgrag -- /path/to/eg-mcp /path/to/index
+//! claude mcp add excelgrag -- /path/to/eg-mcp /path/to/corpus
 //! ```
 //!
 //! **stdout belongs to the protocol.** Every diagnostic goes to stderr; one
@@ -54,6 +56,16 @@ fn main() {
         eprintln!("eg-mcp: no corpus directory\n{USAGE}");
         std::process::exit(2);
     };
+
+    // A read-only entry point: refuse a typo'd or never-indexed directory
+    // rather than materializing an empty corpus and serving NOTHING MATCHED
+    // for every question. Only `eg index` should ever create one.
+    if !std::path::Path::new(&dir).join("manifest.json").exists() {
+        eprintln!(
+            "eg-mcp: no corpus at {dir} (no manifest.json) — run `eg index {dir} <workbook>` first"
+        );
+        std::process::exit(1);
+    }
 
     let state = match State::open(&dir, redact_values) {
         Ok(state) => state,

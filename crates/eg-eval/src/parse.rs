@@ -365,7 +365,14 @@ impl<'a> Parser<'a> {
     fn error_literal(&mut self) -> Result<ErrorKind, ParseError> {
         let rest = &self.src[self.pos..];
         for literal in ERROR_LITERALS {
-            if rest.len() >= literal.len() && rest[..literal.len()].eq_ignore_ascii_case(literal) {
+            // `rest.get(..n)` rather than `rest[..n]`: every literal is ASCII,
+            // but `rest` need not be — a multibyte character early in the
+            // text can put `literal.len()` mid-character, and a byte slice at
+            // a non-boundary panics rather than just failing to match.
+            if rest
+                .get(..literal.len())
+                .is_some_and(|c| c.eq_ignore_ascii_case(literal))
+            {
                 self.pos += literal.len();
                 return Ok(ErrorKind::parse(literal).expect("literal table matches ErrorKind"));
             }

@@ -325,6 +325,13 @@ fn read(
                 None => true,
                 Some(Expr::Literal(eg_model::CellValue::Bool(b))) => *b,
                 Some(Expr::Literal(eg_model::CellValue::Number(n))) => *n != 0.0,
+                // Written but empty (`VLOOKUP(x,tbl,2,)`) coerces to 0/FALSE
+                // like any other empty argument — exact, not the default —
+                // the same distinction `calc.rs`'s evaluator makes. Without
+                // this, such a call fell to `Unrecognised` below and the
+                // declared key it names was dropped from schema inference
+                // entirely.
+                Some(Expr::Literal(eg_model::CellValue::Empty)) => false,
                 Some(_) => return Outcome::Unrecognised,
             };
             let vertical = call.name == "VLOOKUP";
@@ -379,8 +386,14 @@ fn read(
                 None => return Outcome::Unrecognised,
             };
             // A MATCH type of 0 is exact; anything else, or nothing, is a
-            // banding over sorted keys.
-            let approximate = !matches!(literal(inner.get(2)), Some(t) if t == 0.0);
+            // banding over sorted keys. A written-but-empty argument
+            // (`MATCH(k,r,)`) coerces to 0 like any other empty argument —
+            // exact — which is not what an omitted one means.
+            let approximate = match inner.get(2) {
+                None => true,
+                Some(Expr::Literal(eg_model::CellValue::Empty)) => false,
+                Some(expr) => !matches!(literal(Some(expr)), Some(t) if t == 0.0),
+            };
             Outcome::Found(Lookup {
                 from,
                 key: key_column(range(inner.first()), from),
