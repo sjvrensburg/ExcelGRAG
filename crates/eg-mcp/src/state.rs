@@ -34,6 +34,14 @@ pub struct State {
     /// `None` once loading has failed, so a machine that cannot reach the model
     /// is told once and then searches by word without trying again.
     embedder_failed: bool,
+    /// The vectors, held like everything else here.
+    ///
+    /// `VectorIndex::open` reads every `.json` and `.f32` file under
+    /// `vectors/` into memory — 56 MB on a fifty-workbook corpus — so opening
+    /// one per question undid the point of a long-running server. Held for the
+    /// same reason the corpus and the lexical index are, and stale in the same
+    /// way: a re-index while the server runs is picked up by restarting it.
+    vectors: Option<VectorIndex>,
     workbooks: HashMap<String, Arc<Loaded>>,
 }
 
@@ -55,6 +63,7 @@ impl State {
             redact_values,
             embedder: None,
             embedder_failed: false,
+            vectors: None,
             workbooks: HashMap::new(),
         })
     }
@@ -64,25 +73,12 @@ impl State {
     /// Returns `None` rather than an error: a corpus with no vectors, or a
     /// machine that cannot reach the model, still answers questions by word,
     /// and saying so once is more useful than failing every call.
-    pub fn semantic(&mut self) -> Option<(&mut Embedder, VectorIndex)> {
-        if self.embedder_failed {
-            return None;
+    pub fn semantic(&mut self) -> Option<(&mut Embedder, &VectorIndex)> {
+        self.load_semantic();
+        match (self.embedder.as_mut(), self.vectors.as_ref()) {
+            (Some(embedder), Some(vectors)) if !vectors.is_empty() => Some((embedder, vectors)),
+            _ => None,
         }
-        if self.embedder.is_none() {
-            match Embedder::new() {
-                Ok(embedder) => self.embedder = Some(embedder),
-                Err(_) => {
-                    self.embedder_failed = true;
-                    return None;
-                }
-            }
-        }
-        let embedder = self.embedder.as_mut()?;
-        let vectors = VectorIndex::open(&self.dir, embedder.name(), embedder.dim()).ok()?;
-        if vectors.is_empty() {
-            return None;
-        }
-        Some((embedder, vectors))
     }
 
     /// Both indexes at once, for a search that needs them together.
@@ -90,23 +86,36 @@ impl State {
     /// `semantic` borrows all of `self`, so a caller cannot hold it and reach
     /// for `text` as well. Handing back both from one call is what lets the
     /// search live in `eg-retrieve` rather than being copied in here.
-    pub fn halves(&mut self) -> (&TextIndex, Option<(&mut Embedder, VectorIndex)>) {
-        if !self.embedder_failed && self.embedder.is_none() {
-            match Embedder::new() {
-                Ok(embedder) => self.embedder = Some(embedder),
-                Err(_) => self.embedder_failed = true,
-            }
-        }
-        let semantic = match (self.embedder_failed, self.embedder.as_mut()) {
-            (false, Some(embedder)) => {
-                match VectorIndex::open(&self.dir, embedder.name(), embedder.dim()) {
-                    Ok(vectors) if !vectors.is_empty() => Some((embedder, vectors)),
-                    _ => None,
-                }
-            }
+    pub fn halves(&mut self) -> (&TextIndex, Option<(&mut Embedder, &VectorIndex)>) {
+        self.load_semantic();
+        // Two disjoint fields, so `text` stays readable beside a mutable
+        // borrow of the embedder.
+        let semantic = match (self.embedder.as_mut(), self.vectors.as_ref()) {
+            (Some(embedder), Some(vectors)) if !vectors.is_empty() => Some((embedder, vectors)),
             _ => None,
         };
         (&self.text, semantic)
+    }
+
+    /// Load the model and the vectors, once each, and remember a failure.
+    fn load_semantic(&mut self) {
+        if self.embedder_failed {
+            return;
+        }
+        if self.embedder.is_none() {
+            match Embedder::new() {
+                Ok(embedder) => self.embedder = Some(embedder),
+                Err(_) => {
+                    self.embedder_failed = true;
+                    return;
+                }
+            }
+        }
+        if self.vectors.is_none() {
+            if let Some(embedder) = self.embedder.as_ref() {
+                self.vectors = VectorIndex::open(&self.dir, embedder.name(), embedder.dim()).ok();
+            }
+        }
     }
 
     /// A workbook, loaded if this is the first time it has been asked for.

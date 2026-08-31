@@ -170,7 +170,13 @@ impl RangeRef {
             .then(|| RangeRef::new(self.sheet, top, left, bottom, right))
     }
 
-    /// Smallest range covering both operands. Panics if they are on different sheets.
+    /// Smallest range covering both operands.
+    ///
+    /// Debug-asserts that both are on one sheet — a union across sheets is
+    /// meaningless — but does *not* panic in release, where the result simply
+    /// takes `self`'s sheet. The doc comment used to promise a panic the code
+    /// never delivered outside a debug build, which is the worse of the two
+    /// mistakes: a caller reading it would skip a check of its own.
     pub fn union(&self, other: &RangeRef) -> RangeRef {
         debug_assert_eq!(self.sheet, other.sheet, "cannot union ranges across sheets");
         RangeRef {

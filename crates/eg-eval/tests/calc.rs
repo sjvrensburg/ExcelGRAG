@@ -975,3 +975,31 @@ fn a_multibyte_character_near_an_error_literals_length_does_not_panic() {
     // non-ASCII text must still be refused rather than panicking either.
     assert!(parse("#REF!Ü").is_err());
 }
+
+#[test]
+fn a_multibyte_character_after_a_comparison_operator_does_not_panic() {
+    // The same trap as the error-literal one just above, in the other place
+    // the lexer looked two bytes ahead: `<`/`>` peeked at a two-byte *string*
+    // slice to spot `<=`, `>=` and `<>`, and `pos + 2` lands inside the
+    // character when a non-ASCII one follows the operator. A comparison
+    // against a defined name that does not begin with an ASCII letter is
+    // ordinary in a non-English workbook, and a panic here takes down a whole
+    // `eg check` sweep — or the MCP server process — on one formula.
+    // A non-ASCII identifier is a construct this parser does not read, so the
+    // honest answer is a refusal — the point here is that it *is* a refusal
+    // and not a panic.
+    assert!(parse("A1<Ähnlich").is_err(), "refused, not a crash");
+    assert!(parse("A1>Ürün").is_err());
+    // The two-byte operators must still lex as two-byte operators.
+    for (text, expect) in [("1<=2", true), ("1>=2", false), ("1<>2", true)] {
+        let wb = eg_model::Workbook {
+            sheets: vec![eg_model::Sheet::new(SheetId(0), "S")],
+            ..Default::default()
+        };
+        assert_eq!(
+            evaluate(&wb, CellRef::new(SheetId(0), 0, 0), text).unwrap(),
+            CellValue::Bool(expect),
+            "{text}"
+        );
+    }
+}

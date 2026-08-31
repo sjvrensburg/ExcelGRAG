@@ -541,3 +541,28 @@ fn a_graph_out_of_the_corpus_indexes_the_same_as_a_fresh_one() -> Result<(), Ind
     assert_eq!(hits[0].sheet.as_deref(), Some("Q3 Sales"));
     Ok(())
 }
+
+#[test]
+fn a_read_only_index_does_not_hold_the_writer_lock() -> Result<(), IndexError> {
+    // Every read path opens a `TextIndex`: `eg ask`, `eg search`, and `eg
+    // serve`, which holds one for as long as the server runs. Opening the
+    // writer eagerly reserved 64 MB of indexing arena and took tantivy's
+    // exclusive directory lock for each of them, so a running server locked
+    // the corpus against `eg index` — and against a second reader.
+    let (root, mut writer) = indexed("readonly-lock", &[sales()]);
+
+    let reader = TextIndex::open(&root)?;
+    let another = TextIndex::open(&root)?;
+    assert!(!reader
+        .search("revenue", &SearchOptions::default())?
+        .is_empty());
+    assert!(!another
+        .search("revenue", &SearchOptions::default())?
+        .is_empty());
+
+    // And a write still works while those two readers are open, because
+    // neither of them ever asked for the lock.
+    writer.forget("hash-sales")?;
+    assert!(TextIndex::open(&root)?.is_empty()?);
+    Ok(())
+}

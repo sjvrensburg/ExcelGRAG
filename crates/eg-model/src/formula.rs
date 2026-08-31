@@ -683,6 +683,18 @@ pub fn redact_formula_literals(formula: &str) -> String {
                 out.push_str("<text>");
                 i = end;
             }
+            // A single-quoted span is sheet-name quoting, not a literal, and
+            // is copied through whole. Walking into it a character at a time
+            // instead put `<number>` over the digits of a sheet called
+            // `'Q3 2024'` — every quoted sheet name the reference scanner did
+            // *not* claim, which is every one qualifying a defined name
+            // (`'Q3 2024'!Tax_Rate`) rather than a cell. That is not
+            // redaction, it is a citation the reader can no longer follow.
+            b'\'' => {
+                let end = skip_quoted(b, i, b'\'');
+                out.push_str(&formula[i..end]);
+                i = end;
+            }
             _ if starts_number => {
                 let end = scan_number_literal(b, i);
                 out.push_str("<number>");
@@ -1212,6 +1224,22 @@ mod tests {
         assert_eq!(
             redact_formula_literals("A1&\"say \"\"hi\"\"\""),
             "A1&<text>"
+        );
+    }
+
+    #[test]
+    fn redaction_leaves_a_quoted_sheet_name_alone_even_when_no_reference_follows() {
+        // `'Q3 2024'!Tax_Rate` qualifies a *name*, so the reference scanner
+        // claims none of it — and the redactor then walked the quoted span a
+        // character at a time and turned the year into `<number>`, leaving a
+        // sheet name no reader could follow back.
+        assert_eq!(
+            redact_formula_literals("'Q3 2024'!Tax_Rate*2"),
+            "'Q3 2024'!Tax_Rate*<number>"
+        );
+        assert_eq!(
+            redact_formula_literals("SUM('Sheet 1'!A1:A9)*3"),
+            "SUM('Sheet 1'!A1:A9)*<number>"
         );
     }
 

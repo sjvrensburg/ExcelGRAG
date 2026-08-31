@@ -136,13 +136,18 @@ pub fn shown(n: f64) -> f64 {
     }
 }
 
-/// Render a float the way a spreadsheet would: no trailing `.0` on integers.
+/// Render a float the way a spreadsheet would: no trailing `.0` on integers,
+/// and through [`shown`] rather than Rust's shortest round-trip form.
+///
+/// The rounding is not cosmetic. `to_display` is what text coercion goes
+/// through — `=A1&""`, `CONCATENATE`, a query's group key — so an unrounded
+/// double put `0.30000000000000004` where Excel stored `0.3`, which a
+/// recompute then reported as a disagreement about a formula that was right.
 fn format_number(n: f64) -> String {
     if n.is_finite() && n.fract() == 0.0 && n.abs() < 1e15 {
         format!("{}", n as i64)
     } else {
-        let s = format!("{n}");
-        s
+        format!("{}", shown(n))
     }
 }
 
@@ -274,6 +279,21 @@ mod tests {
         assert_eq!(CellValue::Number(-7.0).to_display(), "-7");
         assert_eq!(CellValue::Number(1.5).to_display(), "1.5");
         assert_eq!(CellValue::Number(0.0).to_display(), "0");
+    }
+
+    #[test]
+    fn a_number_displays_at_the_precision_a_sheet_carries() {
+        // `to_display` is what text coercion goes through, so Rust's shortest
+        // round-trip form here put `0.30000000000000004` where the sheet
+        // shows `0.3` — and a recompute of `=A1&""` then read as a
+        // disagreement about a formula that was right.
+        assert_eq!(CellValue::Number(0.1 + 0.2).to_display(), "0.3");
+        assert_eq!(CellValue::Number(10.13 + 6.75).to_display(), "16.88");
+        // And a number that needs its digits keeps every one of them.
+        assert_eq!(
+            CellValue::Number(1.0 / 3.0).to_display(),
+            "0.333333333333333"
+        );
     }
 
     #[test]

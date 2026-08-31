@@ -212,7 +212,14 @@ impl Search {
         // the depth cap before finding the top result, so absence there
         // proves nothing). Only a confirmed miss may downgrade the verdict —
         // an all-`uncertain` empty `covered` is unresolved, not `Blind`.
-        let confirmed_miss = self.matched.len() - self.covered.len() - self.uncertain.len();
+        // Saturating: `covered` and `uncertain` are disjoint subsets of
+        // `matched` when `coverage` built them, but every field here is
+        // public, and a plain subtraction turns a caller-built `Search` into
+        // a panic in an advisory that exists to be read rather than trusted.
+        let confirmed_miss = self
+            .matched
+            .len()
+            .saturating_sub(self.covered.len() + self.uncertain.len());
         if self.covered.is_empty() {
             return if confirmed_miss > 0 || self.matched.is_empty() {
                 Verdict::Blind

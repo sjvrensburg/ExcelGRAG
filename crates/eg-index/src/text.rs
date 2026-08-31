@@ -233,7 +233,15 @@ pub struct TextIndex {
     dir: PathBuf,
     index: Index,
     fields: Fields,
-    writer: IndexWriter,
+    /// Opened on the first write, never at [`TextIndex::open`].
+    ///
+    /// Creating one reserves [`WRITER_HEAP`] *and* takes tantivy's exclusive
+    /// directory lock, and every read path here opens a `TextIndex` — `eg
+    /// ask`, `eg search`, and `eg serve`, which holds one for its whole life.
+    /// Opening it eagerly meant a question cost 64 MB of indexing arena and
+    /// locked the corpus against a concurrent `eg index`, or against a second
+    /// question, for work no read ever does.
+    writer: Option<IndexWriter>,
 }
 
 impl TextIndex {
@@ -300,17 +308,24 @@ impl TextIndex {
         // searched with another matches nothing, and says nothing about it.
         index.tokenizers().register(TOKENIZER, analyzer());
 
-        let writer = index.writer(WRITER_HEAP).map_err(tantivy_err(format!(
-            "opening a writer on {}",
-            dir.display()
-        )))?;
-
         Ok(TextIndex {
             dir,
             index,
             fields,
-            writer,
+            writer: None,
         })
+    }
+
+    /// The writer, opened on first use. See the field's own note for why not
+    /// at `open`.
+    fn writer(&mut self) -> Result<&mut IndexWriter, IndexError> {
+        if self.writer.is_none() {
+            self.writer = Some(self.index.writer(WRITER_HEAP).map_err(tantivy_err(format!(
+                "opening a writer on {}",
+                self.dir.display()
+            )))?);
+        }
+        Ok(self.writer.as_mut().expect("just opened"))
     }
 
     /// Where the index sits on disk.
@@ -376,28 +391,32 @@ impl TextIndex {
         content_hash: &str,
         path: &str,
     ) -> Result<usize, IndexError> {
+        // `Fields` is `Copy`, so the field handles are taken before the writer
+        // borrow rather than reached for through `&self` inside it.
+        let fields = self.fields;
+        let docs = docs_for(graph);
+        let writer = self.writer()?;
         // Delete first, in the same commit as the insert: a workbook rebuilt
         // with formula groups has more nodes than one without, and adding over
         // the old documents would leave the surplus behind as hits pointing at
         // node indices that no longer mean what they did.
-        self.writer
-            .delete_term(Term::from_field_text(self.fields.hash, content_hash));
+        writer.delete_term(Term::from_field_text(fields.hash, content_hash));
 
-        let docs = docs_for(graph);
         for doc in &docs {
-            self.writer
-                .add_document(self.to_tantivy(doc, content_hash, path))
+            writer
+                .add_document(to_tantivy(fields, doc, content_hash, path))
                 .map_err(tantivy_err("adding a document"))?;
         }
-        self.writer.commit().map_err(tantivy_err("committing"))?;
+        writer.commit().map_err(tantivy_err("committing"))?;
         Ok(docs.len())
     }
 
     /// Drop a workbook from the index.
     pub fn forget(&mut self, content_hash: &str) -> Result<(), IndexError> {
-        self.writer
-            .delete_term(Term::from_field_text(self.fields.hash, content_hash));
-        self.writer.commit().map_err(tantivy_err("committing"))?;
+        let hash = self.fields.hash;
+        let writer = self.writer()?;
+        writer.delete_term(Term::from_field_text(hash, content_hash));
+        writer.commit().map_err(tantivy_err("committing"))?;
         Ok(())
     }
 
@@ -484,26 +503,6 @@ impl TextIndex {
         ))
     }
 
-    fn to_tantivy(&self, doc: &NodeDoc, content_hash: &str, path: &str) -> TantivyDocument {
-        let f = self.fields;
-        let mut out = TantivyDocument::new();
-        out.add_text(f.hash, content_hash);
-        out.add_text(f.path, path);
-        out.add_u64(f.node, doc.node as u64);
-        out.add_text(f.kind, doc.kind.as_str());
-        if let Some(sheet) = &doc.sheet {
-            out.add_text(f.sheet, sheet);
-        }
-        if let Some(a1) = &doc.a1 {
-            out.add_text(f.a1, a1);
-        }
-        out.add_text(f.label, &doc.label);
-        out.add_text(f.context, &doc.context);
-        out.add_text(f.body, &doc.body);
-        out.add_u64(f.cells, doc.cells);
-        out
-    }
-
     /// A stored document back into a hit.
     ///
     /// `None` when a required field is missing or unrecognised, which can only
@@ -524,6 +523,29 @@ impl TextIndex {
             a1: text(f.a1).map(str::to_string),
         })
     }
+}
+
+/// One flattened node as a tantivy document.
+///
+/// A free function taking the (`Copy`) field handles rather than a method, so
+/// it can be called while the writer is borrowed out of the same index.
+fn to_tantivy(f: Fields, doc: &NodeDoc, content_hash: &str, path: &str) -> TantivyDocument {
+    let mut out = TantivyDocument::new();
+    out.add_text(f.hash, content_hash);
+    out.add_text(f.path, path);
+    out.add_u64(f.node, doc.node as u64);
+    out.add_text(f.kind, doc.kind.as_str());
+    if let Some(sheet) = &doc.sheet {
+        out.add_text(f.sheet, sheet);
+    }
+    if let Some(a1) = &doc.a1 {
+        out.add_text(f.a1, a1);
+    }
+    out.add_text(f.label, &doc.label);
+    out.add_text(f.context, &doc.context);
+    out.add_text(f.body, &doc.body);
+    out.add_u64(f.cells, doc.cells);
+    out
 }
 
 /// Weight a text score by how many cells the node stands for.

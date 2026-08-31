@@ -128,11 +128,19 @@ pub fn trace(path: &str, citation: &str, dependents: bool, limit: usize) -> Resu
     }
 
     println!("{} reads", workbook.cite_range(range));
+    // Clipped to the sheet's used range: `iter_range` probes the ordered map
+    // once per row of the range's *height*, so an unclipped whole-column
+    // citation (`Sheet1!A:A`, which `parse_a1` accepts) costs 1,048,576 probes
+    // to find whatever handful of formulas is really there. `cells_in`, which
+    // `eg cells` uses, already clips for exactly this reason.
+    let sheet = workbook.sheet(range.sheet);
+    let clipped = sheet
+        .and_then(|s| s.used_range())
+        .and_then(|used| range.intersection(&used));
     let mut printed = 0;
-    for (cell, contents) in workbook
-        .sheet(range.sheet)
+    for (cell, contents) in sheet
         .into_iter()
-        .flat_map(|sheet| sheet.iter_range(range))
+        .flat_map(move |s| clipped.into_iter().flat_map(move |r| s.iter_range(r)))
     {
         if contents.formula.is_none() {
             continue;
