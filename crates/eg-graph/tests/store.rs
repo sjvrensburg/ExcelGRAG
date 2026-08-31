@@ -1,6 +1,6 @@
 //! Storing and reloading a workbook graph.
 
-use eg_graph::store::{Corpus, FORMAT_VERSION};
+use eg_graph::store::{Corpus, StoreError, FORMAT_VERSION};
 use eg_graph::{build, EdgeKind, NodeKind};
 use eg_model::{Cell, CellValue, Sheet, SheetId, Workbook, WorkbookFormat};
 
@@ -481,4 +481,32 @@ fn a_corpus_written_before_profiles_existed_still_opens() {
     assert_eq!(entry.1.profiled_columns, 0);
     assert!(!entry.1.profile_values);
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn profiles_for_a_workbook_the_corpus_does_not_hold_are_refused_not_orphaned() {
+    // The manifest is the corpus: `profiles` reads through it, and so does
+    // `forget`. A profiles file written for a hash the manifest does not list
+    // could never be read back and would never be cleaned up — and this is the
+    // one file the store writes that carries the workbook's own values, which
+    // is the last thing to leave lying in a directory nobody is tracking.
+    let root = dir();
+    let mut corpus = Corpus::open(&root).unwrap();
+
+    let profiles = eg_structure::Profiles {
+        columns: Vec::new(),
+        values: true,
+    };
+    let err = corpus
+        .put_profiles("never-stored", "book.xlsx", &profiles)
+        .unwrap_err();
+    assert!(
+        matches!(&err, StoreError::NotInCorpus { content_hash } if content_hash == "never-stored"),
+        "{err}"
+    );
+    assert!(
+        !corpus.profiles_path("never-stored").exists(),
+        "refused before anything was written, not after"
+    );
+    assert_eq!(corpus.profiles("never-stored").unwrap(), None);
 }
