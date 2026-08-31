@@ -1,7 +1,7 @@
 //! Keeping the vectors, and searching them by brute force.
 //!
 //! The measurement decides this, as it did for the graph store. The nodes worth
-//! embedding — sheets, tables, columns, defined names — are **732 on the
+//! embedding — sheets, tables, columns, defined names — are **735 on the
 //! reference workbook**, and at 384 dimensions that is 1.07 MiB of `f32`. Fifty
 //! such workbooks are 36,600 vectors and 56 MB: a full scan is 14 million
 //! multiply-adds, well under a millisecond, and it is exact. An approximate
@@ -14,11 +14,15 @@
 //! millions of vectors where that stops being true, the thing to do is measure
 //! again.
 //!
-//! **Formula groups are not embedded.** 463,570 of them on the reference
-//! workbook: 713 MB of vectors, hours of model time, to make near-identical
-//! formula text searchable by meaning. A formula is exact-token text, which is
-//! what the lexical index is already good at. [`embeddable`] is where that
-//! choice lives.
+//! **Formula groups are not embedded**, even though they are now stored and
+//! indexed lexically. The old reason was volume — 463,570 groups, 713 MB of
+//! vectors — and that number came from a workbook read before the calamine
+//! fixes; read correctly it is 1,272, which would embed in seconds. The reason
+//! that survives the correction is the one about the text: a formula is
+//! exact tokens, and `=IF(AND(F4>0,G4<1),H4*I4,0)` is not a sentence whose
+//! meaning a sentence embedding captures. Asking for it by name is a lexical
+//! query, and the lexical index already has every group in it.
+//! [`embeddable`] is where that choice lives.
 //!
 //! Two files per workbook: the metadata as JSON, and the vectors as raw
 //! little-endian `f32`. JSON for the numbers would be ten times the size and

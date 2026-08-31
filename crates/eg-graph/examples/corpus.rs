@@ -1,6 +1,8 @@
 //! Index workbooks into a corpus, and report what storing bought.
 //!
-//! Usage: `corpus <dir> <workbook>...` to index, `corpus <dir>` to list.
+//! Usage: `corpus [--groups] <dir> <workbook>...` to index, `corpus <dir>` to
+//! list. `--groups` stores the formula-group layer too, so the cost of keeping
+//! it can be measured rather than argued about.
 //!
 //! Reports counts, sizes and timings, plus sheet and region names. Never cell
 //! contents, so it is safe against a confidential workbook.
@@ -16,9 +18,17 @@ use eg_graph::{build_with, GraphOptions};
 use eg_ingest::{load_with, LoadOptions};
 
 fn main() {
-    let mut args = std::env::args().skip(1);
+    let mut groups = false;
+    let mut positional: Vec<String> = Vec::new();
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--groups" => groups = true,
+            _ => positional.push(arg),
+        }
+    }
+    let mut args = positional.into_iter();
     let Some(dir) = args.next() else {
-        eprintln!("usage: corpus <dir> <workbook>...");
+        eprintln!("usage: corpus [--groups] <dir> <workbook>...");
         std::process::exit(2);
     };
     let workbooks: Vec<String> = args.collect();
@@ -32,7 +42,7 @@ fn main() {
     };
 
     for path in &workbooks {
-        index(&mut corpus, path);
+        index(&mut corpus, path, groups);
     }
 
     println!("\ncorpus at {dir}: {} workbook(s)", corpus.len());
@@ -58,7 +68,7 @@ fn main() {
     }
 }
 
-fn index(corpus: &mut Corpus, path: &str) {
+fn index(corpus: &mut Corpus, path: &str, groups: bool) {
     let opts = LoadOptions {
         max_cells: None,
         ..Default::default()
@@ -75,13 +85,13 @@ fn index(corpus: &mut Corpus, path: &str) {
     let load_time = cold.elapsed();
     let hash = loaded.workbook.content_hash.clone();
 
-    // Only the region-level graph is stored. Formula groups are 464,131 nodes
-    // and 119 MiB on the reference workbook, and are wanted only when drilling
-    // into one workbook — at which point they are rebuilt from the file.
+    // The region-level graph is what the corpus stores by default; the formula
+    // groups are rebuilt from the file when something drills into one workbook.
+    // Whether that is still the right trade is what `--groups` measures.
     let built = build_with(
         &loaded.workbook,
         &GraphOptions {
-            formula_group_nodes: false,
+            formula_group_nodes: groups,
             ..Default::default()
         },
     );
@@ -92,7 +102,7 @@ fn index(corpus: &mut Corpus, path: &str) {
         path,
         loaded.workbook.sheets.len(),
         loaded.workbook.total_cells() as u64,
-        false,
+        groups,
         &built,
     ) {
         eprintln!("could not store {path}: {e}");
@@ -144,11 +154,25 @@ fn index(corpus: &mut Corpus, path: &str) {
         load_time.as_secs_f64(),
         (cold_total - load_time).as_secs_f64()
     );
+    if let Some(bytes) = stored_bytes(corpus, &hash) {
+        println!(
+            "  stored {:.1} KB of JSON{}",
+            bytes as f64 / 1024.0,
+            if groups { " (with formula groups)" } else { "" }
+        );
+    }
     println!(
         "  warm   {:.2}ms reload from the store — {:.0}x faster",
         warm_time.as_secs_f64() * 1000.0,
         cold_total.as_secs_f64() / warm_time.as_secs_f64().max(1e-9)
     );
+}
+
+/// The size on disk of one stored graph, for comparing what a layer costs.
+fn stored_bytes(corpus: &Corpus, hash: &str) -> Option<u64> {
+    std::fs::metadata(corpus.graph_path(hash))
+        .ok()
+        .map(|m| m.len())
 }
 
 fn tail(s: &str, n: usize) -> String {

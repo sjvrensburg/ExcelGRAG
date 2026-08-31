@@ -49,10 +49,11 @@ pub struct GraphOptions {
     pub regions: RegionOptions,
     /// Give every formula group its own node.
     ///
-    /// On the reference workbook that is 464,131 nodes against 168 regions, so
-    /// turning it off is the difference between a graph shaped like a workbook
-    /// and one shaped like a spreadsheet. Dependency lifting is unaffected
-    /// either way: it reads formula cells directly, not group nodes.
+    /// On the reference workbook that is 1,272 nodes against 168 regions — the
+    /// difference between a graph shaped like a workbook and one shaped like a
+    /// spreadsheet, at a cost small enough that the corpus now stores it.
+    /// Dependency lifting is unaffected either way: it reads formula cells
+    /// directly, not group nodes.
     pub formula_group_nodes: bool,
     /// Keep at most this many unresolved references as worked examples. The
     /// counts are exact regardless; only the examples are capped, because a

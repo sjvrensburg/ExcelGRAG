@@ -64,9 +64,16 @@ A filled-down column is one idea written ten thousand times. `eg-structure`
 collapses it to a single node by normalising each formula to an R1C1 *shape*, so
 the graph is built over groups rather than cells.
 
-On a real 170 MB workbook: **6,793,166 formula cells become 464,131 groups**
-(14.6x), in 10s, with one group covering 575,005 cells. It also finds cells that
-break a pattern — the classic hand-edited row in an otherwise uniform column.
+On a real 170 MB workbook: **6,793,166 formula cells become 1,272 groups**
+(5,340x), in 11s, with one group covering 690,018 cells and only 724 formulas
+one-off. It also finds cells that break a pattern — the classic hand-edited row
+in an otherwise uniform column, 401 of them here.
+
+That ratio used to read 464,131 groups and 14.6x. The difference is not this
+code: before the calamine fork's fixes, relative references in XLSB were decoded
+wrongly, so every row of a filled-down column normalised to a *different* shape
+and almost nothing grouped. Grouping was reporting a reader defect as a property
+of the workbook.
 
 ```sh
 cargo run --release -p eg-structure --example group -- private/book.xlsb
@@ -165,19 +172,53 @@ cargo run --release -p eg-graph --example lifting -- private/book.xlsb
 
 ## The corpus
 
-The region-level graph of that 170 MB workbook is **122 KB of JSON**, so the
-store is a directory rather than a database: `manifest.json` plus one file per
-workbook, keyed by the blake3 of the source file. A workbook that has not
-changed is a hit however it was copied; one that has changed cannot be.
+The graph of that 170 MB workbook is **520 KB of JSON**, so the store is a
+directory rather than a database: `manifest.json` plus one file per workbook,
+keyed by the blake3 of the source file. A workbook that has not changed is a hit
+however it was copied; one that has changed cannot be.
 
 | | Cold | Warm |
 |---|---|---|
-| 170 MB workbook | 17.4s | **0.36ms** |
+| 170 MB workbook | 19.9s | **1.4ms** |
 
 The 6 GB in-memory workbook is never touched to answer a corpus-level question,
-which is the whole reason to keep a store. Formula groups are deliberately not
-stored — 119 MiB, and wanted only when drilling into one workbook, at which
-point they are rebuilt.
+which is the whole reason to keep a store.
+
+### The formula groups, and a number that stopped being true
+
+For most of this project the formula-group layer was left out of the store, on a
+measured reason: 464,131 nodes and 119 MiB, near-identical text by construction,
+wanted only when drilling into one workbook. That reason no longer holds, and
+the way it stopped holding is worth writing down.
+
+The 464,131 came from the reference workbook read through calamine *before* the
+fork's fixes. Mis-decoded relative references gave a filled-down column a
+different R1C1 shape on every row, so almost nothing grouped. Read correctly the
+same workbook has **1,272 groups**, compressing 6,793,166 formulas 5,340×, the
+largest of them 690,018 cells. The layer that was 119 MiB is 397 KB.
+
+| Stored | Nodes | Edges | JSON | Cold | Warm |
+|---|---|---|---|---|---|
+| regions only | 735 | 951 | 123 KB | 16.6s | 0.45ms |
+| with formula groups | 2,007 | 3,271 | 520 KB | 19.9s | 1.4ms |
+
+So they are stored. What it buys is not the disk: rebuilding the layer costs a
+full ingest of the source file — ten seconds and 6 GB of memory — so without it
+no question about a formula could be answered from the corpus alone. With it,
+the lexical index holds every formula group in the workbook and `eg search` can
+find one when the file is not even present.
+
+The old number is kept as the reason for a ceiling rather than a flat yes. This
+layer has no natural bound — a workbook of one-off formulas groups into nothing,
+and its group layer is as large as its formula count — so above
+`MAX_STORED_FORMULA_GROUPS` (20,000, fifteen times what the reference workbook
+needs) the layer is dropped at index time and rebuilt on demand, as the whole
+layer used to be. Each stored graph records which kind it is, so a loader never
+guesses.
+
+Formula groups are still not *embedded*. That choice was made on the same stale
+number, but it survives the correction on its own merits: a formula is exact
+tokens, not a sentence, and asking for one is a lexical query.
 
 ```sh
 cargo run --release -p eg-graph --example corpus -- index private/*.xlsb  # add
@@ -218,22 +259,23 @@ under its old hash. It prints node labels and A1 ranges, never cell values.
 
 ### Indexing the formulas
 
-Formula groups are the layer the corpus deliberately does not store — 119 MiB of
-near-identical text. Whether they are worth *indexing* is a different question,
-and the answer is yes: **464,302 documents in 1.73s, 35.6 MiB on disk**, and a
-search over them still returns in about **10ms**.
+The formula-group layer is what lets a search reach an actual formula, and it is
+cheap to index: **2,007 documents in 0.01s, 0.3 MiB on disk**, with a search over
+them returning in **0.39ms**. That measurement is why the corpus stores the layer
+rather than rebuilding it.
 
 ```sh
 cargo run --release -p eg-index --example formulas -- private/formulas private/book.xlsb vlookup
 ```
 
 That measurement also found the one thing text relevance cannot do here. Nearly
-every formula in a real workbook is a lookup, so `vlookup` matches 463,570
-groups with the same score, and which ones surface is then arbitrary. Each node
-carries how many cells it stands for, and the score is multiplied by
-`1 + log10(1 + cells) / 4` — the same idea as an edge's weight, that how much of
-the workbook rests on something is part of how much it matters. The `vlookup`
-list now leads with the group covering 195,366 cells. The multiplier tops out
+every formula in a real workbook is a lookup, so a query for `vlookup` matches a
+great many groups at the same BM25 score, and which ones surface is then
+arbitrary. Each node carries how many cells it stands for, and the score is
+multiplied by `1 + log10(1 + cells) / 4` — the same idea as an edge's weight,
+that how much of the workbook rests on something is part of how much it matters.
+The `vlookup` list leads with the group covering 195,366 cells. The multiplier
+tops out
 near 2.4x, far below the spread of real text scores, so it orders ties without
 ever putting a big irrelevant node above a small exact match.
 
@@ -279,12 +321,15 @@ tuning parameter, a recall cliff and a second on-disk format in exchange for
 beating a number too small to see, so there is no HNSW here: an array of floats
 per workbook and a loop over it.
 
-Formula groups are not embedded. There are 463,570 of them — 713 MB of vectors
-and hours of model time to make near-identical formula text searchable by
-meaning, when a formula is exact-token text and the lexical index already
-covers it.
+Formula groups are stored and indexed lexically, and still not embedded. The
+old reason was volume — 463,570 groups, 713 MB of vectors — and that number came
+from the same pre-fork reader; the real figure is 1,272 groups and 2 MB, which
+would embed in seconds. The reason that survives the correction is the one about
+the text: `=VLOOKUP(S2,LOOKUP!E$1:F$1048576,2,FALSE)` is not a sentence, and a
+sentence embedding has nothing to say about it. Asking for it is a lexical
+query, and every group is in the lexical index.
 
-Embedding the 732 nodes takes **5.2s**, and the batching is why: batches are
+Embedding the 735 nodes takes **5.4s**, and the batching is why: batches are
 padded to the longest text in them, so one wide table, whose document carries
 every column header it has, was paying for the 255 short labels batched beside
 it. Sorting by length before batching took it from **9.5s to 5.2s**, measured
@@ -316,9 +361,9 @@ behind it.
 
 The graph's degree distribution decides whether a bounded k-hop expansion is
 cheap or explosive, which is why `eg-graph` has been collecting it since P3a.
-On the reference workbook the dependency layer is **161 edges across 732 nodes**
+On the reference workbook the dependency layer is **212 edges across 735 nodes**
 — sparse, with a maximum in-degree of 13. But the most connected nodes have
-out-degrees of **136, 83, 82, 74 and 71**, and every one of them is a region
+out-degrees of **136, 92, 91, 74 and 71**, and every one of them is a region
 pointing at its own columns.
 
 So the explosion is real and lives entirely in `CONTAINS`. A plain k-hop walk
