@@ -3,7 +3,10 @@
 //! The reference workbook says whether the build scales; these say whether it
 //! is right. Both are needed, and neither substitutes for the other.
 
-use eg_graph::{build, build_with, check, EdgeKind, GraphOptions, Node, NodeKind};
+use eg_graph::{
+    build, build_with, check, BuildReport, BuiltGraph, EdgeKind, FormulaGroupNode, Graph,
+    GraphOptions, Node, NodeKind, WorkbookNode,
+};
 use eg_model::{Cell, CellValue, DefinedName, Sheet, SheetId, Workbook, WorkbookFormat};
 
 fn grid(id: u16, name: &str, rows: &[&str]) -> Sheet {
@@ -403,4 +406,107 @@ fn a_name_qualified_by_a_missing_sheet_defines_nothing() {
     let built = build(&wb);
     assert_eq!(built.report.names_resolved, 0);
     assert_eq!(built.report.edges_of(EdgeKind::ReferencesName), 0);
+}
+
+#[test]
+fn pruning_the_group_layer_gives_exactly_the_build_without_it() {
+    // Past `MAX_STORED_FORMULA_GROUPS` the corpus drops this layer, and it
+    // used to do that by building the whole graph a second time — region
+    // detection and the entire dependency lift repeated to arrive at the same
+    // place minus some nodes. Taking them off the graph in hand is only
+    // allowed if it lands in exactly that same place, so: same nodes, same
+    // edges, same weights, still a graph `check` is happy with.
+    let wb = workbook(vec![
+        grid(
+            0,
+            "Sales",
+            &["Region Net", "North =Rates!A2", "South =Rates!A3"],
+        ),
+        grid(1, "Rates", &["Rate", "1", "2"]),
+    ]);
+
+    let mut pruned = build(&wb);
+    assert!(
+        pruned.report.nodes_of(NodeKind::FormulaGroup) > 0,
+        "there has to be a layer to drop for this to prove anything"
+    );
+    pruned.drop_formula_groups();
+
+    let without = build_with(
+        &wb,
+        &GraphOptions {
+            formula_group_nodes: false,
+            ..Default::default()
+        },
+    );
+
+    // By label, not by index: pruning renumbers what it leaves behind.
+    let nodes = |g: &BuiltGraph| {
+        let mut v: Vec<(&str, String)> = g
+            .graph
+            .node_indices()
+            .map(|i| (g.graph[i].kind().as_str(), g.graph[i].label()))
+            .collect();
+        v.sort();
+        v
+    };
+    let edges = |g: &BuiltGraph| {
+        let mut v: Vec<(String, String, EdgeKind, u64)> = g
+            .graph
+            .edge_indices()
+            .map(|e| {
+                let (x, y) = g.graph.edge_endpoints(e).unwrap();
+                let w = g.graph[e];
+                (g.graph[x].label(), g.graph[y].label(), w.kind, w.weight)
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(nodes(&pruned), nodes(&without));
+    assert_eq!(edges(&pruned), edges(&without));
+    assert_eq!(check(&pruned), vec![]);
+    assert_eq!(pruned.report.nodes_of(NodeKind::FormulaGroup), 0);
+    assert_eq!(pruned.report.total_nodes(), without.report.total_nodes());
+    assert_eq!(pruned.report.total_edges(), without.report.total_edges());
+    assert!(
+        matches!(pruned.graph[pruned.root], Node::Workbook(_)),
+        "the root still names the workbook"
+    );
+}
+
+#[test]
+fn pruning_follows_the_root_when_a_removal_moves_it() {
+    // petgraph fills the hole left by a removed node with what was the last
+    // node, so an index held outside the graph can move under a removal — and
+    // `root` is such an index, written into every stored graph. A build always
+    // puts the root first, where nothing can displace it; this asserts the
+    // remapping itself rather than that accident, by handing it a graph where
+    // the root *is* the node that moves.
+    let mut graph = Graph::new();
+    let group = graph.add_node(Node::FormulaGroup(FormulaGroupNode {
+        range: eg_model::RangeRef::new(SheetId(0), 0, 0, 0, 0),
+        shape: "R[-1]C".into(),
+        representative: "A1".into(),
+        cell_count: 1,
+    }));
+    let root = graph.add_node(Node::Workbook(WorkbookNode {
+        path: "test.xlsx".into(),
+        content_hash: "0".into(),
+        format: None,
+    }));
+    assert_eq!(group.index(), 0, "the group is not last");
+
+    let mut built = BuiltGraph {
+        graph,
+        root,
+        report: BuildReport::default(),
+    };
+    built.drop_formula_groups();
+
+    assert_eq!(built.graph.node_count(), 1);
+    assert!(
+        matches!(built.graph[built.root], Node::Workbook(_)),
+        "root followed the swap rather than pointing at whatever landed there"
+    );
 }

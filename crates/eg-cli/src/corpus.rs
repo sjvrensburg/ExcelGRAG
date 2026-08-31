@@ -59,16 +59,13 @@ pub fn index(
                 },
             );
             let groups = built.report.nodes_of(NodeKind::FormulaGroup) as usize;
-            let mut stored_groups = groups <= MAX_STORED_FORMULA_GROUPS;
+            let stored_groups = groups <= MAX_STORED_FORMULA_GROUPS;
             if !stored_groups {
-                built = build_with(
-                    &loaded.workbook,
-                    &GraphOptions {
-                        formula_group_nodes: false,
-                        ..Default::default()
-                    },
-                );
-                stored_groups = false;
+                // Taken off the graph already in hand, not rebuilt without it:
+                // the two differ only in these nodes, and building again would
+                // repeat region detection and the whole dependency lift to
+                // arrive at the same place.
+                built.drop_formula_groups();
             }
             // Profiles are the workbook's *data* — distinct values, sums — where
             // everything else stored is structure, so they are written separately
