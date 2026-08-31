@@ -239,6 +239,88 @@ eg index corpus/ book.xlsb --redact-values     # shape without contents
 eg index corpus/ book.xlsb --no-profiles
 ```
 
+## Asking a table a question
+
+Everything else here answers *where*: which cells feed this, what moves if that
+changes, does this formula still agree with its inputs. None of it answers "what
+is the total debt outstanding for residential debtors", which is the question a
+person actually has — and which the workbook only answers if somebody already
+wrote a cell that computes it.
+
+`query_table` filters the rows of one table, groups them, and totals them. On
+the reference workbook, grouping 115,003 rows of the working sheet by debt
+category and summing the debt column produces six numbers that exist nowhere in
+the file.
+
+It lives in `eg-eval` rather than beside `read_table` for one reason: the
+arithmetic has to be the *evaluator's*. A sheet carries fifteen significant
+digits, and a total here that used plain `f64` would disagree with the `SUM()`
+in the cell next to it — a second opinion that is wrong, which is the one thing
+this project must not produce. It accumulates raw and rounds once at the end;
+rounding every step would be a regime Excel does not have, and over 115,000 rows
+it would drift away from the sheet rather than towards it.
+
+**Refusing is most of the design**, because the failure mode of a query engine
+over a spreadsheet is a confident wrong number.
+
+| | |
+|---|---|
+| a header naming two columns | refused — `Total` under both `Q3` and `Q4` is a coin toss |
+| a total over a column that is not numbers | refused by name and kind, rather than computed by skipping the text |
+| a column the table does not have | fails before reading a cell, rather than returning an empty answer that reads like "nothing matched" |
+| error cells inside a total | counted and reported, never quietly dropped |
+
+And every answer names the cells it was computed over:
+
+```
+over 'Work Doc'!A2:BM115004
+115003 row(s) scanned, 115003 matched
+```
+
+That is not decoration. Region boundaries are *inferred* from blank runs and
+value-kind contrast, so a totals row swept into a table's body would double every
+sum — and the only defence is that the caller can see what was summed and check
+it against the sheet.
+
+## The schema a workbook writes down without meaning to
+
+A spreadsheet has no schema and states one anyway. `VLOOKUP(C2, $BR$4:$BS$12, 2,
+FALSE)` filled down a column is a declaration: *this column's values are keys
+into that table, and the answer is its second column.* The reference workbook
+writes that 115,566 times. Nothing had ever read it.
+
+Formulas are already grouped by R1C1 shape, so recovering the schema costs
+parsing a few hundred representative formulas rather than millions, and the
+number of cells behind each relation comes free with the grouping.
+
+```
+formula groups examined: 1272
+of those, doing lookups: 503
+relations recovered:     501
+shapes not read:         0
+pointing outside:        2
+in:                      3.3s
+```
+
+Each relation is a key column, a table and what comes back — `Debtors!E2:E195366`
+into `Rates!G1:H19`, returning column `H`, with 195,365 formula cells behind it.
+The key is reported as its *column*, not as the cell the group's representative
+happened to sit on: the row is an accident of where the shape was sampled, and
+the column is the thing that joins.
+
+Two distinctions it insists on. `INDEX(range, MATCH(key, keys, 0))` is the same
+relation written to survive a column being inserted, and is recovered as one
+relation rather than as a table with no key. And an **approximate** lookup — a
+`VLOOKUP` with no `FALSE` — is recorded as a *banding*: it asks for the last row
+not past its argument, so the first column is a set of thresholds and joining it
+on equality would be wrong. A shape it cannot read is left unrecognised and
+counted, because a schema that guesses is worse than one with holes in it: a
+hole is visible.
+
+```sh
+cargo run --release -p eg-eval --example schema -- private/book.xlsb
+```
+
 ## The corpus
 
 The graph of that 170 MB workbook is **520 KB of JSON**, so the store is a
@@ -780,6 +862,9 @@ claude mcp add excelgrag -- "$PWD/target/release/eg-mcp" "$PWD/index"
 | `precedents` | what a formula reads |
 | `dependents` | what reads a cell — the expensive direction, and it says so |
 | `recompute` | whether a formula still agrees with the value stored beside it |
+| `tables` | the tables of a workbook and the columns of each, with their types |
+| `query_table` | a total, count or average over the rows of one table |
+| `schema` | which column keys into which table, read out of the lookup formulas |
 | `what_if` | what else moves if a cell held a different number |
 
 The surface is the pipeline: search, then read the context, then go down to

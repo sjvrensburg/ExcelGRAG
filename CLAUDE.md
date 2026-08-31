@@ -102,7 +102,13 @@ above it.
   `tests/answers.rs` is the retrieval floor and `examples/answers.rs` scores a
   real corpus against a question file; questions for the reference workbook live
   in `private/answers.json`.
-- `eg-eval` — the cell layer the graph dropped, recovered on demand:
+- `eg-eval` — the cell layer the graph dropped, recovered on demand, plus the two
+  things that read *across* a table: `query::query` (filter/group/aggregate over
+  one `Table`, living here so its arithmetic is the evaluator's — it accumulates
+  raw and rounds once, and refuses an ambiguous header or a total over a
+  non-numeric column rather than guessing) and `schema::infer_schema` (the
+  foreign keys a workbook declares in its `VLOOKUP`/`INDEX-MATCH` formulas; an
+  approximate lookup is a *banding* over thresholds, not a key). Also:
   `precedents_of` (cheap, in the formula's own text), `dependents_of` (expensive,
   scans every formula), and `recompute`/`check` which evaluate a formula and
   compare with the value Excel stored. `whatif::what_if` substitutes values
@@ -129,6 +135,11 @@ above it.
 - **Recompute never recurses.** Precedents are read as stored values, so a
   disagreement is about one formula, not a chain. No dependency order, no cycle
   detection.
+- **A query answer names the cells it was computed over.** Region boundaries
+  are inferred, so a totals row swept into a body doubles every sum; the range
+  is the only thing that lets a caller notice. For the same reason a query
+  refuses an ambiguous column or a non-numeric total rather than producing a
+  number nobody can check.
 - **A what-if never reports a cell it could not evaluate as unchanged.** A
   blocked formula, and everything reading it, comes back as *no answer*; so does
   a cycle, which is reported rather than iterated to a fixed point. Silently

@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 eg-model.workspace = true
+eg-structure.workspace = true
 eg-ingest.workspace = true
 eg-graph.workspace = true
 eg-index.workspace = true

@@ -8,8 +8,10 @@ rust-version.workspace = true
 
 [dependencies]
 eg-model.workspace = true
+eg-structure.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 eg-ingest.workspace = true

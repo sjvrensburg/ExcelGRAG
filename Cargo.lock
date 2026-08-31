@@ -730,8 +730,10 @@ version = "0.1.0"
 dependencies = [
  "eg-ingest",
  "eg-model",
+ "eg-structure",
  "rustc-hash",
  "serde",
+ "thiserror",
 ]
 
 [[package]]
@@ -789,6 +791,7 @@ dependencies = [
  "eg-ingest",
  "eg-model",
  "eg-retrieve",
+ "eg-structure",
  "serde",
  "serde_json",
  "tempfile",

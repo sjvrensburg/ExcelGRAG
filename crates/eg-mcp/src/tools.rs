@@ -15,13 +15,16 @@
 //! asked about structure. The policy lives at startup rather than per call:
 //! a caller cannot talk its way past it.
 
+use eg_eval::query::{query as query_run, Aggregate, Filter, Query, Test};
 use eg_eval::whatif::{what_if, Blocked, Change, WhatIfOptions};
 use eg_eval::{
     cell as cell_fact, cells_in, dependents_of, precedents_of, recompute, Outcome, Target,
 };
+use eg_eval::{infer_schema, Lookup};
 use eg_index::SearchOptions;
 use eg_model::{parse_a1, CellValue, RangeRef, Workbook};
 use eg_retrieve::{expand, find_in, render, ExpandOptions, Fusion, RenderOptions, Search};
+use eg_structure::{detect_regions, read_table, Table};
 use serde_json::{json, Value};
 
 use crate::state::State;
@@ -112,6 +115,78 @@ pub const TOOLS: &[Tool] = &[
         schema: || cell_schema("The cell or range to recompute, e.g. \"Sheet1!D7\"."),
     },
     Tool {
+        name: "tables",
+        description: "The tables of a workbook, or of one sheet: each one's range, its title,                       and its columns with the type of each. Start here before `query_table` — a                       query names columns by header, and this is what the headers are.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "workbook": {"type": "string", "description": "Path or hash. Optional when the corpus holds one."},
+                    "sheet": {"type": "string", "description": "Restrict to one sheet, by exact name."},
+                    "limit": {"type": "integer", "description": "Tables to list. Default 40."}
+                },
+                "additionalProperties": false
+            })
+        },
+    },
+    Tool {
+        name: "query_table",
+        description: "Filter, group and total the rows of one table — the question a workbook                       only answers if somebody already wrote a cell for it. Names columns by                       header, from `tables`. Every answer carries the range it was computed                       over, because a table's boundaries are inferred and a totals row swept                       into the body would double every sum. Refuses rather than guesses: a                       header naming two columns, or a total over a column that is not numbers.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "table": {"type": "string", "description": "The table's range, from `tables`, e.g. \"'Work Doc'!A1:BM115004\"."},
+                    "workbook": {"type": "string", "description": "Path or hash. Optional when the corpus holds one."},
+                    "where": {
+                        "type": "array",
+                        "description": "Conditions a row must all pass.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "column": {"type": "string", "description": "Header, as `tables` gives it."},
+                                "test": {"type": "string", "enum": ["is", "is_not", "contains", "one_of", "above", "at_least", "below", "at_most", "blank", "not_blank", "failed"]},
+                                "value": {"description": "The value to test against. A list for `one_of`; omitted for `blank`, `not_blank` and `failed`."}
+                            },
+                            "required": ["column", "test"]
+                        }
+                    },
+                    "group_by": {"type": "array", "items": {"type": "string"}, "description": "Column headers to group by."},
+                    "aggregate": {
+                        "type": "array",
+                        "description": "What to compute. `count` takes no column.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "of": {"type": "string", "enum": ["count", "count_values", "count_distinct", "sum", "mean", "min", "max"]},
+                                "column": {"type": "string"}
+                            },
+                            "required": ["of"]
+                        }
+                    },
+                    "limit": {"type": "integer", "description": "Groups returned. Default 20."}
+                },
+                "additionalProperties": false,
+                "required": ["table", "aggregate"]
+            })
+        },
+    },
+    Tool {
+        name: "schema",
+        description: "The relations the workbook states in its own lookup formulas: which                       column keys into which table, and what comes back. A spreadsheet has no                       schema and declares one anyway, once per row. Use it to follow a value                       from one table to another. An approximate lookup is reported as a                       *banding* — a set of thresholds, not a key — because joining it on                       equality would be wrong.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "workbook": {"type": "string", "description": "Path or hash. Optional when the corpus holds one."},
+                    "sheet": {"type": "string", "description": "Only relations whose formulas live on this sheet."},
+                    "limit": {"type": "integer", "description": "Relations returned, heaviest first. Default 25."}
+                },
+                "additionalProperties": false
+            })
+        },
+    },
+    Tool {
         name: "what_if",
         description: "Change one or more cells and report every cell that moves because of it. \
                       Nothing is written: the workbook is read-only and the substitution lives \
@@ -169,6 +244,9 @@ pub fn call(state: &mut State, name: &str, args: &Value) -> Result<String, Strin
         "precedents" => precedents(state, args),
         "dependents" => dependents(state, args),
         "recompute" => recompute_tool(state, args),
+        "tables" => tables(state, args),
+        "query_table" => query_table(state, args),
+        "schema" => schema(state, args),
         "what_if" => what_if_tool(state, args),
         other => Err(format!("no tool called {other:?}")),
     }
@@ -682,6 +760,346 @@ fn what_if_tool(state: &mut State, args: &Value) -> Result<String, String> {
     }
     if report.affected == 0 {
         out.push_str("\nnothing in this workbook reads it.\n");
+    }
+    Ok(out)
+}
+
+// ---- tables, queries and the schema --------------------------------------
+
+/// The tables of a workbook, which is what a query names its columns from.
+fn tables(state: &mut State, args: &Value) -> Result<String, String> {
+    let (_, path) = state.resolve(opt_str(args, "workbook").as_deref())?;
+    let (loaded, load_seconds) = state.workbook(&path)?;
+    let only = opt_str(args, "sheet");
+    let limit = opt_usize(args, "limit", 40).clamp(1, 500);
+
+    let mut out = String::new();
+    if let Some(seconds) = load_seconds {
+        out.push_str(&format!("{path} opened in {seconds:.1}s\n\n"));
+    }
+    let mut listed = 0usize;
+    let mut total = 0usize;
+    for sheet in &loaded.workbook.sheets {
+        if only.as_deref().is_some_and(|name| name != sheet.name) {
+            continue;
+        }
+        for region in detect_regions(sheet) {
+            let Some(table) = read_table(sheet, &region) else {
+                continue;
+            };
+            total += 1;
+            if listed >= limit {
+                continue;
+            }
+            listed += 1;
+            out.push_str(&format!(
+                "{}{}\n  {} row(s), {} column(s)\n",
+                loaded.workbook.cite_range(table.body),
+                table
+                    .title
+                    .as_deref()
+                    .map(|t| format!("  {t:?}"))
+                    .unwrap_or_default(),
+                table.rows(),
+                table.columns.len()
+            ));
+            for column in &table.columns {
+                let name = if column.header.is_empty() {
+                    "(no header)"
+                } else {
+                    &column.header
+                };
+                out.push_str(&format!(
+                    "    {:<38} {:<7} {} populated\n",
+                    name,
+                    column.kind.as_str(),
+                    column.populated
+                ));
+            }
+        }
+    }
+    if total > listed {
+        out.push_str(&format!(
+            "\n… {} more table(s) not listed\n",
+            total - listed
+        ));
+    }
+    if total == 0 {
+        out.push_str("no tables found\n");
+    } else {
+        out.push_str("\nQuery one with `query_table`, naming its range and its column headers.\n");
+    }
+    Ok(out)
+}
+
+/// Find the table a caller named by its range.
+fn table_at(loaded: &eg_ingest::Loaded, citation: &str) -> Result<(usize, Table), String> {
+    let range = resolve_range(&loaded.workbook, citation)?;
+    let index = range.sheet.0 as usize;
+    let sheet = loaded
+        .workbook
+        .sheet(range.sheet)
+        .ok_or_else(|| format!("{citation} names no sheet of this workbook"))?;
+    for region in detect_regions(sheet) {
+        if region.range == range {
+            let table = read_table(sheet, &region)
+                .ok_or_else(|| format!("{citation} is a region with no rows under its header"))?;
+            return Ok((index, table));
+        }
+    }
+    Err(format!(
+        "{citation} is not a table of this workbook — `tables` lists the ranges that are"
+    ))
+}
+
+fn query_table(state: &mut State, args: &Value) -> Result<String, String> {
+    let citation = want_str(args, "table")?;
+    let (_, path) = state.resolve(opt_str(args, "workbook").as_deref())?;
+    let (loaded, load_seconds) = state.workbook(&path)?;
+    let (_, table) = table_at(&loaded, &citation)?;
+
+    let mut query = Query {
+        limit: opt_usize(args, "limit", 20).clamp(1, 200),
+        ..Default::default()
+    };
+    for filter in args
+        .get("where")
+        .and_then(Value::as_array)
+        .unwrap_or(&vec![])
+    {
+        query.filters.push(read_filter(filter)?);
+    }
+    for column in args
+        .get("group_by")
+        .and_then(Value::as_array)
+        .unwrap_or(&vec![])
+    {
+        query.group_by.push(
+            column
+                .as_str()
+                .ok_or("group_by takes column headers as strings")?
+                .to_string(),
+        );
+    }
+    for aggregate in args
+        .get("aggregate")
+        .and_then(Value::as_array)
+        .unwrap_or(&vec![])
+    {
+        query.aggregates.push(read_aggregate(aggregate)?);
+    }
+
+    let answer = query_run(&loaded.workbook, &table, &query).map_err(|e| e.to_string())?;
+    let labels: Vec<String> = query.aggregates.iter().map(Aggregate::label).collect();
+    // A total *is* a value — a number the workbook never wrote down — so it is
+    // redacted like any other when this server was told to.
+    let redact = state.redact_values;
+
+    let mut out = String::new();
+    if let Some(seconds) = load_seconds {
+        out.push_str(&format!("{path} opened in {seconds:.1}s\n\n"));
+    }
+    // The range first, not last. A table's boundaries are inferred, and an
+    // answer nobody can check against the cells it came from is a number with
+    // no provenance — which is the one thing this project does not produce.
+    out.push_str(&format!(
+        "over {}\n{} row(s) scanned, {} matched\n",
+        loaded.workbook.cite_range(answer.over),
+        answer.rows_scanned,
+        answer.rows_matched
+    ));
+    if answer.rows_with_errors > 0 {
+        out.push_str(&format!(
+            "{} row(s) dropped: the column a filter tested held an error value\n",
+            answer.rows_with_errors
+        ));
+    }
+    if answer.errors_in_aggregates > 0 {
+        out.push_str(&format!(
+            "{} error cell(s) left out of the totals — check the column before trusting them\n",
+            answer.errors_in_aggregates
+        ));
+    }
+    out.push('\n');
+
+    for group in &answer.groups {
+        let key = if group.key.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "{}  ",
+                group
+                    .key
+                    .iter()
+                    .map(|v| show(v, redact))
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            )
+        };
+        let mut parts = Vec::new();
+        for (i, label) in labels.iter().enumerate() {
+            let shown = match (group.values[i], group.counts[i]) {
+                (Some(v), _) => show(&CellValue::Number(v), redact),
+                (None, Some(c)) => c.to_string(),
+                (None, None) => "—".to_string(),
+            };
+            parts.push(format!("{label} {shown}"));
+        }
+        out.push_str(&format!(
+            "  {key}({} rows)  {}\n",
+            group.rows,
+            parts.join(", ")
+        ));
+    }
+    if answer.groups.is_empty() {
+        out.push_str("  no rows matched\n");
+    }
+    if answer.groups_not_listed > 0 {
+        out.push_str(&format!(
+            "  … {} more group(s), raise `limit`\n",
+            answer.groups_not_listed
+        ));
+    }
+    Ok(out)
+}
+
+fn read_filter(value: &Value) -> Result<Filter, String> {
+    let column = value
+        .get("column")
+        .and_then(Value::as_str)
+        .ok_or("each condition needs a `column`")?
+        .to_string();
+    let test = value
+        .get("test")
+        .and_then(Value::as_str)
+        .ok_or("each condition needs a `test`")?;
+    let arg = value.get("value");
+    let number = || -> Result<f64, String> {
+        arg.and_then(Value::as_f64)
+            .ok_or_else(|| format!("`{test}` needs a number in `value`"))
+    };
+    let cell = || -> Result<CellValue, String> {
+        cell_value(arg.ok_or_else(|| format!("`{test}` needs a `value`"))?)
+    };
+    let test = match test {
+        "is" => Test::Is(cell()?),
+        "is_not" => Test::IsNot(cell()?),
+        "contains" => Test::Contains(
+            arg.and_then(Value::as_str)
+                .ok_or("`contains` needs text in `value`")?
+                .to_string(),
+        ),
+        "one_of" => Test::OneOf(
+            arg.and_then(Value::as_array)
+                .ok_or("`one_of` needs a list in `value`")?
+                .iter()
+                .map(cell_value)
+                .collect::<Result<_, _>>()?,
+        ),
+        "above" => Test::Above(number()?),
+        "at_least" => Test::AtLeast(number()?),
+        "below" => Test::Below(number()?),
+        "at_most" => Test::AtMost(number()?),
+        "blank" => Test::Blank,
+        "not_blank" => Test::NotBlank,
+        "failed" => Test::Failed,
+        other => return Err(format!("no test called {other:?}")),
+    };
+    Ok(Filter { column, test })
+}
+
+fn read_aggregate(value: &Value) -> Result<Aggregate, String> {
+    let of = value
+        .get("of")
+        .and_then(Value::as_str)
+        .ok_or("each aggregate needs an `of`")?;
+    let column = || -> Result<String, String> {
+        value
+            .get("column")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| format!("`{of}` needs a `column`"))
+    };
+    Ok(match of {
+        "count" => Aggregate::Count,
+        "count_values" => Aggregate::CountValues(column()?),
+        "count_distinct" => Aggregate::CountDistinct(column()?),
+        "sum" => Aggregate::Sum(column()?),
+        "mean" => Aggregate::Mean(column()?),
+        "min" => Aggregate::Min(column()?),
+        "max" => Aggregate::Max(column()?),
+        other => return Err(format!("no aggregate called {other:?}")),
+    })
+}
+
+fn schema(state: &mut State, args: &Value) -> Result<String, String> {
+    let (_, path) = state.resolve(opt_str(args, "workbook").as_deref())?;
+    let (loaded, load_seconds) = state.workbook(&path)?;
+    let only = opt_str(args, "sheet");
+    let limit = opt_usize(args, "limit", 25).clamp(1, 200);
+
+    let found = infer_schema(&loaded.workbook);
+    let wanted: Vec<&Lookup> = found
+        .lookups
+        .iter()
+        .filter(|l| match &only {
+            Some(name) => loaded
+                .workbook
+                .sheet(l.from.sheet)
+                .is_some_and(|s| &s.name == name),
+            None => true,
+        })
+        .collect();
+
+    let mut out = String::new();
+    if let Some(seconds) = load_seconds {
+        out.push_str(&format!("{path} opened in {seconds:.1}s\n\n"));
+    }
+    out.push_str(&format!(
+        "{} relation(s) stated by {} lookup formula group(s)",
+        found.lookups.len(),
+        found.with_lookups
+    ));
+    if found.unrecognised > 0 || found.unresolvable > 0 {
+        out.push_str(&format!(
+            " ({} shape(s) not read, {} pointing outside this workbook)",
+            found.unrecognised, found.unresolvable
+        ));
+    }
+    out.push_str("\n\n");
+
+    for lookup in wanted.iter().take(limit) {
+        out.push_str(&format!(
+            "{} {}\n  key {} → {}{}\n",
+            lookup.kind.as_str(),
+            loaded.workbook.cite_range(lookup.from),
+            lookup
+                .key
+                .map(|k| loaded.workbook.cite_range(k))
+                .unwrap_or_else(|| "(computed, no single column)".into()),
+            loaded.workbook.cite_range(lookup.table),
+            lookup
+                .column
+                .map(|c| format!(" column {c}"))
+                .unwrap_or_default(),
+        ));
+        if let Some(returns) = lookup.returns {
+            out.push_str(&format!(
+                "  returns {}\n",
+                loaded.workbook.cite_range(returns)
+            ));
+        }
+        out.push_str(&format!("  {} formula cell(s)", lookup.cells));
+        if lookup.approximate {
+            out.push_str("  [approximate — a banding over thresholds, not a key to join on]");
+        }
+        out.push('\n');
+    }
+    if wanted.len() > limit {
+        out.push_str(&format!("\n… {} more relation(s)\n", wanted.len() - limit));
+    }
+    if wanted.is_empty() {
+        out.push_str("no lookup relations here\n");
     }
     Ok(out)
 }
