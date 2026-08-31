@@ -60,6 +60,8 @@ pub enum QueryError {
     },
     #[error("nothing to compute: give at least one aggregate")]
     NothingAsked,
+    #[error("limit is 0, so no group could ever be returned — say how many you want")]
+    NoLimit,
 }
 
 /// A test one row must pass.
@@ -194,6 +196,12 @@ pub fn query(workbook: &Workbook, table: &Table, query: &Query) -> Result<Answer
     if query.aggregates.is_empty() {
         return Err(QueryError::NothingAsked);
     }
+    // Silently reading 0 as 1 would answer a different question from the one
+    // asked — the same reason an ambiguous column or a non-numeric total is
+    // refused above rather than guessed at.
+    if query.limit == 0 {
+        return Err(QueryError::NoLimit);
+    }
     let sheet = workbook
         .sheet(table.body.sheet)
         .ok_or_else(|| QueryError::NoSuchColumn(String::new()))?;
@@ -292,8 +300,9 @@ pub fn query(workbook: &Workbook, table: &Table, query: &Query) -> Result<Answer
         }
     }
 
-    answer.groups_not_listed = (order.len().saturating_sub(query.limit.max(1))) as u64;
-    for id in order.into_iter().take(query.limit.max(1)) {
+    // `limit` is guaranteed positive here — a limit of 0 is refused above.
+    answer.groups_not_listed = (order.len().saturating_sub(query.limit)) as u64;
+    for id in order.into_iter().take(query.limit) {
         let (key, acc) = buckets.remove(&id).expect("keyed by what was inserted");
         answer.groups.push(acc.finish(key, &aggregates));
     }
@@ -337,7 +346,12 @@ fn passes(value: &CellValue, test: &Test) -> bool {
 /// at the 15 digits a sheet carries.
 fn equal(value: &CellValue, want: &CellValue) -> bool {
     match (value, want) {
-        (CellValue::Text(a), CellValue::Text(b)) => a.eq_ignore_ascii_case(b),
+        // Unicode case folding, not `eq_ignore_ascii_case` — `Contains` just
+        // above and `render` just below both already fold on `to_lowercase`,
+        // and a `Straße`/`STRASSE` pair (or any non-ASCII letter) disagreeing
+        // with `Test::Is` but agreeing with `Test::Contains` on the very same
+        // column would be a wrong answer nobody could explain from the data.
+        (CellValue::Text(a), CellValue::Text(b)) => a.to_lowercase() == b.to_lowercase(),
         (CellValue::Number(a), CellValue::Number(b)) => shown(*a) == shown(*b),
         (a, b) => a == b,
     }

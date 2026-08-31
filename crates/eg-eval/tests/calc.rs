@@ -221,6 +221,34 @@ fn many_cells_where_one_value_was_needed_is_refused_not_guessed() {
     assert!(matches!(refused("A1:C1+1"), Unsupported::RangeAsValue(_)));
 }
 
+#[test]
+fn a_bare_top_level_range_is_refused_not_valued() {
+    // `=A1:C1` with nothing around it hits `Eval::result`'s own dereference,
+    // a different code path from the one an operator like `+` goes through —
+    // it must refuse the same way, not answer a computed-looking #VALUE!.
+    assert!(matches!(refused("A1:C1"), Unsupported::RangeAsValue(_)));
+}
+
+#[test]
+fn zero_argument_unmodelled_functions_are_refused_by_name() {
+    // PI(), ROW(), COLUMN() are legitimately zero-argument in Excel but are
+    // not modelled here; the too-few-arguments #VALUE! rule must not fire for
+    // a function this evaluator has never implemented.
+    for name in ["PI", "ROW", "COLUMN", "SHEET"] {
+        assert!(
+            matches!(refused(&format!("{name}()")), Unsupported::Function(n) if n == name),
+            "{name}() should be refused by name, not answered #VALUE!"
+        );
+    }
+}
+
+#[test]
+fn a_modelled_function_called_with_too_few_arguments_is_still_value_error() {
+    // EXACT is modelled and takes two arguments; too few is a malformed call,
+    // not an unmodelled one, so it keeps answering #VALUE!.
+    assert_eq!(error("EXACT(\"a\")"), ErrorKind::Value);
+}
+
 // ---- logic, lookup ------------------------------------------------------
 
 #[test]
@@ -255,6 +283,143 @@ fn lookups_walk_the_table() {
     assert_eq!(number("INDEX(Rates!A1:B3,2,2)"), 20.0);
     // An approximate VLOOKUP takes the last row not past the key.
     assert_eq!(number("VLOOKUP(5,Main!A1:C2,3)"), 6.0);
+}
+
+#[test]
+fn a_written_but_empty_fourth_argument_to_vlookup_is_exact_not_omitted() {
+    // Excel coerces a written-but-empty argument to 0/FALSE — exact — which
+    // is not the same as leaving it out (TRUE/approximate, Excel's own
+    // default). "z" is past every key, so an approximate lookup finds the
+    // last row not past it ("c"); an exact one finds nothing.
+    assert_eq!(
+        number("VLOOKUP(\"z\",Rates!A1:B3,2)"),
+        30.0,
+        "omitted takes Excel's own default, TRUE"
+    );
+    assert_eq!(
+        error("VLOOKUP(\"z\",Rates!A1:B3,2,)"),
+        ErrorKind::NA,
+        "written empty coerces to FALSE, not TRUE"
+    );
+}
+
+#[test]
+fn approximate_lookups_land_on_the_last_of_a_run_of_duplicate_keys() {
+    // L18: Excel's own binary search, over a sorted column with duplicate
+    // keys, lands on the last of a run of equal ones — a linear scan that
+    // stops at the first equal match disagrees with it. Column A is
+    // ascending with three 10s in a row; column C is descending, for
+    // MATCH's mode -1.
+    let mut wb = book();
+    let mut sheet = Sheet::new(SheetId(2), "Dups");
+    for (row, (a, b, c)) in [
+        (10.0, "r1", 20.0),
+        (10.0, "r2", 10.0),
+        (10.0, "r3", 10.0),
+        (20.0, "r4", 10.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        sheet.set(row as u32, 0, Cell::literal(CellValue::Number(a)));
+        sheet.set(row as u32, 1, Cell::literal(CellValue::Text(b.to_string())));
+        sheet.set(row as u32, 2, Cell::literal(CellValue::Number(c)));
+    }
+    wb.sheets.push(sheet);
+    let at = CellRef::new(SheetId(2), 20, 20);
+    let eval = |formula: &str| evaluate(&wb, at, formula).unwrap();
+
+    assert_eq!(
+        eval("VLOOKUP(10,Dups!A1:B4,2)"),
+        CellValue::Text("r3".into()),
+        "the last of the three rows keyed 10, not the first"
+    );
+    assert_eq!(
+        eval("MATCH(10,Dups!A1:A4,1)"),
+        CellValue::Number(3.0),
+        "row 3, the last of the run"
+    );
+    // A key strictly between the run and the next value still finds the
+    // last row not past it, same as before — this fix must not have
+    // regressed the ordinary approximate case.
+    assert_eq!(
+        eval("VLOOKUP(15,Dups!A1:B4,2)"),
+        CellValue::Text("r3".into())
+    );
+    // Descending list, mode -1: smallest value at or above the key, and
+    // still the last of a run of duplicates in scan order.
+    assert_eq!(
+        eval("MATCH(10,Dups!C1:C4,-1)"),
+        CellValue::Number(4.0),
+        "row 4, the last of the descending run of 10s"
+    );
+    // Exact match (FALSE / mode 0) is unaffected: it must still return the
+    // *first* match, not the last — duplicates do not change that.
+    assert_eq!(
+        eval("VLOOKUP(10,Dups!A1:B4,2,FALSE)"),
+        CellValue::Text("r1".into()),
+        "exact match still takes the first row, unlike approximate"
+    );
+    assert_eq!(
+        eval("MATCH(10,Dups!A1:A4,0)"),
+        CellValue::Number(1.0),
+        "exact MATCH still takes the first row too"
+    );
+}
+
+#[test]
+fn a_written_but_empty_match_type_is_exact_not_omitted() {
+    assert_eq!(
+        number("MATCH(\"z\",Rates!A1:A3)"),
+        3.0,
+        "omitted takes Excel's own default, mode 1"
+    );
+    assert_eq!(
+        error("MATCH(\"z\",Rates!A1:A3,)"),
+        ErrorKind::NA,
+        "written empty coerces to mode 0, not mode 1"
+    );
+}
+
+#[test]
+fn a_written_but_empty_index_column_means_the_whole_row() {
+    // 0 is not a smaller column index for INDEX — it is Excel's own notation
+    // for "every column of this row", the same outcome an explicit 0 gives,
+    // and a written-but-empty argument coerces to it exactly as any other
+    // empty argument would.
+    assert!(matches!(
+        refused("INDEX(Rates!A1:B3,2,)"),
+        Unsupported::Form(_)
+    ));
+    assert_eq!(
+        number("INDEX(Rates!A1:B3,2,2)"),
+        20.0,
+        "an explicit column is unaffected"
+    );
+}
+
+#[test]
+fn overflow_is_num_error_not_infinity() {
+    // Excel has no infinity: an operation that would produce one is `#NUM!`.
+    // Before this fix, only `^` routed through the finite check — `+`, `-`
+    // and `*` answered `Number(inf)`, which then poisons any comparison or
+    // formatting downstream of it.
+    assert_eq!(error("1E308*10"), ErrorKind::Num);
+    assert_eq!(error("1E308+1E308"), ErrorKind::Num);
+    assert_eq!(error("-1E308-1E308"), ErrorKind::Num);
+    assert_eq!(error("1E300/1E-300"), ErrorKind::Num);
+    // An ordinary large-but-finite result is unaffected.
+    assert_eq!(number("1E100*10"), 1E101);
+}
+
+#[test]
+fn text_spelling_infinity_or_nan_does_not_coerce() {
+    // Rust's `f64::from_str` accepts "inf"/"infinity"/"nan" as valid floats;
+    // Excel has none of the three, so a cell holding that text must refuse
+    // arithmetic the same way any other non-numeric text does.
+    for text in ["\"inf\"+1", "\"Infinity\"+1", "\"-inf\"+1", "\"NaN\"+1"] {
+        assert_eq!(error(text), ErrorKind::Value, "{text}");
+    }
 }
 
 #[test]
@@ -333,7 +498,38 @@ fn unmodelled_constructs_say_which_one_they_are() {
         refused("SUM(Table1[Amount])"),
         Unsupported::Unparsed(_)
     ));
-    assert!(matches!(refused("SUM(A:A)"), Unsupported::Unparsed(_)));
+    // `A:A` parses cleanly now (C1) — the graph needs it to, to lift the
+    // dependency — but recomputation still refuses it, deliberately and by
+    // shape rather than by the scan miss that used to hide it as `Unparsed`.
+    assert!(matches!(
+        refused("SUM(A:A)"),
+        Unsupported::WholeColumnOrRow(_)
+    ));
+}
+
+#[test]
+fn whole_column_and_row_references_are_refused_by_shape() {
+    assert!(matches!(
+        refused("SUM(A:A)"),
+        Unsupported::WholeColumnOrRow(_)
+    ));
+    assert!(matches!(
+        refused("SUM(3:3)"),
+        Unsupported::WholeColumnOrRow(_)
+    ));
+    assert!(matches!(
+        refused("SUM(Rates!B:B)"),
+        Unsupported::WholeColumnOrRow(_)
+    ));
+    // An explicit reference spanning the same ground is the same shape as far
+    // as Excel is concerned, and is refused the same way.
+    assert!(matches!(
+        refused("SUM(A1:A1048576)"),
+        Unsupported::WholeColumnOrRow(_)
+    ));
+    // A finite range anywhere near that size, but not the whole sheet, is
+    // unaffected.
+    assert_eq!(number("SUM(A1:A2)"), 5.0);
 }
 
 #[test]
@@ -595,6 +791,95 @@ fn a_long_lookup_column_answers_the_same_as_a_short_one() {
     assert_eq!(value("MATCH(16.88,C1:C2000,0)"), CellValue::Number(1501.0));
     // The approximate form is not indexed, since it asks an ordering question.
     assert_eq!(value("VLOOKUP(1234,B1:B2000,1)"), CellValue::Number(1234.0));
+    // L19: a wildcard key must still work past the point exact lookups
+    // switch to the index, which cannot glob-match — it has to fall back to
+    // the scan rather than silently missing every wildcard lookup on a
+    // large table.
+    assert_eq!(
+        value("VLOOKUP(\"k123?\",A1:B2000,2,FALSE)"),
+        CellValue::Number(1230.0),
+        "k1230..k1239 all match; the first one wins"
+    );
+    assert_eq!(
+        value("MATCH(\"k19*\",A1:A2000,0)"),
+        CellValue::Number(20.0),
+        "scanned in row order, not alphabetical — row 19 (\"k19\" itself) \
+         comes before row 190 (\"k190\")"
+    );
+}
+
+#[test]
+fn exact_lookups_honor_wildcards_the_way_excel_does() {
+    let mut wb = book();
+    let mut sheet = Sheet::new(SheetId(2), "Names");
+    for (row, name) in ["Anderson", "Smith", "Smithy", "O'Brien"]
+        .into_iter()
+        .enumerate()
+    {
+        sheet.set(row as u32, 0, Cell::literal(CellValue::Text(name.into())));
+        sheet.set(row as u32, 1, Cell::literal(CellValue::Number(row as f64)));
+    }
+    // A literal `*` and `?`, escaped with `~` the way Excel writes one.
+    sheet.set(4, 0, Cell::literal(CellValue::Text("A*B?C".into())));
+    sheet.set(4, 1, Cell::literal(CellValue::Number(4.0)));
+    wb.sheets.push(sheet);
+    let at = CellRef::new(SheetId(2), 20, 20);
+    let eval = |formula: &str| evaluate(&wb, at, formula).unwrap();
+
+    assert_eq!(
+        eval("VLOOKUP(\"Smith*\",Names!A1:B5,2,FALSE)"),
+        CellValue::Number(1.0),
+        "the first name starting with Smith"
+    );
+    assert_eq!(
+        eval("MATCH(\"Smith?\",Names!A1:A5,0)"),
+        CellValue::Number(3.0),
+        "? matches exactly one character — Smithy, not Smith itself"
+    );
+    assert_eq!(
+        eval("VLOOKUP(\"O?Brien\",Names!A1:B5,2,FALSE)"),
+        CellValue::Number(3.0),
+        "? stands for the apostrophe too — it is any one character"
+    );
+    assert_eq!(
+        eval("MATCH(\"Nobody*\",Names!A1:A5,0)"),
+        CellValue::Error(ErrorKind::NA)
+    );
+    // Case-insensitive, like every other text comparison this crate makes.
+    assert_eq!(
+        eval("VLOOKUP(\"smith*\",Names!A1:B5,2,FALSE)"),
+        CellValue::Number(1.0)
+    );
+    // `~*` and `~?` are literal, not wildcards — this key has none active.
+    assert_eq!(
+        eval("VLOOKUP(\"A~*B~?C\",Names!A1:B5,2,FALSE)"),
+        CellValue::Number(4.0)
+    );
+}
+
+#[test]
+fn wildcards_are_an_exact_match_thing_not_an_approximate_one() {
+    // Approximate lookup never reaches `exact_match_for_lookup` — a `*` or
+    // `?` there must compare as an ordinary (literal) character, the same
+    // as it always did, not suddenly start globbing.
+    let mut wb = book();
+    let mut sheet = Sheet::new(SheetId(2), "Sorted");
+    sheet.set(0, 0, Cell::literal(CellValue::Text("AAA".into())));
+    sheet.set(0, 1, Cell::literal(CellValue::Number(1.0)));
+    sheet.set(1, 0, Cell::literal(CellValue::Text("ZZZ".into())));
+    sheet.set(1, 1, Cell::literal(CellValue::Number(2.0)));
+    wb.sheets.push(sheet);
+    let at = CellRef::new(SheetId(2), 20, 20);
+
+    // "A*" sorts *before* "AAA" as a plain string (`*` is code point 42,
+    // below every letter) — so if wildcard matching leaked into approximate
+    // mode and matched "A*" against "AAA" as a glob, this would return 1.0
+    // instead of #N/A.
+    assert_eq!(
+        evaluate(&wb, at, "VLOOKUP(\"A*\",Sorted!A1:B2,2)").unwrap(),
+        CellValue::Error(ErrorKind::NA),
+        "literal \"A*\" sorts below every row, wildcard or not"
+    );
 }
 
 #[test]
@@ -638,4 +923,55 @@ fn a_substituted_cell_is_read_in_its_place_in_the_range_not_after_it() {
         eg_eval::evaluate_over(&wb, at, "SUM(A1:C3)", &overrides),
         Ok(CellValue::Number(28.0))
     );
+}
+
+// ---- error-literal scanning ----
+
+#[test]
+fn countblank_treats_a_cached_empty_string_as_blank_like_is_empty_does() {
+    // L20: a formula like `=""` caches `CellValue::Text(String::new())`, not
+    // `CellValue::Empty` — but Excel's COUNTBLANK still counts it as blank,
+    // the same way `CellValue::is_empty()` does everywhere else in this
+    // crate. `present`, the counter COUNTBLANK subtracts from the addressed
+    // total, used to check only the raw `Empty` variant and so undercounted.
+    // A formula cell, not a literal: `Cell::literal(Text(""))` is vacant (no
+    // formula, empty value) and a vacant cell is never materialised at all
+    // — so this has to carry a formula to land in the sheet the way a real
+    // `=""` would, cached value and all.
+    let mut wb = book();
+    wb.sheets[0].set(
+        5,
+        5,
+        Cell {
+            value: CellValue::Text(String::new()),
+            formula: Some("\"\"".into()),
+            format: Default::default(),
+        },
+    );
+    let at = CellRef::new(SheetId(0), 20, 20);
+    assert_eq!(
+        evaluate(&wb, at, "COUNTBLANK(F6)").unwrap(),
+        CellValue::Number(1.0),
+        "a cached empty string is blank"
+    );
+    // COUNTA disagrees with COUNTBLANK here on purpose — a cell with a
+    // formula that evaluated to "" still has content, in Excel's accounting.
+    assert_eq!(
+        evaluate(&wb, at, "COUNTA(F6)").unwrap(),
+        CellValue::Number(1.0),
+        "COUNTA still counts it — the asymmetry is deliberate, not a bug"
+    );
+}
+
+#[test]
+fn a_multibyte_character_near_an_error_literals_length_does_not_panic() {
+    // L17: every `#`-prefixed error literal is ASCII, but the text after a
+    // stray `#` need not be — a multibyte character positioned so that a
+    // literal's byte length lands inside it (not on a char boundary) used to
+    // panic on the byte slice rather than simply fail to match. "Ü" is two
+    // bytes at byte offset 4, so `"#NUM!".len()` (5) falls in the middle of it.
+    assert!(parse("#NUMÜxyz").is_err(), "not a real error literal");
+    // And a value that legitimately starts a real literal but is followed by
+    // non-ASCII text must still be refused rather than panicking either.
+    assert!(parse("#REF!Ü").is_err());
 }

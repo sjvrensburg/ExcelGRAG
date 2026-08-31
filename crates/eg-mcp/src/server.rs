@@ -25,6 +25,18 @@ pub use crate::tools::Tool;
 /// decide whether it can live with that.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
+/// Every revision this server actually understands, oldest first.
+///
+/// A lexicographic comparison against [`PROTOCOL_VERSION`] is not the same
+/// question as "does this server implement that revision": `"2025-03-26"`
+/// sorts before `"2025-06-18"` and would pass such a check, but that revision
+/// introduced batched JSON-RPC requests, which this line-at-a-time transport
+/// rejects outright. Echoing a version back is a promise this server speaks
+/// it, so only a revision in this explicit list is ever echoed; anything else
+/// — older-but-unlisted, newer, or not a date at all — is answered with
+/// [`PROTOCOL_VERSION`], per the spec's own fallback.
+const SUPPORTED_VERSIONS: &[&str] = &["2024-11-05", PROTOCOL_VERSION];
+
 pub struct Server {
     pub state: State,
 }
@@ -57,11 +69,13 @@ impl Server {
     }
 
     fn initialize(&self, params: &Value) -> Value {
-        // Echo the client's version when we know it, so a client on an older
-        // revision is not turned away over a field neither side uses.
+        // Echo the client's version when it is one this server actually
+        // speaks, so a client on an older revision is not turned away over a
+        // field neither side uses; anything else falls back to the version
+        // implemented here, which the spec leaves the client free to reject.
         let asked = params.get("protocolVersion").and_then(Value::as_str);
         let version = match asked {
-            Some(asked) if asked <= PROTOCOL_VERSION => asked,
+            Some(asked) if SUPPORTED_VERSIONS.contains(&asked) => asked,
             _ => PROTOCOL_VERSION,
         };
         json!({
@@ -204,6 +218,29 @@ mod tests {
             .and_then(|r| r.result)
             .expect("a result");
         assert_eq!(newer["protocolVersion"], PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn only_whitelisted_versions_are_echoed() {
+        // "2025-03-26" sorts lexicographically before PROTOCOL_VERSION and
+        // would pass a naive `<=` comparison, but it is a revision this
+        // transport does not implement (it introduced batched requests) and
+        // must not be echoed back as if it were supported.
+        let (mut server, _dir) = server();
+        let unsupported = server
+            .handle(request(
+                "initialize",
+                json!({ "protocolVersion": "2025-03-26" }),
+            ))
+            .and_then(|r| r.result)
+            .expect("a result");
+        assert_eq!(unsupported["protocolVersion"], PROTOCOL_VERSION);
+
+        let nonsense = server
+            .handle(request("initialize", json!({ "protocolVersion": "1.0" })))
+            .and_then(|r| r.result)
+            .expect("a result");
+        assert_eq!(nonsense["protocolVersion"], PROTOCOL_VERSION);
     }
 
     #[test]

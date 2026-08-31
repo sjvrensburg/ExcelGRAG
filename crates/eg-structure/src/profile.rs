@@ -20,7 +20,7 @@
 //! a corpus is structure; this is the exception, and [`ProfileOptions::values`]
 //! is how a caller declines it.
 
-use eg_model::{CellValue, RangeRef, Sheet};
+use eg_model::{shown, CellValue, RangeRef, Sheet};
 use serde::{Deserialize, Serialize};
 
 use crate::table::{ColumnKind, Table, TableColumn};
@@ -190,6 +190,11 @@ struct ColumnState {
     /// key column has as many distinct values as rows, and holding that map is
     /// holding the column.
     counts: std::collections::HashMap<String, u64>,
+    /// Which of those keys were cut to `max_value_chars`, tracked at the point
+    /// the original value is still on hand. A key's own length can't answer
+    /// this after the fact — a value cut to exactly `max_value_chars` and one
+    /// that was exactly that long already produce the same string.
+    truncated_keys: std::collections::HashSet<String>,
     abandoned: bool,
 }
 
@@ -215,11 +220,15 @@ impl ColumnState {
         if !opts.values || self.abandoned {
             return;
         }
-        let key = render(value, opts.max_value_chars);
+        let (key, was_truncated) = render(value, opts.max_value_chars);
         if self.counts.len() >= opts.abandon_distinct_after && !self.counts.contains_key(&key) {
             self.abandoned = true;
             self.counts = std::collections::HashMap::new();
+            self.truncated_keys = std::collections::HashSet::new();
             return;
+        }
+        if was_truncated {
+            self.truncated_keys.insert(key.clone());
         }
         *self.counts.entry(key).or_default() += 1;
     }
@@ -227,12 +236,13 @@ impl ColumnState {
     fn finish(self, column: &TableColumn, opts: &ProfileOptions) -> ColumnProfile {
         let distinct_count = (!self.abandoned && opts.values).then_some(self.counts.len() as u64);
         let keep = opts.values && !self.abandoned && self.counts.len() <= opts.max_distinct;
+        let truncated_keys = self.truncated_keys;
         let distinct = keep.then(|| {
             let mut values: Vec<ValueCount> = self
                 .counts
                 .into_iter()
                 .map(|(value, count)| ValueCount {
-                    truncated: value.chars().count() >= opts.max_value_chars,
+                    truncated: truncated_keys.contains(&value),
                     value,
                     count,
                 })
@@ -263,22 +273,33 @@ impl ColumnState {
     }
 }
 
-/// One value, as the string a profile stores it under.
+/// One value, as the string a profile stores it under, and whether that cut
+/// it short.
 ///
 /// A number is written the way a sheet shows it rather than the way Rust prints
 /// it, so `1` and `1.0` are one value and not two.
-fn render(value: &CellValue, max_chars: usize) -> String {
+///
+/// Two different values that agree on their first `max_chars` characters
+/// render to the same key — a long value's tail is exactly what got dropped
+/// to keep this from storing the column — so `distinct_count` can undercount
+/// a column whose long values share a prefix. Accepted: catching it would
+/// mean keeping the untruncated value, which is the size problem this exists
+/// to avoid.
+fn render(value: &CellValue, max_chars: usize) -> (String, bool) {
     let full = match value {
         CellValue::Empty => String::new(),
-        CellValue::Number(n) => format!("{n}"),
+        // Through the sheet's own 15-significant-digit rounding, not Rust's
+        // shortest round-trip form — otherwise a computed 0.30000000000000004
+        // and a literal 0.3 render as two different distinct values.
+        CellValue::Number(n) => format!("{}", shown(*n)),
         CellValue::Text(t) => t.clone(),
         CellValue::Bool(b) => b.to_string(),
         CellValue::Error(e) => e.as_str().to_string(),
     };
     if full.chars().count() <= max_chars {
-        return full;
+        return (full, false);
     }
-    full.chars().take(max_chars).collect()
+    (full.chars().take(max_chars).collect(), true)
 }
 
 #[cfg(test)]
@@ -317,6 +338,7 @@ mod tests {
             header_cols: 1,
             headers: headers.iter().map(|h| h.to_string()).collect(),
             cell_count: 0,
+            totals_rows: 0,
         }
     }
 
@@ -457,6 +479,47 @@ mod tests {
         let value = &found[0].distinct.as_ref().unwrap()[0];
         assert_eq!(value.value.chars().count(), 10);
         assert!(value.truncated);
+    }
+
+    #[test]
+    fn a_value_exactly_at_the_length_cap_is_stored_whole_not_flagged_cut() {
+        // L11: `render` keeps a value whole when its length is `<=
+        // max_value_chars` — the `truncated` flag must agree, not recompute
+        // the answer from the stored (already-cut) string's own length,
+        // which cannot tell "stored whole, happens to be this long" apart
+        // from "cut to this length".
+        let exact = "x".repeat(10);
+        let sheet = grid(&["Customer Note Debt", &format!("North {exact} 1")]);
+        let opts = ProfileOptions {
+            max_value_chars: 10,
+            ..Default::default()
+        };
+        let found = profiles(&sheet, &region(1, 2, &["Note", "Debt"]), &opts);
+        let value = &found[0].distinct.as_ref().unwrap()[0];
+        assert_eq!(value.value.chars().count(), 10);
+        assert!(!value.truncated, "exactly at the cap is not past it");
+    }
+
+    #[test]
+    fn a_computed_and_a_literal_number_that_a_sheet_shows_the_same_are_one_distinct_value() {
+        // L13: `0.1 + 0.2` and `0.3` are different `f64` bit patterns but the
+        // same number to fifteen significant digits — the precision a sheet
+        // actually shows. Rendering with Rust's shortest round-trip form
+        // instead would split them into two distinct values.
+        let mut sheet = grid(&["Customer Amount", "North 1", "South 2"]);
+        sheet.set(1, 1, Cell::literal(CellValue::Number(0.1 + 0.2)));
+        sheet.set(2, 1, Cell::literal(CellValue::Number(0.3)));
+        let found = profiles(
+            &sheet,
+            &region(2, 1, &["Amount"]),
+            &ProfileOptions::default(),
+        );
+        assert_eq!(
+            found[0].distinct_count,
+            Some(1),
+            "the sheet shows one number, not two: {:?}",
+            found[0].distinct
+        );
     }
 
     #[test]

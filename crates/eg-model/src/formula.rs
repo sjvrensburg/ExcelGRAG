@@ -123,6 +123,32 @@ pub fn scan_references_into(formula: &str, out: &mut Vec<ReferenceSpan>) {
                     }
                 }
 
+                // `Jan:Dec!A1` — a 3-D reference. Checked before the bare-token
+                // path below: `Jan:Dec` alone is exactly the shape the
+                // whole-column shorthand `A:C` has, and the only thing that
+                // tells a sheet range from a column range apart is whether a
+                // `!` follows the second half.
+                if end < b.len() && b[end] == b':' {
+                    if let Some(bang) = scan_3d_sheet_range_bang(b, end) {
+                        match reference_after_qualifier(formula, b, bang, start) {
+                            Some((span, local, parsed)) => {
+                                i = span.end;
+                                out.push(ReferenceSpan {
+                                    span,
+                                    local,
+                                    parsed,
+                                    qualified: true,
+                                });
+                                continue;
+                            }
+                            None => {
+                                i = bang + 1;
+                                continue;
+                            }
+                        }
+                    }
+                }
+
                 // A bare token. It is a reference only if it looks like one and
                 // is not a function call.
                 let is_call = end < b.len() && b[end] == b'(';
@@ -147,7 +173,52 @@ pub fn scan_references_into(formula: &str, out: &mut Vec<ReferenceSpan>) {
                         i = end;
                         continue;
                     }
+                    // `A:A` — a bare column has no row for `parse_cell_token`
+                    // to accept, so the whole-column shorthand is tried as its
+                    // own shape rather than as a malformed cell.
+                    if end < b.len() && b[end] == b':' {
+                        if let Some(second_end) = scan_axis_only_after_colon(b, end) {
+                            if let Ok(parsed) = parse_a1(&formula[start..second_end]) {
+                                out.push(ReferenceSpan {
+                                    span: start..second_end,
+                                    local: start..second_end,
+                                    parsed,
+                                    qualified: false,
+                                });
+                                i = second_end;
+                                continue;
+                            }
+                        }
+                    }
                 }
+                i = end;
+            }
+            // `3:3` — the whole-row counterpart, a digit run where `A:A`'s is
+            // a letter run. Not reached by the arm above, which only matches
+            // an alphabetic/`$`/`_` first byte.
+            c if c.is_ascii_digit() => {
+                let start = i;
+                let mut end = i;
+                while end < b.len() && b[end].is_ascii_digit() {
+                    end += 1;
+                }
+                let preceded_by_ident = start > 0 && is_ident_byte(b[start - 1]);
+                if !preceded_by_ident && end < b.len() && b[end] == b':' {
+                    if let Some(second_end) = scan_axis_only_after_colon(b, end) {
+                        if let Ok(parsed) = parse_a1(&formula[start..second_end]) {
+                            out.push(ReferenceSpan {
+                                span: start..second_end,
+                                local: start..second_end,
+                                parsed,
+                                qualified: false,
+                            });
+                            i = second_end;
+                            continue;
+                        }
+                    }
+                }
+                // An ordinary number (or the digits half of `1E5`, left for
+                // the alphabetic arm to judge next): nothing to record.
                 i = end;
             }
             // `[1]Sheet1!A1` — an external workbook qualifier.
@@ -292,14 +363,53 @@ pub fn scan_names_into(formula: &str, out: &mut Vec<NameSpan>) {
                     continue;
                 }
 
+                // `Jan:Dec!A1` — a 3-D reference, not two names either.
+                // Checked before the whole-column-shorthand skip below, for
+                // the same reason `scan_references_into` checks it first:
+                // `Jan:Dec` alone is exactly the shape of the shorthand
+                // `A:C`, and a `!` right after the second identifier is what
+                // tells the two apart.
+                if end < b.len() && b[end] == b':' {
+                    if let Some(bang) = scan_3d_sheet_range_bang(b, end) {
+                        i = match reference_after_qualifier(formula, b, bang, start) {
+                            Some((span, _, _)) => span.end,
+                            None => bang + 1,
+                        };
+                        continue;
+                    }
+                }
+
                 let is_call = end < b.len() && b[end] == b'(';
                 let preceded_by_ident = start > 0 && is_ident_byte(b[start - 1]);
                 let is_reference = parse_cell_token(&formula[start..end]).is_some();
                 if !is_call && !preceded_by_ident && !is_reference {
+                    // `A:A` — a bare column with no row is not a defined name
+                    // either, and neither is its partner past the colon; skip
+                    // both rather than let the second one be re-scanned as its
+                    // own token on the next pass through the loop.
+                    if end < b.len() && b[end] == b':' {
+                        if let Some(second_end) = scan_axis_only_after_colon(b, end) {
+                            if parse_a1(&formula[start..second_end]).is_ok() {
+                                i = second_end;
+                                continue;
+                            }
+                        }
+                    }
                     out.push(NameSpan {
                         span: start..end,
                         sheet_name: None,
                     });
+                }
+                i = end;
+            }
+            c if c.is_ascii_digit() => {
+                // A digit-led token is never a name on its own — Excel forbids
+                // it — so there is nothing to push here even for `3:3`'s
+                // partner. Advance past the whole run rather than one byte at
+                // a time, mirroring `scan_references_into`'s digit arm.
+                let mut end = i;
+                while end < b.len() && b[end].is_ascii_digit() {
+                    end += 1;
                 }
                 i = end;
             }
@@ -387,6 +497,72 @@ fn extend_to_range(formula: &str, b: &[u8], end: usize) -> Option<usize> {
     Some(second_end)
 }
 
+/// The position of the `!` in `IDENT:IDENT!...` — a 3-D reference's sheet
+/// range (`Jan:Dec!A1`) — if `colon` is immediately followed by an
+/// identifier run and that run is immediately followed by `!`. `None`
+/// otherwise.
+///
+/// `Jan:Dec` and the whole-column shorthand `A:C` are exactly the same
+/// shape, and nothing about the two identifiers themselves tells them apart
+/// — `letters_to_col` would happily read `JAN` and `DEC` as column codes.
+/// What tells them apart is what comes next: a whole-column reference is
+/// never itself sheet-qualified by a trailing `!`, so a `!` right after the
+/// second identifier is unambiguous evidence this is a sheet range, checked
+/// before the shorthand is ever attempted.
+fn scan_3d_sheet_range_bang(b: &[u8], colon: usize) -> Option<usize> {
+    debug_assert_eq!(b[colon], b':');
+    let second_start = colon + 1;
+    let second_end = scan_ident(b, second_start);
+    if second_end == second_start {
+        return None;
+    }
+    if second_end < b.len() && b[second_end] == b'!' {
+        Some(second_end)
+    } else {
+        None
+    }
+}
+
+/// The end of a `:`-following token that is a pure column or row half of a
+/// whole-column/row shorthand (`A:A`, `3:3`, and their `$`-prefixed and
+/// mixed-endpoint forms like `A:$C` or `3:5`) — optional `$`, then letters or
+/// digits but never both.
+///
+/// `None` when what follows is not that shape: in particular an ordinary cell
+/// corner (`A1`) must fall through to [`extend_to_range`] rather than being
+/// swallowed here as a truncated column, which is what a naive letters-only
+/// scan would do to `A:A1` — the digit-lookahead checks below exist for
+/// exactly that.
+fn scan_axis_only_after_colon(b: &[u8], colon: usize) -> Option<usize> {
+    debug_assert_eq!(b[colon], b':');
+    let mut i = colon + 1;
+    if i < b.len() && b[i] == b'$' {
+        i += 1;
+    }
+    let start = i;
+    if i < b.len() && b[i].is_ascii_alphabetic() {
+        while i < b.len() && b[i].is_ascii_alphabetic() {
+            i += 1;
+        }
+        if i < b.len() && b[i].is_ascii_digit() {
+            return None;
+        }
+    } else if i < b.len() && b[i].is_ascii_digit() {
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i < b.len() && (b[i].is_ascii_alphabetic() || b[i] == b'_' || b[i] == b'.') {
+            return None;
+        }
+    } else {
+        return None;
+    }
+    if i == start {
+        return None;
+    }
+    Some(i)
+}
+
 /// Parse the reference that follows a sheet qualifier ending at `bang`.
 ///
 /// `bang` indexes the `!`, or the byte just before it for a quoted name.
@@ -411,15 +587,25 @@ fn reference_after_qualifier(
     }
     // Validate the local part on its own before parsing the whole thing, so a
     // qualifier followed by a defined name is not mistaken for a reference.
-    parse_cell_token(&formula[local_start..local_end])?;
-    // `Sheet1!A1:A4` is one reference, not `Sheet1!A1` and a stray `A4`.
-    let local_end = match extend_to_range(formula, b, local_end) {
-        Some(extended) if parse_a1(&formula[start..extended]).is_ok() => extended,
-        _ => local_end,
-    };
-    let span = start..local_end;
-    let parsed = parse_a1(&formula[span.clone()]).ok()?;
-    Some((span, local_start..local_end, parsed))
+    if parse_cell_token(&formula[local_start..local_end]).is_some() {
+        // `Sheet1!A1:A4` is one reference, not `Sheet1!A1` and a stray `A4`.
+        let local_end = match extend_to_range(formula, b, local_end) {
+            Some(extended) if parse_a1(&formula[start..extended]).is_ok() => extended,
+            _ => local_end,
+        };
+        let span = start..local_end;
+        let parsed = parse_a1(&formula[span.clone()]).ok()?;
+        return Some((span, local_start..local_end, parsed));
+    }
+    // `Sheet1!A:A` / `Sheet1!3:3` — the whole-column/row shorthand, whose
+    // first half has no row (or no column) for `parse_cell_token` to accept.
+    if local_end < b.len() && b[local_end] == b':' {
+        let second_end = scan_axis_only_after_colon(b, local_end)?;
+        let span = start..second_end;
+        let parsed = parse_a1(&formula[span.clone()]).ok()?;
+        return Some((span, local_start..second_end, parsed));
+    }
+    None
 }
 
 /// Parse a bare `A1`-style token, rejecting anything that is not a reference.
@@ -449,6 +635,98 @@ fn parse_cell_token(token: &str) -> Option<ParsedRef> {
         return None;
     }
     parse_a1(token).ok()
+}
+
+/// Replace the string and numeric literals in formula text with
+/// `<text>`/`<number>` placeholders, keeping everything else — references,
+/// function names, operators, structure — intact.
+///
+/// A formula's own literals are the workbook's data as much as any cell's
+/// value is: `=IF(A2="Smith, John",B2*0.15,0)` names a person and a rate.
+/// Printing the formula unredacted while the cell's *value* shows `<number>`
+/// under `--redact-values` would leak exactly what the flag exists to
+/// withhold, so this is what a printing path calls on formula text under
+/// that flag, the same way it already calls a value redactor on the value.
+///
+/// References are found with [`scan_references`] and copied through
+/// verbatim, so a digit that is a row (`A100`) or a whole-row/column
+/// shorthand (`3:3`) is never mistaken for a literal — this walks only the
+/// text *between* reference spans. A digit run not preceded by an
+/// identifier byte (so `1` in `my.name1` is left alone, but `0.15` in
+/// `B2*0.15` is not) is a numeric literal, Excel's own shape: digits, an
+/// optional `.digits`, an optional `[eE][+-]?digits` exponent — the same
+/// lookahead [`scan_references_into`]'s digit arm uses to keep `1E5` from
+/// being misread. A double-quoted span is a string literal; a single-quoted
+/// one is sheet-name quoting, not a literal, and is copied through as-is.
+pub fn redact_formula_literals(formula: &str) -> String {
+    let refs = scan_references(formula);
+    let b = formula.as_bytes();
+    let mut out = String::with_capacity(formula.len());
+    let mut i = 0;
+    let mut ref_idx = 0;
+
+    while i < b.len() {
+        if ref_idx < refs.len() && refs[ref_idx].span.start == i {
+            let span = refs[ref_idx].span.clone();
+            out.push_str(&formula[span.clone()]);
+            i = span.end;
+            ref_idx += 1;
+            continue;
+        }
+        let preceded_by_ident = i > 0 && is_ident_byte(b[i - 1]);
+        let starts_number = !preceded_by_ident
+            && (b[i].is_ascii_digit()
+                || (b[i] == b'.' && b.get(i + 1).is_some_and(u8::is_ascii_digit)));
+        match b[i] {
+            b'"' => {
+                let end = skip_quoted(b, i, b'"');
+                out.push_str("<text>");
+                i = end;
+            }
+            _ if starts_number => {
+                let end = scan_number_literal(b, i);
+                out.push_str("<number>");
+                i = end;
+            }
+            _ => {
+                let ch = formula[i..]
+                    .chars()
+                    .next()
+                    .expect("i sits on a char boundary");
+                out.push_str(&formula[i..i + ch.len_utf8()]);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    out
+}
+
+/// Consume a numeric literal starting at a digit or at a `.` known to be
+/// followed by one: digits, an optional `.digits`, an optional
+/// `[eE][+-]?digits` exponent.
+fn scan_number_literal(b: &[u8], mut i: usize) -> usize {
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i < b.len() && b[i] == b'.' && i + 1 < b.len() && b[i + 1].is_ascii_digit() {
+        i += 1;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+        let mut j = i + 1;
+        if j < b.len() && (b[j] == b'+' || b[j] == b'-') {
+            j += 1;
+        }
+        if j < b.len() && b[j].is_ascii_digit() {
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            i = j;
+        }
+    }
+    i
 }
 
 /// Rewrite a formula's references relative to the cell that owns it.
@@ -794,6 +1072,68 @@ mod tests {
     }
 
     #[test]
+    fn whole_column_and_row_references_are_found() {
+        // Relative, absolute, sheet-qualified (bare and quoted): every form
+        // that produced zero references before must now yield exactly one.
+        assert_eq!(texts("SUM(A:A)"), ["A:A"]);
+        assert_eq!(texts("SUM($A:$C)"), ["$A:$C"]);
+        assert_eq!(texts("SUM(3:3)"), ["3:3"]);
+        assert_eq!(texts("SUM($3:$5)"), ["$3:$5"]);
+        assert_eq!(texts("SUM(Sheet1!B:B)"), ["Sheet1!B:B"]);
+        assert_eq!(texts("SUM(Sheet1!3:3)"), ["Sheet1!3:3"]);
+        assert_eq!(texts("SUM('Q3 Sales'!C:C)"), ["'Q3 Sales'!C:C"]);
+        assert_eq!(texts("SUM('Q3 Sales'!3:3)"), ["'Q3 Sales'!3:3"]);
+
+        let r = &scan_references("A:C")[0];
+        assert_eq!((r.parsed.left, r.parsed.right), (0, 2));
+        assert!(r.parsed.is_whole_column());
+
+        let r = &scan_references("Sheet1!B:B")[0];
+        assert!(r.qualified);
+        assert_eq!(r.parsed.sheet_name.as_deref(), Some("Sheet1"));
+        assert!(r.parsed.is_whole_column());
+    }
+
+    #[test]
+    fn a_bare_column_or_row_is_not_a_name() {
+        // Before the fix, `SUM(A:A)` scanned zero references and `scan_names`
+        // picked up the endpoints as `["A", "A"]` — a wrong `REFERENCES_NAME`
+        // edge waiting to happen if the workbook defined a name `A`.
+        assert_eq!(names("SUM(A:A)"), Vec::<String>::new());
+        assert_eq!(names("SUM(3:3)"), Vec::<String>::new());
+        assert_eq!(names("SUM(Sheet1!B:B)"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_3d_reference_is_not_mistaken_for_the_whole_column_shorthand() {
+        // `Jan:Dec` and the whole-column shorthand `A:C` are the identical
+        // shape — `letters_to_col` reads `JAN`/`DEC` as column codes just as
+        // happily as `A`/`C` — and the whole-column fix (C1) briefly broke
+        // this: `SUM(Jan:Mar!B2)` scanned `Jan:Mar` as a bogus column range
+        // and left a stray unqualified `B2` behind. A trailing `!` is what
+        // tells the two apart, and must be checked first.
+        assert_eq!(texts("SUM(Jan:Mar!B2)"), ["Jan:Mar!B2"]);
+        let r = &scan_references("Jan:Mar!B2")[0];
+        assert!(r.qualified);
+        assert_eq!(r.parsed.sheet_name.as_deref(), Some("Jan"));
+        assert_eq!(r.parsed.end_sheet_name.as_deref(), Some("Mar"));
+        assert!(!r.parsed.is_whole_column());
+
+        // Long sheet names (more than the three letters a column code could
+        // ever be) must work too — column-shaped parsing was never going to
+        // accept them, but the `!`-first check must not depend on that.
+        assert_eq!(texts("SUM(January:December!B2)"), ["January:December!B2"]);
+
+        // And a genuine whole-column reference, with no `!` after the second
+        // half, must still be read as one.
+        assert_eq!(texts("SUM(Jan:Mar)"), ["Jan:Mar"]);
+        assert!(scan_references("Jan:Mar")[0].parsed.is_whole_column());
+
+        // `scan_names` must not pick up either sheet name as a defined name.
+        assert_eq!(names("SUM(Jan:Mar!B2)"), Vec::<String>::new());
+    }
+
+    #[test]
     fn a_colon_not_followed_by_a_cell_ends_the_reference() {
         // The intersection and function forms must not swallow what follows.
         let f = "A1:INDEX(B:B,2)";
@@ -811,5 +1151,73 @@ mod tests {
             to_r1c1_shape("SUM(D1:D4)", anchor),
             to_r1c1_shape("SUM(D2:D5)", CellRef::new(SheetId(0), 5, 3))
         );
+    }
+
+    #[test]
+    fn redaction_replaces_literals_and_keeps_structure() {
+        assert_eq!(
+            redact_formula_literals("IF(A2=\"Smith, John\",B2*0.15,0)"),
+            "IF(A2=<text>,B2*<number>,<number>)"
+        );
+    }
+
+    #[test]
+    fn redaction_leaves_a_formula_with_only_references_unchanged() {
+        assert_eq!(redact_formula_literals("A1+A2"), "A1+A2");
+        assert_eq!(
+            redact_formula_literals("SUM(Sheet1!A1:B9)"),
+            "SUM(Sheet1!A1:B9)"
+        );
+        // References and `FALSE` (a keyword, not a literal this scanner
+        // touches) survive; the column index `2` is a genuine numeric
+        // literal and is redacted like any other.
+        assert_eq!(
+            redact_formula_literals("VLOOKUP(A1,Rates!A:B,2,FALSE)"),
+            "VLOOKUP(A1,Rates!A:B,<number>,FALSE)"
+        );
+    }
+
+    #[test]
+    fn redaction_handles_scientific_notation_as_one_literal() {
+        assert_eq!(redact_formula_literals("A1*1E5"), "A1*<number>");
+        assert_eq!(redact_formula_literals("1.5E-3+B2"), "<number>+B2");
+    }
+
+    #[test]
+    fn redaction_does_not_touch_digits_inside_a_name() {
+        // `my.name1` is a legal defined name (see
+        // `defined_names_are_not_references`); the trailing `1` must survive.
+        assert_eq!(redact_formula_literals("my.name1*2"), "my.name1*<number>");
+    }
+
+    #[test]
+    fn redaction_leaves_sheet_name_quoting_alone() {
+        // The quotes around a sheet name are not a string literal.
+        assert_eq!(
+            redact_formula_literals("'Q3 Sales'!A1+\"total\""),
+            "'Q3 Sales'!A1+<text>"
+        );
+    }
+
+    #[test]
+    fn redaction_handles_a_string_containing_formula_punctuation() {
+        assert_eq!(
+            redact_formula_literals("CONCATENATE(\"a, b (c)\",A1)"),
+            "CONCATENATE(<text>,A1)"
+        );
+    }
+
+    #[test]
+    fn redaction_survives_a_doubled_quote_inside_a_string() {
+        assert_eq!(
+            redact_formula_literals("A1&\"say \"\"hi\"\"\""),
+            "A1&<text>"
+        );
+    }
+
+    #[test]
+    fn redaction_is_utf8_safe() {
+        let f = "IF(A1,\"café — ok\",B1*2)";
+        assert_eq!(redact_formula_literals(f), "IF(A1,<text>,B1*<number>)");
     }
 }

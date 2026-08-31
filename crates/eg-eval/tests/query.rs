@@ -38,6 +38,7 @@ fn region(bottom: u32, right: u16, headers: &[&str]) -> Region {
         header_cols: 1,
         headers: headers.iter().map(|h| h.to_string()).collect(),
         cell_count: 0,
+        totals_rows: 0,
     }
 }
 
@@ -247,6 +248,57 @@ fn counting_values_and_counting_rows_are_different_questions() {
 fn a_query_asking_for_nothing_is_refused() {
     let err = ask(Query::default()).unwrap_err();
     assert!(matches!(err, QueryError::NothingAsked), "{err}");
+}
+
+#[test]
+fn a_zero_limit_is_refused_rather_than_silently_read_as_one() {
+    // L22: `limit: 0` used to mean "show one group anyway" — a caller who
+    // wrote 0 got a different answer from the one they asked for, with
+    // nothing to say so.
+    let err = ask(Query {
+        aggregates: vec![Aggregate::Count],
+        limit: 0,
+        ..Default::default()
+    })
+    .unwrap_err();
+    assert!(matches!(err, QueryError::NoLimit), "{err}");
+}
+
+#[test]
+fn text_equality_folds_case_the_same_way_contains_does() {
+    // L22: `Test::Is`/`OneOf` used ASCII-only case folding while
+    // `Test::Contains` (and this crate's other text comparisons) fold on
+    // full Unicode `to_lowercase` — a non-ASCII letter could disagree with
+    // one and agree with the other on the very same cell.
+    let sheet = grid(&["Label Customer Debt", "a CAFÉ 5", "b other 1"]);
+    let table = read_table(&sheet, &region(2, 2, &["Customer", "Debt"])).unwrap();
+    let workbook = Workbook {
+        path: "case.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash".into(),
+        sheets: vec![sheet],
+        defined_names: Vec::new(),
+        external_links: Vec::new(),
+    };
+    let answer = query(
+        &workbook,
+        &table,
+        &Query {
+            filters: vec![Filter {
+                column: "Customer".into(),
+                test: Test::Is(CellValue::Text("café".into())),
+            }],
+            aggregates: vec![Aggregate::Count],
+            limit: 10,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        answer.one().unwrap().counts[0],
+        Some(1),
+        "CAFÉ and café are the same word under Unicode case folding"
+    );
 }
 
 #[test]

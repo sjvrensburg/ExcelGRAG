@@ -389,3 +389,70 @@ fn a_question_about_nothing_in_the_corpus_says_so_before_it_answers() {
         "it names the words that are absent: {warning}"
     );
 }
+
+#[test]
+fn a_question_with_no_content_words_is_not_run_as_a_search() {
+    // Every word of "show me all" is in FRAME. Before M13 this reached
+    // `VectorIndex::search`, which is thresholdless top-k and always returns
+    // hits — so `covered` came back empty (`Verdict::Blind`) and the banner
+    // interpolated an empty list: "BLIND MATCH: none of  appears anywhere in
+    // this corpus". The true situation is that there was nothing to search
+    // on, which gets its own verdict and never touches retrieval at all.
+    let root = indexed("no-content-words");
+    let dir = root.to_str().unwrap();
+    let found = find(
+        dir,
+        "show me all",
+        &SearchOptions {
+            limit: 5,
+            ..Default::default()
+        },
+        &Fusion::lexical(),
+    )
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert_eq!(found.verdict(), Verdict::NoContentWords);
+    assert!(found.is_empty(), "retrieval must not have run at all");
+    let warning = found.warning().expect("this case still raises a banner");
+    assert!(
+        warning.contains("frame word"),
+        "names why, not a malformed list: {warning}"
+    );
+    assert!(
+        !warning.contains("none of  "),
+        "must not interpolate an empty word list: {warning}"
+    );
+}
+
+#[test]
+fn a_corrupted_lexical_index_is_an_error_not_an_empty_search() {
+    // H3: every lexical search error used to go through `unwrap_or_default()`,
+    // so a corrupted or unreadable segment came back as zero hits —
+    // indistinguishable from "the corpus genuinely has nothing", the exact
+    // dishonesty the evidence layer exists to rule out.
+    let root = indexed("corrupted");
+    for entry in std::fs::read_dir(root.join("text")).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .extension()
+            .is_some_and(|e| e == "store" || e == "idx" || e == "pos" || e == "fast")
+        {
+            std::fs::write(&path, b"not a valid tantivy segment file").unwrap();
+        }
+    }
+
+    let dir = root.to_str().unwrap();
+    let result = find(
+        dir,
+        "bad debt provision",
+        &SearchOptions::default(),
+        &Fusion::lexical(),
+    );
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(
+        result.is_err(),
+        "a corrupted segment must surface as an error, not {result:?}"
+    );
+}

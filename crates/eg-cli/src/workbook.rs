@@ -11,7 +11,7 @@ use std::time::Instant;
 use eg_eval::whatif::{what_if, Blocked, Change, WhatIfOptions};
 use eg_eval::{cells_in, check as check_formulas, dependents_of, precedents_of, Outcome, Target};
 use eg_ingest::{load_with, LoadOptions};
-use eg_model::{parse_a1, CellValue, RangeRef, Workbook};
+use eg_model::{parse_a1, redact_formula_literals, CellValue, RangeRef, Workbook};
 
 /// Open a workbook, saying how long it took, because on a real file the wait
 /// wants explaining.
@@ -64,6 +64,20 @@ fn show(value: &CellValue, redact: bool) -> String {
     }
 }
 
+/// A formula's text, with its own literals hidden the same way a value is.
+///
+/// A formula's literals are the workbook's data as much as any cell's value
+/// is — `=IF(A2="Smith, John",B2*0.15,0)` names a person and a rate — so
+/// printing it unredacted while the value column shows `<number>` would leak
+/// exactly what `--redact-values` exists to withhold.
+fn show_formula(formula: &str, redact: bool) -> String {
+    if redact {
+        redact_formula_literals(formula)
+    } else {
+        formula.to_string()
+    }
+}
+
 pub fn cells(path: &str, citation: &str, limit: usize, redact: bool) -> Result<(), String> {
     let workbook = open(path)?;
     let range = locate(&workbook, citation)?;
@@ -78,7 +92,7 @@ pub fn cells(path: &str, citation: &str, limit: usize, redact: bool) -> Result<(
     for fact in &cells {
         print!("  {:<28}", fact.a1);
         if let Some(formula) = &fact.formula {
-            print!(" ={formula}");
+            print!(" ={}", show_formula(formula, redact));
         }
         println!("  {}", show(&fact.value, redact));
     }
@@ -149,7 +163,11 @@ pub fn trace(path: &str, citation: &str, dependents: bool, limit: usize) -> Resu
     Ok(())
 }
 
-pub fn check(path: &str, scope: Option<&str>, limit: usize, redact: bool) -> Result<(), String> {
+/// Sweep a workbook's formulas, printing the report. Returns whether any
+/// disagreed — CLAUDE.md calls any disagreement a regression, and a caller
+/// (CI, most of all) cannot gate on that from stdout alone, so `main` turns
+/// this into a non-zero exit rather than the same 0 a clean sweep gets.
+pub fn check(path: &str, scope: Option<&str>, limit: usize, redact: bool) -> Result<bool, String> {
     let workbook = open(path)?;
     let range = match scope {
         Some(citation) => Some(locate(&workbook, citation)?),
@@ -197,7 +215,11 @@ pub fn check(path: &str, scope: Option<&str>, limit: usize, redact: bool) -> Res
         report.differed
     );
     for result in &differed {
-        println!("  {:<28} ={}", result.a1, result.formula);
+        println!(
+            "  {:<28} ={}",
+            result.a1,
+            show_formula(&result.formula, redact)
+        );
         match &result.outcome {
             Outcome::Differs { computed, stored } => println!(
                 "    computed {}, stored {}",
@@ -210,7 +232,7 @@ pub fn check(path: &str, scope: Option<&str>, limit: usize, redact: bool) -> Res
     if differed.is_empty() {
         println!("  none — every formula this can evaluate agrees with its stored value");
     }
-    Ok(())
+    Ok(report.differed > 0)
 }
 
 /// One `Sheet!A1=value` assignment, as a change to a single cell.
@@ -219,8 +241,7 @@ pub fn check(path: &str, scope: Option<&str>, limit: usize, redact: bool) -> Res
 /// parses as one, TRUE or FALSE as a boolean, nothing at all as an empty cell,
 /// and anything else as text. Quotes force text, so `A1="12"` is the string.
 fn assignment(workbook: &Workbook, text: &str) -> Result<Change, String> {
-    let (citation, value) = text
-        .split_once('=')
+    let (citation, value) = split_assignment(text)
         .ok_or_else(|| format!("{text:?} is not a change. Write one as \"Sheet1!B2=0.15\"."))?;
     let range = locate(workbook, citation.trim())?;
     if range.cell_count() != 1 {
@@ -230,6 +251,30 @@ fn assignment(workbook: &Workbook, text: &str) -> Result<Change, String> {
         ));
     }
     Ok(Change::new(range.top_left(), parse_literal(value.trim())))
+}
+
+/// Splits `Sheet!A1=value` on the assignment `=`, scanning past a leading
+/// quoted sheet name first — `'It''s a sheet with = in it'!A1=5` must not
+/// split on the `=` inside the quotes, the same way `parse_a1` reads it.
+/// Falls back to the first `=` in the whole text when there is no leading
+/// quote, or the quote never closes (a citation error `locate` will report).
+fn split_assignment(text: &str) -> Option<(&str, &str)> {
+    let mut after_quote = 0;
+    if let Some(rest) = text.strip_prefix('\'') {
+        let mut i = 0;
+        while let Some(off) = rest[i..].find('\'') {
+            i += off + 1;
+            if rest[i..].starts_with('\'') {
+                i += 1; // a doubled quote is an escaped literal quote
+                continue;
+            }
+            after_quote = 1 + i;
+            break;
+        }
+        // else: unterminated quote — let the plain search below run
+    }
+    let eq = text[after_quote..].find('=')? + after_quote;
+    Some((&text[..eq], &text[eq + 1..]))
 }
 
 fn parse_literal(text: &str) -> CellValue {
@@ -287,7 +332,7 @@ pub fn whatif(
             show(&applied.after, redact)
         );
         if let Some(formula) = &applied.replaced_formula {
-            println!("  replacing ={formula}");
+            println!("  replacing ={}", show_formula(formula, redact));
         }
     }
 
@@ -308,7 +353,11 @@ pub fn whatif(
     if !impact.moved.is_empty() {
         println!("\nmoved ({} of {})", impact.moved.len(), report.moved);
         for moved in &impact.moved {
-            println!("  {:<28} ={}", moved.a1, moved.formula);
+            println!(
+                "  {:<28} ={}",
+                moved.a1,
+                show_formula(&moved.formula, redact)
+            );
             println!(
                 "    {} → {}   (level {}){}",
                 show(&moved.before, redact),
@@ -410,6 +459,26 @@ mod tests {
     }
 
     #[test]
+    fn a_quoted_sheet_name_holding_an_equals_sign_is_not_split_on() {
+        // L7: a naive `split_once('=')` breaks the moment the sheet name
+        // itself contains one, even though `parse_a1` reads a quoted sheet
+        // name fine.
+        let mut wb = workbook();
+        wb.sheets.push(Sheet::new(SheetId(2), "Cost = Price"));
+        let change = assignment(&wb, "'Cost = Price'!A1=5").expect("a change");
+        assert_eq!(change.cell.sheet, SheetId(2));
+        assert_eq!(change.value, CellValue::Number(5.0));
+
+        // And a doubled quote inside the name (Excel's escape for a literal
+        // quote) must not be mistaken for the closing quote.
+        let mut wb = workbook();
+        wb.sheets.push(Sheet::new(SheetId(2), "It's = Fine"));
+        let change = assignment(&wb, "'It''s = Fine'!B2=7").expect("a change");
+        assert_eq!(change.cell.sheet, SheetId(2));
+        assert_eq!(change.value, CellValue::Number(7.0));
+    }
+
+    #[test]
     fn a_change_names_one_cell_and_says_so_when_it_does_not() {
         let wb = workbook();
         let error = assignment(&wb, "'Q3 Sales'!A1:B9=1").expect_err("a range");
@@ -425,5 +494,24 @@ mod tests {
         assert_eq!(show(&value, true), "<number>");
         assert_eq!(show(&CellValue::Text("debt".into()), false), "\"debt\"");
         assert_eq!(show(&CellValue::Text("debt".into()), true), "<text>");
+    }
+
+    #[test]
+    fn formula_redaction_drops_literals_the_way_read_cells_and_check_print_them() {
+        // The exact site `cells`/`check`/`whatif` all call before splicing a
+        // formula into their output: a redacted formula must carry no
+        // literal a redacted value wouldn't have shown either.
+        let formula = "IF(A2=\"Smith, John\",B2*0.15,0)";
+        assert_eq!(show_formula(formula, false), formula);
+        assert_eq!(
+            show_formula(formula, true),
+            "IF(A2=<text>,B2*<number>,<number>)"
+        );
+        // References survive redaction — only literals are the workbook's
+        // data; a range is where to look, not what is there.
+        assert_eq!(
+            show_formula("VLOOKUP(A1,Rates!A1:B9,2,FALSE)", true),
+            "VLOOKUP(A1,Rates!A1:B9,<number>,FALSE)"
+        );
     }
 }

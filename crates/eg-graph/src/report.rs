@@ -60,6 +60,14 @@ pub struct BuildReport {
     /// Formula groups whose anchor fell in no region. Should be zero, for the
     /// same reason.
     pub formula_groups_outside_any_region: u64,
+    /// Formula groups whose rectangle reaches past the region that owns their
+    /// top-left cell — two regions abutting with no gap between them, most
+    /// often. CONTAINS still wires the group to the one region alone (V2,
+    /// `docs/audit-2026-08-31.md`), so retrieval walking in from the second
+    /// region never finds it. Region detection does not emit abutting
+    /// regions today, so this should be zero; if it ever is not, this number
+    /// is what changed.
+    pub formula_groups_spanning_regions: u64,
 
     /// Up to `GraphOptions::max_dangling_examples` worked examples. The counts
     /// above are exact; this is for reading, not for arithmetic.

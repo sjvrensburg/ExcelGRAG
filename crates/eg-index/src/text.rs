@@ -93,6 +93,15 @@ pub enum IndexError {
         #[source]
         source: TantivyError,
     },
+    /// The index on disk was built by a schema this version no longer writes.
+    /// Only [`TextIndex::open`] returns this; [`TextIndex::open_or_reset`]
+    /// rebuilds instead, which is the only place a stale index should ever be
+    /// silently discarded.
+    #[error(
+        "the lexical index at {path} was built by a schema this version of eg no longer writes \
+         — run `eg index <corpus>` to rebuild it"
+    )]
+    StaleSchema { path: String },
 }
 
 fn io_err(context: impl Into<String>) -> impl FnOnce(io::Error) -> IndexError {
@@ -228,16 +237,35 @@ pub struct TextIndex {
 }
 
 impl TextIndex {
-    /// Open the index under `root`, creating it if it is not there.
+    /// Open the index under `root`, read-only with respect to its schema.
     ///
     /// `root` is the corpus directory: the index goes in `root/text`, so one
-    /// path names the graphs and the index over them.
+    /// path names the graphs and the index over them. A directory with
+    /// nothing indexed yet still opens, empty — that is an ordinary state,
+    /// not staleness.
     ///
-    /// An index whose schema is not the current one is deleted and rebuilt
-    /// empty, the same trade the corpus makes for a stored graph from another
-    /// format version. Reindexing costs seconds, and there is no honest way to
-    /// read documents laid out by a schema we no longer have.
+    /// An index whose schema is not the current one is [`IndexError::StaleSchema`],
+    /// never a silent rebuild: a schema change ships in a new version of `eg`,
+    /// and a read-only verb like `ask` wiping yesterday's index out from under
+    /// a question is a worse surprise than an error telling the caller to
+    /// reindex. [`TextIndex::open_or_reset`] is the one place that rebuild is
+    /// allowed to happen.
     pub fn open(root: impl AsRef<Path>) -> Result<TextIndex, IndexError> {
+        Self::open_impl(root, false)
+    }
+
+    /// As [`TextIndex::open`], but an index from another schema is deleted
+    /// and rebuilt empty rather than refused.
+    ///
+    /// Only the indexing path should call this: reindexing costs seconds, and
+    /// there is no honest way to read documents laid out by a schema we no
+    /// longer have, but *discarding* them is a decision only a write ought to
+    /// make.
+    pub fn open_or_reset(root: impl AsRef<Path>) -> Result<TextIndex, IndexError> {
+        Self::open_impl(root, true)
+    }
+
+    fn open_impl(root: impl AsRef<Path>, reset_on_mismatch: bool) -> Result<TextIndex, IndexError> {
         let dir = root.as_ref().join("text");
         let (schema, fields) = Fields::build();
 
@@ -245,6 +273,11 @@ impl TextIndex {
 
         let index = match Index::open_in_dir(&dir) {
             Ok(existing) if existing.schema() == schema => existing,
+            Ok(_) if !reset_on_mismatch => {
+                return Err(IndexError::StaleSchema {
+                    path: dir.display().to_string(),
+                });
+            }
             Ok(_) => {
                 fs::remove_dir_all(&dir).map_err(io_err(format!("clearing {}", dir.display())))?;
                 fs::create_dir_all(&dir).map_err(io_err(format!("creating {}", dir.display())))?;
@@ -253,8 +286,9 @@ impl TextIndex {
                     dir.display()
                 )))?
             }
-            // Not an index yet, or one we cannot read. Either way there is
-            // nothing to preserve, so create over it.
+            // Not an index yet, or one we cannot read as one at all — there is
+            // nothing whose schema could be stale, so creating fresh is not
+            // the discard `StaleSchema` exists to guard against.
             Err(_) => Index::create_in_dir(&dir, schema.clone()).map_err(tantivy_err(format!(
                 "creating an index in {}",
                 dir.display()
@@ -370,9 +404,7 @@ impl TextIndex {
     /// Search, most relevant first.
     pub fn search(&self, query: &str, opts: &SearchOptions) -> Result<Vec<Hit>, IndexError> {
         let searcher = self.searcher()?;
-        let Some(query) = self.build_query(query, opts) else {
-            return Ok(Vec::new());
-        };
+        let query = self.build_query(query, opts);
 
         let top = searcher
             .search(
@@ -409,10 +441,11 @@ impl TextIndex {
 
     /// The user's query, with the filters wrapped around it.
     ///
-    /// `None` when the query text produces nothing to match, which is not an
-    /// error: an empty query is an empty result, and returning the whole corpus
-    /// filtered by kind would be a different question than the one asked.
-    fn build_query(&self, text: &str, opts: &SearchOptions) -> Option<Box<dyn Query>> {
+    /// Always builds one — an empty or unparseable query text still parses
+    /// (leniently, see below) to a query tantivy matches nothing against,
+    /// not everything, so there is no "produced nothing to match" case that
+    /// needs its own signal back to the caller.
+    fn build_query(&self, text: &str, opts: &SearchOptions) -> Box<dyn Query> {
         let fields = self.fields.search_fields();
         let mut parser = QueryParser::for_index(&self.index, fields.iter().map(|f| f.0).collect());
         for (field, boost) in fields {
@@ -441,7 +474,7 @@ impl TextIndex {
             clauses.push((Occur::Must, Box::new(BooleanQuery::new(any))));
         }
 
-        Some(Box::new(BooleanQuery::new(clauses)))
+        Box::new(BooleanQuery::new(clauses))
     }
 
     fn term_query(&self, field: Field, value: &str) -> Box<dyn Query> {

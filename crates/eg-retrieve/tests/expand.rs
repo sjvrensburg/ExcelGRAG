@@ -76,6 +76,24 @@ fn wide() -> Workbook {
     }
 }
 
+/// Three unrelated sheets, each a one-column table, so each seed's ancestry
+/// (region, sheet) is independent of the others' — nothing shared to bias the
+/// budget one way or another except pop order.
+fn three_sheets() -> Workbook {
+    Workbook {
+        path: "three.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash-three".into(),
+        sheets: vec![
+            grid(0, "SheetA", &["ColA", "1", "2"]),
+            grid(1, "SheetB", &["ColB", "1", "2"]),
+            grid(2, "SheetC", &["ColC", "1", "2"]),
+        ],
+        defined_names: Vec::new(),
+        external_links: Vec::new(),
+    }
+}
+
 fn dir(tag: &str) -> std::path::PathBuf {
     let base = std::env::temp_dir().join(format!(
         "eg-retrieve-{tag}-{}-{:?}",
@@ -716,6 +734,62 @@ fn a_budget_that_runs_out_spends_it_on_the_better_ranked_seed() {
 }
 
 #[test]
+fn a_budget_that_runs_out_spends_it_on_the_better_ranked_seeds_ancestry() {
+    // M6: `pending` used to be drained LIFO, so the *worst*-ranked seed's
+    // ancestry (and children) consumed whatever budget was left before the
+    // best-ranked seed's own context ever got a look in — inverting "a
+    // budget that runs out never costs a better-ranked hit for a worse one"
+    // for exactly the thing that makes a hit citable. All three seeds fit;
+    // their ancestry does not.
+    let (_root, corpus) = corpus_of("ancestry-order", &[three_sheets()]);
+    let a = hit_for(&corpus, "hash-three", "ColA", NodeKind::Column);
+    let b = hit_for(&corpus, "hash-three", "ColB", NodeKind::Column);
+    let c = hit_for(&corpus, "hash-three", "ColC", NodeKind::Column);
+
+    let found = expand(
+        &corpus,
+        &[a.clone(), b.clone(), c.clone()],
+        &ExpandOptions {
+            // 3 seeds + one seed's full ancestry (region, sheet).
+            budget: 5,
+            hops: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert!(found.truncated());
+    let nodes = &found.workbooks[0].nodes;
+    // Every seed is still there — the budget cut ancestry, not admission.
+    let labels: Vec<&str> = nodes.iter().map(|n| n.label.as_str()).collect();
+    assert!(labels.contains(&"ColA") && labels.contains(&"ColB") && labels.contains(&"ColC"));
+
+    assert!(
+        !ancestors_of(nodes, a.node).is_empty(),
+        "the best-ranked seed's ancestry must survive: {labels:?}"
+    );
+    assert!(
+        ancestors_of(nodes, c.node).is_empty(),
+        "the worst-ranked seed's ancestry is what the budget should cut: {labels:?}"
+    );
+}
+
+/// The ancestors of `seed` present in `nodes` — the containing region, sheet
+/// and so on — found by walking `parent` up from the seed itself.
+fn ancestors_of(nodes: &[RetrievedNode], seed: u32) -> Vec<&RetrievedNode> {
+    let mut out = Vec::new();
+    let mut cur = nodes.iter().find(|n| n.node == seed).and_then(|n| n.parent);
+    while let Some(of) = cur {
+        let Some(found) = nodes.iter().find(|n| n.node == of) else {
+            break;
+        };
+        out.push(found);
+        cur = found.parent;
+    }
+    out
+}
+
+#[test]
 fn only_a_seed_carries_a_search_score() {
     let (_root, corpus) = corpus_of("scores", &[chain()]);
     let seed = hit_for(&corpus, "hash-chain", "Net", NodeKind::Column);
@@ -772,6 +846,15 @@ fn a_hit_pointing_past_the_end_of_the_graph_is_skipped_not_panicked_on() {
 
     let found = expand(&corpus, &[seed], &ExpandOptions::default()).unwrap();
     assert_eq!(found.total_nodes(), 0);
+    // L16: an out-of-range seed must be counted into the report the same way
+    // a workbook the index still thinks is in the corpus is — not silently
+    // dropped, which used to leave `found` looking like an empty-but-clean
+    // answer indistinguishable from a search that ranked nothing at all.
+    assert_eq!(
+        found.workbooks[0].stale_seeds,
+        vec![100_000],
+        "the stale node number is named, not just counted"
+    );
 }
 
 #[test]

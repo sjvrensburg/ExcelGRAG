@@ -141,17 +141,25 @@ impl Table {
     /// row `n` position `i` is always column `i` — a sheet holds only its
     /// populated cells, and a row that skipped its gaps would misalign
     /// everything after them.
+    ///
+    /// One `iter_range` scan per row, not one point lookup per cell: a sheet
+    /// is an ordered map keyed by (row, column), so a per-column probe costs a
+    /// `BTreeMap` lookup each — the same access pattern that measured 3.5x
+    /// slower in `read_table` before it was rewritten to a single row-major
+    /// pass, which this reproduced by handing out a row iterator that never
+    /// got the same treatment.
     pub fn read<'a>(&'a self, sheet: &'a Sheet) -> impl Iterator<Item = Vec<CellValue>> + 'a {
+        let left = self.body.left;
+        let width = self.columns.len();
         (self.body.top..=self.body.bottom).map(move |row| {
-            self.columns
-                .iter()
-                .map(|column| {
-                    sheet
-                        .get_ref(CellRef::new(self.body.sheet, row, column.range.left))
-                        .map(|cell| cell.value.clone())
-                        .unwrap_or(CellValue::Empty)
-                })
-                .collect()
+            let mut out = vec![CellValue::Empty; width];
+            let row_range = RangeRef::new(self.body.sheet, row, left, row, self.body.right);
+            for (at, cell) in sheet.iter_range(row_range) {
+                if let Some(slot) = out.get_mut(usize::from(at.col - left)) {
+                    *slot = cell.value.clone();
+                }
+            }
+            out
         })
     }
 
@@ -339,6 +347,7 @@ mod tests {
             header_cols: 1,
             headers: vec!["Rate".to_string()],
             cell_count: 9,
+            totals_rows: 0,
         };
         let table = read_table(&sheet, &region).unwrap();
         assert_eq!(table.column("Rate").unwrap().kind, ColumnKind::Mixed);

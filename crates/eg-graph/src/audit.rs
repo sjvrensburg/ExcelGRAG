@@ -33,7 +33,12 @@
 //! It audits the two dependency kinds whose target is chosen by *geometry* —
 //! `DEPENDS_ON` and `CROSS_SHEET_REF`. `CROSS_WORKBOOK_REF` and
 //! `REFERENCES_NAME` resolve by name rather than by rectangle, and `check`
-//! already pins both to the exact reference counts that produced them.
+//! pins both to the exact reference counts that produced them — but only in
+//! total, across every edge of that kind; a name resolved to the *wrong*
+//! defined-name node at the same total weight passes `check` too, since
+//! nothing here re-derives which edge should carry which name's weight (V1,
+//! `docs/audit-2026-08-31.md`). Extending this module to do that is future
+//! work, not something either check already covers.
 //!
 //! Because it reads regions and edges out of a [`Graph`], it audits a graph
 //! read back from a [`crate::store::Corpus`] just as well as a freshly built
@@ -154,6 +159,11 @@ pub fn audit(workbook: &Workbook, graph: &Graph, opts: &AuditOptions) -> AuditRe
     let index = GraphIndex::of(graph);
     let mut expected: FxHashMap<Key, Expectation> = FxHashMap::default();
     let mut spans: Vec<ReferenceSpan> = Vec::new();
+    // See `keep`: two separately-capped buckets, so `AmbiguousContainment`
+    // (found first, during this per-cell scan) cannot crowd every decisive
+    // edge-comparison finding out of a capped report.
+    let mut decisive: Vec<Finding> = Vec::new();
+    let mut ambiguous_findings: Vec<Finding> = Vec::new();
 
     for sheet in &workbook.sheets {
         for (at, cell) in sheet.iter() {
@@ -162,11 +172,12 @@ pub fn audit(workbook: &Workbook, graph: &Graph, opts: &AuditOptions) -> AuditRe
             };
             report.formulas_read += 1;
 
-            let (source, ambiguous) = index.owner_of(at);
-            if ambiguous {
+            let (source, is_ambiguous) = index.owner_of(at);
+            if is_ambiguous {
                 report.findings_total += 1;
                 keep(
-                    &mut report,
+                    &mut decisive,
+                    &mut ambiguous_findings,
                     opts,
                     FindingKind::AmbiguousContainment,
                     format!(
@@ -185,31 +196,36 @@ pub fn audit(workbook: &Workbook, graph: &Graph, opts: &AuditOptions) -> AuditRe
             scan_references_into(formula, &mut spans);
             for span in &spans {
                 report.references_read += 1;
-                let Some(range) = resolve(workbook, sheet.id, span) else {
+                let Some(ranges) = resolve(workbook, sheet.id, span) else {
                     continue;
                 };
-                let kind = if range.sheet == sheet.id {
-                    EdgeKind::DependsOn
-                } else {
-                    EdgeKind::CrossSheetRef
-                };
 
+                // One reference, one `references_landed` outcome, however
+                // many sheets it spans — mirrors `build`'s own aggregation
+                // over `spanned_sheets` exactly.
                 let mut landed = false;
-                for &(region, node) in index.regions_on(range.sheet) {
-                    if !region.intersects(&range) {
-                        continue;
-                    }
-                    landed = true;
-                    // A region depending on itself is the ordinary case and
-                    // tells a traversal nothing, so the build drops it and so
-                    // does the expectation.
-                    if node == source {
-                        continue;
-                    }
-                    let entry = expected.entry((source, node, kind)).or_default();
-                    entry.weight += 1;
-                    if entry.example.is_none() {
-                        entry.example = Some((at, span.text(formula).to_string()));
+                for range in ranges {
+                    let kind = if range.sheet == sheet.id {
+                        EdgeKind::DependsOn
+                    } else {
+                        EdgeKind::CrossSheetRef
+                    };
+                    for &(region, node) in index.regions_on(range.sheet) {
+                        if !region.intersects(&range) {
+                            continue;
+                        }
+                        landed = true;
+                        // A region depending on itself is the ordinary case
+                        // and tells a traversal nothing, so the build drops
+                        // it and so does the expectation.
+                        if node == source {
+                            continue;
+                        }
+                        let entry = expected.entry((source, node, kind)).or_default();
+                        entry.weight += 1;
+                        if entry.example.is_none() {
+                            entry.example = Some((at, span.text(formula).to_string()));
+                        }
                     }
                 }
                 if landed {
@@ -219,7 +235,7 @@ pub fn audit(workbook: &Workbook, graph: &Graph, opts: &AuditOptions) -> AuditRe
         }
     }
 
-    let actual = index.dependency_edges(&mut report, opts);
+    let actual = index.dependency_edges(&mut report, &mut decisive, &mut ambiguous_findings, opts);
     report.edges_expected = expected.len() as u64;
     report.edges_in_graph = actual.len() as u64;
 
@@ -240,7 +256,8 @@ pub fn audit(workbook: &Workbook, graph: &Graph, opts: &AuditOptions) -> AuditRe
             (Some(want), Some(have)) => {
                 report.findings_total += 1;
                 keep(
-                    &mut report,
+                    &mut decisive,
+                    &mut ambiguous_findings,
                     opts,
                     FindingKind::WeightDisagrees,
                     format!(
@@ -255,7 +272,8 @@ pub fn audit(workbook: &Workbook, graph: &Graph, opts: &AuditOptions) -> AuditRe
             (Some(want), None) => {
                 report.findings_total += 1;
                 keep(
-                    &mut report,
+                    &mut decisive,
+                    &mut ambiguous_findings,
                     opts,
                     FindingKind::MissingEdge,
                     format!(
@@ -269,7 +287,8 @@ pub fn audit(workbook: &Workbook, graph: &Graph, opts: &AuditOptions) -> AuditRe
             (None, Some(have)) => {
                 report.findings_total += 1;
                 keep(
-                    &mut report,
+                    &mut decisive,
+                    &mut ambiguous_findings,
                     opts,
                     FindingKind::UnaccountedEdge,
                     format!(
@@ -281,6 +300,23 @@ pub fn audit(workbook: &Workbook, graph: &Graph, opts: &AuditOptions) -> AuditRe
             }
             (None, None) => unreachable!("key came from one of the two maps"),
         }
+    }
+
+    // `decisive` and `ambiguous` are kept in two separately-capped buckets
+    // rather than one — `AmbiguousContainment` comes from the per-cell scan
+    // first, before a single edge is even compared, so capping one shared
+    // list as findings are found let a workbook rich in containment
+    // ambiguity fill the whole cap before any actually-decisive edge
+    // mismatch was kept as an example. Each bucket stays bounded by
+    // `max_findings` on its own — the reason for a cap at all is that one
+    // mis-lifted region can account for millions of findings, and this must
+    // not become "collect them all, then discard most."
+    report.findings = decisive;
+    if report.findings.len() < opts.max_findings {
+        let room = opts.max_findings - report.findings.len();
+        report
+            .findings
+            .extend(ambiguous_findings.into_iter().take(room));
     }
 
     report.audit_time = started.elapsed();
@@ -296,27 +332,42 @@ struct Expectation {
     example: Option<(CellRef, String)>,
 }
 
-fn keep(report: &mut AuditReport, opts: &AuditOptions, kind: FindingKind, detail: String) {
-    if report.findings.len() < opts.max_findings {
-        report.findings.push(Finding { kind, detail });
+/// Routes a finding into the decisive or the ambiguous bucket and caps each
+/// independently, so neither can crowd the other out of a capped report.
+fn keep(
+    decisive: &mut Vec<Finding>,
+    ambiguous: &mut Vec<Finding>,
+    opts: &AuditOptions,
+    kind: FindingKind,
+    detail: String,
+) {
+    let bucket = if kind == FindingKind::AmbiguousContainment {
+        ambiguous
+    } else {
+        decisive
+    };
+    if bucket.len() < opts.max_findings {
+        bucket.push(Finding { kind, detail });
     }
 }
 
-/// Resolve a scanned reference to the cells of this workbook it names.
+/// Resolve a scanned reference to the cells of this workbook it names — one
+/// range for an ordinary reference, one per spanned sheet for a 3-D one
+/// (`Jan:Dec!A1`), using [`crate::build::spanned_sheets`], the exact function
+/// `build` itself lifts against. Sharing it is the point: a 3-D span decided
+/// two different ways by build and audit would make the audit a false alarm
+/// rather than a check.
 ///
-/// `None` for a reference into another workbook or onto a sheet this one does
-/// not have. Both are real findings about the workbook and neither is a finding
-/// about lifting: they become their own node kinds, whose weights `check`
-/// already pins exactly.
-fn resolve(workbook: &Workbook, from: SheetId, span: &ReferenceSpan) -> Option<RangeRef> {
+/// `None` for a reference into another workbook or onto a sheet (or, for a
+/// 3-D reference, an end sheet) this one does not have. Both are real
+/// findings about the workbook and neither is a finding about lifting: they
+/// become their own node kinds, whose weights `check` already pins exactly.
+fn resolve(workbook: &Workbook, from: SheetId, span: &ReferenceSpan) -> Option<Vec<RangeRef>> {
     if span.parsed.workbook.is_some() {
         return None;
     }
-    let sheet = match &span.parsed.sheet_name {
-        None => from,
-        Some(name) => workbook.sheet_id_by_name(name)?,
-    };
-    Some(span.parsed.resolve(sheet))
+    let sheets = crate::build::spanned_sheets(workbook, from, &span.parsed).ok()?;
+    Some(sheets.into_iter().map(|s| span.parsed.resolve(s)).collect())
 }
 
 fn edge_label(graph: &Graph, workbook: &Workbook, &(a, b, kind): &Key) -> String {
@@ -431,6 +482,8 @@ impl GraphIndex {
     fn dependency_edges(
         &self,
         report: &mut AuditReport,
+        decisive: &mut Vec<Finding>,
+        ambiguous: &mut Vec<Finding>,
         opts: &AuditOptions,
     ) -> FxHashMap<Key, Expectation> {
         let mut out: FxHashMap<Key, Expectation> = FxHashMap::default();
@@ -442,7 +495,8 @@ impl GraphIndex {
             if *count == 2 {
                 report.findings_total += 1;
                 keep(
-                    report,
+                    decisive,
+                    ambiguous,
                     opts,
                     FindingKind::ParallelEdges,
                     format!(

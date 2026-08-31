@@ -1,6 +1,6 @@
 # Upstream issues in calamine
 
-Seven defects found in [calamine](https://github.com/tafia/calamine) 0.36.1
+Eight defects found in [calamine](https://github.com/tafia/calamine) 0.36.1
 while building ExcelGRAG.
 
 **Status:** issues 2 and 3 are fixed in a fork at `../calamine`, branch
@@ -14,7 +14,9 @@ not belong on a branch already under review. Issues 5, 6 and 7 were found later 
 recomputing formulas rather than reading them, and sit on their own branches
 `xlsb-relative-columns`, `xlsb-formula-error-cells` and
 `xlsb-external-supbooks`; all three are pushed to the fork but not yet opened
-upstream.
+upstream. Issue 8 was found by a six-way audit of ExcelGRAG's own code rather
+than by parity or recompute, and is committed directly to `excelgrag` (it has
+no independent topic branch) but not yet opened upstream.
 
 The workspace patches in an `excelgrag` branch carrying both fixes, since
 `[patch.crates-io]` takes a single source.
@@ -609,3 +611,66 @@ that workbook.
 computes exactly what Excel stored. What is left in the last row is 115,566
 `PV()`, 191 `GETPIVOTDATA()` and the 12 references into workbooks that are not
 open — three honest gaps, no decoding failures.
+
+## 8. A declared table's totals row was subtracted by the wrong count, and neither count was exposed
+
+**Affects:** `.xlsx`. Pre-existing upstream, and a missing feature alongside it.
+
+**Fixed** in the fork, committed directly to `excelgrag`. Not yet opened
+upstream.
+
+Two related problems in the same code path, `Xlsx::read_tables()`
+(`src/xlsx/mod.rs`):
+
+**The range bug.** A declared table's `ref` range is shifted to exclude its
+header and totals rows before becoming `Table::data()`:
+
+```rust
+let mut dims = get_dimension(table_meta.ref_cells.as_bytes())?;
+if table_meta.header_row_count != 0 {
+    dims.start.0 += table_meta.header_row_count;
+}
+if table_meta.totals_row_count != 0 {
+    dims.end.0 -= table_meta.header_row_count;   // should be totals_row_count
+}
+```
+
+The `dims.end` line subtracted `header_row_count` instead of
+`totals_row_count`. For the overwhelmingly common shape — one header row, and
+either no totals row or one — both counts are small integers and the two
+tables ExcelGRAG's own fixtures happen to exercise never disagree, so this
+passed every existing test. It surfaces exactly when the counts differ: a
+table with **no** header row (`headerRowCount="0"`, "My table has headers"
+unchecked in Excel) and a totals row (`totalsRowCount="1"`) subtracts 0
+instead of 1, leaving the fabricated totals row inside `table.data()` — the
+totals formula reads back as if it were one more row of data.
+
+**The missing accessors.** Even correctly computed, neither count reached a
+caller: `Table<T>` carried `name`, `sheet_name`, `columns`, `data` and nothing
+else, so ExcelGRAG's ingest layer had no way to ask a table whether it
+actually declared a header row — only whether `columns()` was non-empty, which
+is **always** true, since Excel auto-names an unheaded table's columns
+(`Column1`, `Column2`, …) rather than leaving them empty. A headerless table's
+auto-generated column names were consequently read as if they were the row
+above the table, annexing whatever real content happened to sit there.
+
+### The fix
+
+`InnerTableMetadata`'s already-parsed `header_row_count`/`totals_row_count`
+are threaded through `Tables`, `TableMetadata`, `table_by_name` and
+`table_by_name_ref` into two new fields on `Table<T>`, with public accessors
+`Table::has_header_row()` and `Table::has_totals_row()` (`src/lib.rs`)
+alongside the existing `name()`/`sheet_name()`/`columns()`/`data()`. The
+`dims.end` line now subtracts `totals_row_count`.
+
+No existing fixture has `headerRowCount="0"` or a nonzero `totalsRowCount` —
+checked directly against every `.xlsx` fixture's `xl/tables/*.xml`, calamine's
+own and ExcelGRAG's vendor set alike. XLSX table XML is plain OOXML, unlike
+XLSB, so the regression test (`tests/test.rs`,
+`test_headerless_table_with_totals_row`) authors one on the fly with
+`rust_xlsxwriter` (a new dev-dependency) rather than needing a checked-in
+fixture: a headerless, three-row table with a totals row, asserting
+`!has_header_row()`, `has_totals_row()`, and that `data()` is exactly the
+three data rows — reverting the `dims.end` line back to
+`header_row_count` reproduces the original bug and fails it (`data.height()`
+comes back `4`, the totals row counted as data).

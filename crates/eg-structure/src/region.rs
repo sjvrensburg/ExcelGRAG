@@ -78,6 +78,11 @@ pub struct Region {
     pub headers: Vec<String>,
     /// Populated cells inside `range`.
     pub cell_count: u64,
+    /// Trailing rows of `range` that are a declared table's totals row, not
+    /// data. Always 0 for a [`RegionSource::Detected`] region — a totals row
+    /// is only ever ground truth from the workbook, never guessed at.
+    #[serde(default)]
+    pub totals_rows: u32,
 }
 
 impl Region {
@@ -94,18 +99,25 @@ impl Region {
         }
     }
 
-    /// The data rows, excluding any title and header.
+    /// The data rows, excluding any title, header and declared totals row.
+    ///
+    /// A totals row swept into the body doubles every sum — the reason this
+    /// is worth a dedicated field rather than folding it into `header_rows`
+    /// or leaving it in `range` for a caller to trip over. It only ever comes
+    /// from a declared table's own `totalsRowCount`; a detected region never
+    /// guesses at one.
     pub fn body(&self) -> Option<RangeRef> {
         let top = self.range.top + self.title_rows() + self.header_rows;
         let left = self.range.left + self.header_cols;
-        if top > self.range.bottom || left > self.range.right {
+        let bottom = self.range.bottom.saturating_sub(self.totals_rows);
+        if top > bottom || left > self.range.right {
             return None;
         }
         Some(RangeRef::new(
             self.range.sheet,
             top,
             left,
-            self.range.bottom,
+            bottom,
             self.range.right,
         ))
     }
@@ -122,6 +134,10 @@ impl Region {
 
     pub fn has_header(&self) -> bool {
         self.header_rows > 0 || self.header_cols > 0
+    }
+
+    pub fn has_totals(&self) -> bool {
+        self.totals_rows > 0
     }
 }
 
@@ -170,6 +186,7 @@ pub fn detect_regions_with(sheet: &Sheet, opts: &RegionOptions) -> Vec<Region> {
     // do not guess. Their areas are then excluded from the heuristic pass.
     for table in &sheet.tables {
         let header_rows = u32::from(table.has_header_row);
+        let totals_rows = u32::from(table.has_totals_row);
         regions.push(Region {
             range: table.range,
             kind: RegionKind::Table,
@@ -179,6 +196,7 @@ pub fn detect_regions_with(sheet: &Sheet, opts: &RegionOptions) -> Vec<Region> {
             header_cols: 0,
             headers: table.columns.clone(),
             cell_count: sheet.iter_range(table.range).count() as u64,
+            totals_rows,
         });
     }
 
@@ -412,10 +430,16 @@ fn describe(sheet: &Sheet, range: RangeRef, cell_count: u64, opts: &RegionOption
     let rows = range.rows();
     let cols = range.cols();
 
+    // A single *column* is a note only up to a few rows — a title, a caption,
+    // a short list of labels. Past that it reads like real column data (a
+    // list of names, a column of dates) that happens not to have a header,
+    // not a note; `cols == 1` alone used to call every height of it a note.
+    const NOTE_COLUMN_ROW_CAP: u32 = 3;
     let kind = if header_rows > 0 && rows > header_rows && rows >= opts.min_table_rows {
         RegionKind::Table
-    } else if (rows <= 1 || cols == 1) && is_mostly_text(sheet, range) {
-        // A single line of text either way: a title, a caption, a note.
+    } else if (rows <= 1 || (cols == 1 && rows <= NOTE_COLUMN_ROW_CAP))
+        && is_mostly_text(sheet, range)
+    {
         RegionKind::Note
     } else {
         RegionKind::Block
@@ -436,6 +460,7 @@ fn describe(sheet: &Sheet, range: RangeRef, cell_count: u64, opts: &RegionOption
         header_cols,
         headers,
         cell_count,
+        totals_rows: 0,
     }
 }
 
@@ -512,8 +537,15 @@ fn dominant_kind(sheet: &Sheet, top: u32, bottom: u32, col: u16) -> Option<Value
     // Cap the sample: a column can be a hundred thousand rows deep and the
     // dominant kind is obvious long before the end.
     const SAMPLE: u32 = 64;
+    // Bounded by rows *scanned*, not populated cells found: a region is a
+    // bounding box, so density under 1 is normal, and a column with 50
+    // populated cells in a very tall region would otherwise walk every row
+    // between `top` and `bottom` — a point lookup each — before ever
+    // collecting a sample, once per candidate header row this is called for.
+    // The sample is a heuristic input either way, so a bounded one is as good.
+    let max_rows = SAMPLE.saturating_mul(4) as usize;
     let mut seen = 0;
-    for row in top..=bottom {
+    for row in (top..=bottom).take(max_rows) {
         let kind = sheet.kind(row, col);
         if kind == ValueKind::Empty {
             continue;
@@ -699,6 +731,26 @@ mod tests {
     }
 
     #[test]
+    fn dominant_kind_is_bounded_by_rows_scanned_not_populated_cells_found() {
+        // Nothing populated in the first `SAMPLE * 4` rows; one populated cell
+        // just past that bound, inside an otherwise very tall range. A scan
+        // that kept going until it collected a sample (or ran out of rows)
+        // would still find it; a scan bounded by rows visited must not reach
+        // it, and so must report no dominant kind at all.
+        let mut sheet = Sheet::new(SheetId(0), "Sheet1");
+        sheet.set(256, 0, Cell::literal(CellValue::Number(1.0)));
+        assert_eq!(dominant_kind(&sheet, 0, 100_000, 0), None);
+
+        // A cell inside the bound is still found correctly.
+        let mut sheet = Sheet::new(SheetId(0), "Sheet1");
+        sheet.set(10, 0, Cell::literal(CellValue::Number(1.0)));
+        assert_eq!(
+            dominant_kind(&sheet, 0, 100_000, 0),
+            Some(ValueKind::Number)
+        );
+    }
+
+    #[test]
     fn a_numeric_block_with_no_header_is_a_block() {
         let sheet = grid(&["1 2 3", "4 5 6"]);
         let regions = detect_regions(&sheet);
@@ -714,6 +766,26 @@ mod tests {
         let regions = detect_regions(&sheet);
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0].kind, RegionKind::Note);
+    }
+
+    #[test]
+    fn a_short_single_column_of_text_is_still_a_note() {
+        // Within the height cap: a caption or a short list of labels.
+        let sheet = grid(&["Alpha", "Beta", "Gamma"]);
+        let regions = detect_regions(&sheet);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].kind, RegionKind::Note, "{:#?}", regions[0]);
+    }
+
+    #[test]
+    fn a_tall_single_column_of_text_is_a_block_not_a_note() {
+        // L12: `cols == 1` alone used to call every height of a single text
+        // column a note. A column this tall reads like real data — a list of
+        // names with no header — not a caption.
+        let sheet = grid(&["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]);
+        let regions = detect_regions(&sheet);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].kind, RegionKind::Block, "{:#?}", regions[0]);
     }
 
     #[test]
@@ -764,6 +836,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_declared_totals_row_is_excluded_from_the_body() {
+        // A totals row swept into the body doubles every sum, which is
+        // exactly what a declared table's own `has_totals_row` exists to
+        // prevent — the ground truth a detected region never has.
+        let mut sheet = grid(&["Region Q1", "North 10", "South 20", "Total 30"]);
+        sheet.tables.push(ExcelTable {
+            name: "Sales".into(),
+            range: RangeRef::parse_local("A1:B4", SheetId(0)).unwrap(),
+            columns: vec!["Region".into(), "Q1".into()],
+            has_header_row: true,
+            has_totals_row: true,
+        });
+        let regions = detect_regions(&sheet);
+        assert_eq!(regions.len(), 1);
+        let region = &regions[0];
+        assert!(region.has_totals());
+        assert_eq!(
+            region.body().unwrap().to_a1(),
+            "A2:B3",
+            "the totals row (A4:B4) must not be in the body"
+        );
     }
 
     #[test]

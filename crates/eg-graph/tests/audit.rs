@@ -274,6 +274,61 @@ fn two_regions_over_one_cell_are_reported_rather_than_resolved() {
 }
 
 #[test]
+fn a_missing_edge_survives_a_cap_full_of_ambiguous_containment() {
+    // L22: `AmbiguousContainment` is found first, during the per-cell scan,
+    // before a single edge is ever compared — a workbook with several
+    // ambiguous cells and a low cap used to let that fill the whole report,
+    // so a genuinely decisive `MissingEdge` never got a chance to appear.
+    let wb = two_sheets();
+    let mut built = build(&wb);
+
+    // Duplicate the Sales region the way
+    // `two_regions_over_one_cell_are_reported_rather_than_resolved` does —
+    // every one of its three formula cells is now ambiguous.
+    let region = built
+        .graph
+        .node_indices()
+        .find(|&i| match &built.graph[i] {
+            Node::Region(r) => r.range.sheet == SheetId(0),
+            _ => false,
+        })
+        .expect("Sales has a region");
+    let Node::Region(existing) = built.graph[region].clone() else {
+        unreachable!()
+    };
+    let twin = built.graph.add_node(Node::Region(RegionNode {
+        range: existing.range,
+        kind: RegionKind::Block,
+        source: RegionSource::Detected,
+        title: Some("twin".into()),
+        header_rows: 0,
+        cell_count: existing.cell_count,
+    }));
+    let sheet = built
+        .graph
+        .neighbors_directed(region, petgraph::Direction::Incoming)
+        .next()
+        .unwrap();
+    built
+        .graph
+        .add_edge(sheet, twin, Edge::new(EdgeKind::Contains));
+
+    // And drop the real dependency edge, so the workbook demands one the
+    // graph no longer has.
+    let (edge, ..) = first_dependency(&built);
+    built.graph.remove_edge(edge);
+
+    let report = audit(&wb, &built.graph, &AuditOptions { max_findings: 1 });
+    assert_eq!(report.findings.len(), 1, "the cap is still one finding");
+    assert_eq!(
+        report.findings[0].kind,
+        FindingKind::MissingEdge,
+        "decisive before ambiguous, even though ambiguous was found first: {:?}",
+        report.findings
+    );
+}
+
+#[test]
 fn a_reference_a_region_makes_to_itself_expects_no_edge() {
     // The build drops the self-loop, and an audit that did not would demand an
     // edge on every region in the workbook.
@@ -305,6 +360,30 @@ fn a_range_spanning_two_regions_expects_an_edge_to_each() {
 
     assert!(report.agrees(), "{:?}", report.findings);
     assert_eq!(report.edges_expected, 2);
+    assert_eq!(report.references_landed, 1, "one reference, two edges");
+    assert_eq!(report.weight_expected, 2);
+}
+
+#[test]
+fn a_whole_column_reference_lifts_to_every_region_it_touches() {
+    // Before C1, `SUM(A:A)` and friends scanned zero references at all, so
+    // this fixture used to produce no edge and no finding either way — the
+    // silent-omission failure the audit doc describes. Column A of `Data`
+    // touches both of its regions (the blank row at index 2 splits it into
+    // two), the same shape `a_range_spanning_two_regions_expects_an_edge_to_each`
+    // exercises with an explicit `A1:A4`.
+    let wb = workbook(vec![
+        grid(0, "Sales", &["Total", "=SUM(Data!A:A)"]),
+        grid(1, "Data", &["1 x", "2 y", ". .", "3 z", "4 w"]),
+    ]);
+    let built = build(&wb);
+    let report = audit(&wb, &built.graph, &AuditOptions::default());
+
+    assert!(report.agrees(), "{:?}", report.findings);
+    assert_eq!(
+        report.edges_expected, 2,
+        "one edge per region column A touches"
+    );
     assert_eq!(report.references_landed, 1, "one reference, two edges");
     assert_eq!(report.weight_expected, 2);
 }

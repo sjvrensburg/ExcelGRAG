@@ -79,14 +79,20 @@ pub fn fuse_weighted(rankings: &[&[Hit]], weights: &[f32], limit: usize, k: f32)
         .into_values()
         .map(|(score, hit)| Hit { score, ..hit })
         .collect();
-    // Ties broken by label, so the same corpus and the same query give the same
-    // list every time. A hash map's order is not an order.
+    // Ties broken by label, then node, then workbook, so the same corpus and
+    // the same query give the same list every time. A hash map's order is
+    // not an order. `node` alone does not finish the job — it is a
+    // workbook-local index, so two hits from *different* workbooks can share
+    // both a label and a node number, and without the workbook hash as the
+    // last tiebreaker those two would still order however the hash map
+    // happened to iterate.
     fused.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.label.cmp(&b.label))
             .then_with(|| a.node.cmp(&b.node))
+            .then_with(|| a.workbook.cmp(&b.workbook))
     });
     fused.truncate(limit);
     fused
@@ -184,5 +190,29 @@ mod tests {
     fn the_limit_is_respected() {
         let many: Vec<Hit> = (0..50).map(|i| hit(i, "x")).collect();
         assert_eq!(fuse(&[&many], 7).len(), 7);
+    }
+
+    #[test]
+    fn a_tie_on_label_and_node_across_two_workbooks_still_orders_deterministically() {
+        // L15: `node` is a workbook-local index, so two hits from different
+        // workbooks can share both a label and a node number. Without the
+        // workbook hash as the last tiebreaker, these two would order
+        // however the fusion's hash map happened to iterate — different
+        // between runs of the very same query.
+        let mut a = hit(1, "Total");
+        a.workbook = "aaaa".into();
+        let mut b = hit(1, "Total");
+        b.workbook = "bbbb".into();
+        let first = fuse(&[&[a.clone()], &[b.clone()]], 10);
+        for _ in 0..8 {
+            let again = fuse(&[&[a.clone()], &[b.clone()]], 10);
+            assert_eq!(
+                first.iter().map(|h| h.workbook.clone()).collect::<Vec<_>>(),
+                again.iter().map(|h| h.workbook.clone()).collect::<Vec<_>>()
+            );
+        }
+        // And the order is the workbook comparison itself, not a coin flip.
+        assert_eq!(first[0].workbook, "aaaa");
+        assert_eq!(first[1].workbook, "bbbb");
     }
 }

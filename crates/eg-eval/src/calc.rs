@@ -33,6 +33,11 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use eg_model::{CellRef, CellValue, ErrorKind, ParsedRef, RangeRef, SheetId, ValueKind, Workbook};
+
+/// Re-exported so the rest of this crate can keep importing it as
+/// `crate::calc::shown`. Lives in `eg-model` (see there for why) because
+/// `eg-structure`, upstream of this crate in the pipeline, needs it too.
+pub(crate) use eg_model::shown;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
@@ -87,6 +92,15 @@ pub enum Unsupported {
     /// A form of a function that is modelled in general but not in this
     /// shape, such as `INDEX` asked for a whole column.
     Form(String),
+    /// A whole-column or whole-row reference (`A:A`, `3:3`), or an explicit
+    /// reference that spans the same ground (`A1:A1048576`). `eg-graph` lifts
+    /// these to every region they touch, but recomputing one deliberately
+    /// refuses rather than evaluates it, by shape rather than by the scan
+    /// miss that used to make this construct fail to parse at all: a
+    /// workbook using this shorthand for a lookup table's height, say,
+    /// deserves a stated refusal, not a guess at which convention (used
+    /// range? all populated cells? something else?) Excel would have applied.
+    WholeColumnOrRow(String),
     /// The text could not be turned into an expression tree.
     Unparsed(String),
     /// Nesting past [`MAX_DEPTH`].
@@ -105,6 +119,7 @@ impl Unsupported {
             Unsupported::ThreeDReference(_) => "3-D reference".to_string(),
             Unsupported::RangeAsValue(_) => "implicit intersection".to_string(),
             Unsupported::Form(what) => what.clone(),
+            Unsupported::WholeColumnOrRow(_) => "whole column/row reference".to_string(),
             // The offset varies from formula to formula; the construct does
             // not, and the construct is what a sweep is asking about.
             Unsupported::Unparsed(what) => {
@@ -128,6 +143,9 @@ impl fmt::Display for Unsupported {
                 write!(f, "{text} is many cells where one value was needed")
             }
             Unsupported::Form(what) => write!(f, "{what}"),
+            Unsupported::WholeColumnOrRow(text) => {
+                write!(f, "{text} is a whole-column or whole-row reference")
+            }
             Unsupported::Unparsed(what) => write!(f, "not parsed: {what}"),
             Unsupported::TooDeep => write!(f, "nested more than {MAX_DEPTH} deep"),
         }
@@ -300,7 +318,7 @@ pub fn evaluate_over(
     let mut eval = Eval::new(workbook, at, &sheets, &mut index, overrides);
     let expr = parse(formula).map_err(|e| Unsupported::Unparsed(e.to_string()))?;
     let value = eval.eval(&expr)?;
-    Ok(eval.result(value))
+    eval.result(value)
 }
 
 fn recompute_with(
@@ -315,10 +333,9 @@ fn recompute_with(
     let mut eval = Eval::new(workbook, at, sheets, index, overrides);
     let outcome = match parse(formula) {
         Err(e) => Outcome::Unsupported(Unsupported::Unparsed(e.to_string())),
-        Ok(expr) => match eval.eval(&expr) {
+        Ok(expr) => match eval.eval(&expr).and_then(|value| eval.result(value)) {
             Err(reason) => Outcome::Unsupported(reason),
-            Ok(value) => {
-                let computed = eval.result(value);
+            Ok(computed) => {
                 if same(&computed, stored) {
                     Outcome::Agrees(computed)
                 } else {
@@ -697,13 +714,16 @@ impl<'a> Eval<'a> {
 
     /// The value a cell would show. A reference left over at the top of a
     /// formula is dereferenced, and a blank one shows as zero — `=A1` over an
-    /// empty A1 stores 0, not blank.
-    fn result(&self, value: Value) -> CellValue {
-        match self.deref(value) {
-            Ok(CellValue::Empty) => CellValue::Number(0.0),
-            Ok(value) => value,
-            Err(_) => CellValue::Error(ErrorKind::Value),
-        }
+    /// empty A1 stores 0, not blank. A multi-cell range left at the top
+    /// (`=A1:C1`, implicit intersection/spill) is `deref`'s one refusal,
+    /// [`Unsupported::RangeAsValue`], and is propagated rather than mapped to
+    /// a guessed `#VALUE!` — the same "refused by name, not guessed" rule
+    /// unsupported functions get.
+    fn result(&self, value: Value) -> Result<CellValue, Unsupported> {
+        Ok(match self.deref(value)? {
+            CellValue::Empty => CellValue::Number(0.0),
+            value => value,
+        })
     }
 
     fn eval(&mut self, expr: &Expr) -> Result<Value, Unsupported> {
@@ -741,6 +761,9 @@ impl<'a> Eval<'a> {
         }
         if parsed.end_sheet_name.is_some() {
             return Err(Unsupported::ThreeDReference(text.to_string()));
+        }
+        if parsed.is_whole_column() || parsed.is_whole_row() {
+            return Err(Unsupported::WholeColumnOrRow(text.to_string()));
         }
         let sheet = match &parsed.sheet_name {
             None => self.at.sheet,
@@ -797,6 +820,9 @@ impl<'a> Eval<'a> {
         }
         if parsed.end_sheet_name.is_some() {
             return Err(Unsupported::ThreeDReference(refers_to.to_string()));
+        }
+        if parsed.is_whole_column() || parsed.is_whole_row() {
+            return Err(Unsupported::WholeColumnOrRow(refers_to.to_string()));
         }
         let target = match &parsed.sheet_name {
             Some(named_sheet) => match self.sheets.get(&named_sheet.to_uppercase()) {
@@ -1017,7 +1043,15 @@ fn to_number(value: &CellValue) -> Result<f64, ErrorKind> {
             if t.is_empty() {
                 return Err(ErrorKind::Value);
             }
-            t.parse::<f64>().map_err(|_| ErrorKind::Value)
+            // Rust's `f64::from_str` accepts "inf", "infinity" and "nan"
+            // (any case) as valid floats; Excel has none of the three, and a
+            // cell holding the text "inf" coercing to a number Excel could
+            // never produce is worse than refusing it as text that is not
+            // one — `#VALUE!`, the same as any other unparseable text.
+            match t.parse::<f64>() {
+                Ok(n) if n.is_finite() => Ok(n),
+                _ => Err(ErrorKind::Value),
+            }
         }
     }
 }
@@ -1098,11 +1132,16 @@ fn binary(op: BinOp, lhs: &CellValue, rhs: &CellValue) -> CellValue {
                 (Err(e), _) | (_, Err(e)) => return CellValue::Error(e),
             };
             match op {
-                BinOp::Add => CellValue::Number(cancelling(a, -b, a + b)),
-                BinOp::Sub => CellValue::Number(cancelling(a, b, a - b)),
-                BinOp::Mul => CellValue::Number(a * b),
+                // Excel has no infinity: `1E308*10` is `#NUM!`, not a value
+                // that then poisons every comparison downstream of it. All
+                // four basic operators can overflow a finite pair of
+                // operands into one, so all four are routed through the same
+                // finite-or-`#NUM!` check `Pow` already used.
+                BinOp::Add => number_or_num_error(cancelling(a, -b, a + b)),
+                BinOp::Sub => number_or_num_error(cancelling(a, b, a - b)),
+                BinOp::Mul => number_or_num_error(a * b),
                 BinOp::Div if b == 0.0 => CellValue::Error(ErrorKind::Div0),
-                BinOp::Div => CellValue::Number(a / b),
+                BinOp::Div => number_or_num_error(a / b),
                 BinOp::Pow => number_or_num_error(a.powf(b)),
                 _ => unreachable!("comparison and concat handled above"),
             }
@@ -1152,21 +1191,6 @@ fn compare(lhs: &CellValue, rhs: &CellValue) -> std::cmp::Ordering {
     }
 }
 
-/// A number as a spreadsheet carries it: 15 significant decimal digits.
-///
-/// Comparisons are made on this rather than on the double, because Excel does
-/// and workbooks depend on it. `10.13+6.75=16.88` is false in binary floating
-/// point and true in every spreadsheet ever written, and a formula that tests
-/// it — an ageing bucket picking a label, say — takes the other branch if we
-/// compare the raw doubles.
-pub(crate) fn shown(n: f64) -> f64 {
-    if n.is_finite() {
-        format!("{n:.14e}").parse().unwrap_or(n)
-    } else {
-        n
-    }
-}
-
 /// A blank compared with a value of some type behaves as that type's zero.
 fn fill_blank(value: &CellValue, other: &CellValue) -> CellValue {
     match (value, other) {
@@ -1201,6 +1225,71 @@ const VOLATILE: &[&str] = &[
     "INDIRECT",
     "CELL",
     "INFO",
+];
+
+/// Every function name [`Eval::call`] actually evaluates (including `IF`,
+/// `IFERROR`, `IFNA`, which are dispatched before the big `match` below).
+///
+/// A name outside this list — and outside [`VOLATILE`] — is unmodelled, and
+/// must be refused by name (`Unsupported::Function`) rather than answered
+/// with a guessed `#VALUE!`, however many arguments the call carries: a
+/// zero-argument call to something like `PI()` or `ROW()` is not malformed,
+/// it is simply not implemented here.
+const MODELLED: &[&str] = &[
+    "IF",
+    "IFERROR",
+    "IFNA",
+    "SUM",
+    "PRODUCT",
+    "AVERAGE",
+    "MIN",
+    "MAX",
+    "COUNT",
+    "COUNTA",
+    "COUNTBLANK",
+    "AND",
+    "OR",
+    "NOT",
+    "TRUE",
+    "FALSE",
+    "NA",
+    "ISBLANK",
+    "ISNUMBER",
+    "ISTEXT",
+    "ISNONTEXT",
+    "ISLOGICAL",
+    "ISERROR",
+    "ISERR",
+    "ISNA",
+    "ABS",
+    "INT",
+    "SIGN",
+    "SQRT",
+    "EXP",
+    "LN",
+    "LOG10",
+    "ROUND",
+    "ROUNDUP",
+    "ROUNDDOWN",
+    "TRUNC",
+    "MOD",
+    "POWER",
+    "LOG",
+    "PV",
+    "LEN",
+    "TRIM",
+    "UPPER",
+    "LOWER",
+    "LEFT",
+    "RIGHT",
+    "MID",
+    "CONCATENATE",
+    "CONCAT",
+    "EXACT",
+    "VLOOKUP",
+    "HLOOKUP",
+    "MATCH",
+    "INDEX",
 ];
 
 fn err(kind: ErrorKind) -> Value {
@@ -1254,6 +1343,16 @@ enum Rounding {
 
 impl Eval<'_> {
     fn call(&mut self, name: &str, args: &[Expr]) -> Result<Value, Unsupported> {
+        // "Is this function modelled at all?" is asked first: the arity rule
+        // right below is Excel's rule for a malformed call to a *known*
+        // function, and must not fire for a function this evaluator has never
+        // implemented. Refuse those by name regardless of how many arguments
+        // they were given, rather than guessing #VALUE! for some arities and
+        // Unsupported for others.
+        if !MODELLED.contains(&name) && !VOLATILE.contains(&name) {
+            return Err(Unsupported::Function(name.to_string()));
+        }
+
         // Excel refuses a call with too few arguments at entry, so a formula
         // out of a workbook always has enough. One that does not is malformed
         // rather than unmodelled, and #VALUE! is what it deserves.
@@ -1327,7 +1426,14 @@ impl Eval<'_> {
                 let mut counted = 0u64;
                 let mut present = 0u64;
                 let addressed = self.spread(args, |value, from_range| {
-                    if !matches!(value, CellValue::Empty) {
+                    // `present` feeds only COUNTBLANK below, which — unlike
+                    // COUNTA just beside it — treats a cached `""` (a formula
+                    // that evaluated to the empty string) as blank, matching
+                    // both Excel and `CellValue::is_empty()` elsewhere in
+                    // this crate. Excel's COUNTA disagrees with COUNTBLANK
+                    // here on purpose, so `counted`'s own COUNTA arm below is
+                    // deliberately left as the raw `Empty` check.
+                    if !value.is_empty() {
                         present += 1;
                     }
                     counted += u64::from(match name {
@@ -1665,7 +1771,12 @@ impl Eval<'_> {
             Err(e) => return Ok(err(e)),
         };
         let approximate = match args.get(3) {
-            Some(Expr::Literal(CellValue::Empty)) | None => true,
+            // Omitted entirely: Excel's own default, TRUE.
+            None => true,
+            // Written but empty (`VLOOKUP(x,tbl,2,)`) coerces like any other
+            // empty argument — 0, i.e. FALSE — which is not the same as
+            // leaving it out.
+            Some(Expr::Literal(CellValue::Empty)) => false,
             Some(expr) => {
                 let value = self.scalar(expr)?;
                 match to_bool(&value) {
@@ -1688,7 +1799,14 @@ impl Eval<'_> {
         }
 
         let last = self.last_row(table);
-        if vertical && !approximate && last - table.top >= INDEX_LOOKUPS_OVER {
+        // The index is an exact-match lookup by value, not a glob — a
+        // wildcard key has to fall through to the scan below, whatever the
+        // table's size.
+        if vertical
+            && !approximate
+            && !key_has_wildcard(&key)
+            && last - table.top >= INDEX_LOOKUPS_OVER
+        {
             let column = RangeRef::new(table.sheet, table.top, table.left, last, table.left);
             let found = self.index.find(self.workbook, self.overrides, column, &key);
             return Ok(match found {
@@ -1709,15 +1827,27 @@ impl Eval<'_> {
             } else {
                 self.cell_at(table, 0, step as u16)
             };
-            match compare_for_lookup(&probe, &key) {
-                Some(std::cmp::Ordering::Equal) => {
+            if !approximate {
+                // Excel matches a text key holding `*`/`?` as a wildcard in
+                // exact mode, the same as it does in MATCH and the *IF
+                // functions — a comparison ordinary equality cannot express,
+                // so this is checked apart from `compare_for_lookup` below.
+                if exact_match_for_lookup(&probe, &key) {
                     best = Some(step);
                     break;
                 }
-                // An approximate lookup wants the last value not past the key,
-                // which assumes the column is sorted — as Excel does.
-                Some(std::cmp::Ordering::Less) if approximate => best = Some(step),
-                _ => {}
+                continue;
+            }
+            // An approximate lookup wants the last row at or before the key,
+            // not the first row that matches it — a sorted column with
+            // duplicate keys (10, 10, 10, 20) is exactly where those differ.
+            // Excel's own binary search lands on the last of a run of equal
+            // keys, so an equal match here keeps scanning rather than
+            // stopping, the same as a lesser one.
+            if let Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Less) =
+                compare_for_lookup(&probe, &key)
+            {
+                best = Some(step);
             }
         }
         let Some(step) = best else {
@@ -1743,7 +1873,11 @@ impl Eval<'_> {
             Err(e) => return Ok(err(e)),
         };
         let mode = match args.get(2) {
-            Some(Expr::Literal(CellValue::Empty)) | None => 1.0,
+            // Omitted entirely: Excel's own default, 1 (approximate).
+            None => 1.0,
+            // Written but empty (`MATCH(k,r,)`) coerces to 0 like any other
+            // empty argument — exact — not the same as leaving it out.
+            Some(Expr::Literal(CellValue::Empty)) => 0.0,
             Some(expr) => match self.number(expr)? {
                 Ok(n) => n.trunc(),
                 Err(e) => return Ok(err(e)),
@@ -1751,7 +1885,11 @@ impl Eval<'_> {
         };
         let vertical = vector.right == vector.left;
         let last = self.last_row(vector);
-        if vertical && mode == 0.0 && last - vector.top >= INDEX_LOOKUPS_OVER {
+        if vertical
+            && mode == 0.0
+            && !key_has_wildcard(&key)
+            && last - vector.top >= INDEX_LOOKUPS_OVER
+        {
             let column = RangeRef::new(vector.sheet, vector.top, vector.left, last, vector.left);
             let found = self.index.find(self.workbook, self.overrides, column, &key);
             return Ok(match found {
@@ -1772,16 +1910,27 @@ impl Eval<'_> {
             } else {
                 self.cell_at(vector, 0, step as u16)
             };
+            if mode == 0.0 {
+                // See VLOOKUP's exact branch: a text key holding `*`/`?` is
+                // a wildcard in exact mode, the same as Excel treats one.
+                if exact_match_for_lookup(&probe, &key) {
+                    best = Some(step);
+                    break;
+                }
+                continue;
+            }
             let Some(ord) = compare_for_lookup(&probe, &key) else {
                 continue;
             };
             match (mode as i32, ord) {
-                (_, std::cmp::Ordering::Equal) => {
+                // Mode 1 and -1 assume a sorted list and want the *last* row
+                // that still qualifies, so a run of duplicate keys keeps
+                // scanning past an equal match instead of stopping at the
+                // first of them.
+                (1, std::cmp::Ordering::Equal | std::cmp::Ordering::Less) => best = Some(step),
+                (-1, std::cmp::Ordering::Equal | std::cmp::Ordering::Greater) => {
                     best = Some(step);
-                    break;
                 }
-                (1, std::cmp::Ordering::Less) => best = Some(step),
-                (-1, std::cmp::Ordering::Greater) => best = Some(step),
                 _ => {}
             }
         }
@@ -1804,7 +1953,14 @@ impl Eval<'_> {
             Err(e) => return Ok(err(e)),
         };
         let column = match args.get(2) {
-            Some(Expr::Literal(CellValue::Empty)) | None => 1.0,
+            // Omitted entirely: a plain column index of 1 (unless the
+            // one-row-range special case just below overrides it).
+            None => 1.0,
+            // Written but empty (`INDEX(range,2,)`) coerces to 0 like any
+            // other empty argument — and 0 is not a smaller column index
+            // here, it is INDEX's own notation for "the whole row", the same
+            // outcome an explicit 0 gives.
+            Some(Expr::Literal(CellValue::Empty)) => 0.0,
             Some(expr) => match self.number(expr)? {
                 Ok(n) => n.trunc(),
                 Err(e) => return Ok(err(e)),
@@ -1852,4 +2008,82 @@ fn compare_for_lookup(probe: &CellValue, key: &CellValue) -> Option<std::cmp::Or
         return None;
     }
     Some(compare(probe, key))
+}
+
+/// Whether `probe` satisfies an exact lookup for `key` — ordinary equality,
+/// except a text key holding `*`/`?` is a wildcard, the way Excel treats one
+/// in `VLOOKUP`/`HLOOKUP`/`MATCH`'s exact mode. Approximate lookups never
+/// reach this: a wildcard has no order, so it only makes sense once "equal"
+/// is the whole question.
+fn exact_match_for_lookup(probe: &CellValue, key: &CellValue) -> bool {
+    if let (CellValue::Text(p), CellValue::Text(k)) = (probe, key) {
+        // Always through the wildcard matcher, not just when a `*`/`?` is
+        // active: a pattern that is *only* an escape (`A~*B`, meaning the
+        // literal text `A*B`) has no active wildcard by that test, but its
+        // `~` still has to be stripped before comparing — a raw string
+        // compare would see the tilde and never match the plain text it
+        // stands for. A pattern with none of `*`, `?`, `~` degenerates to
+        // ordinary literal comparison here anyway.
+        return wildcard_match(k, p);
+    }
+    compare_for_lookup(probe, key) == Some(std::cmp::Ordering::Equal)
+}
+
+/// Whether `key` needs [`wildcard_match`] rather than a value index's exact
+/// hash lookup — any of `*`, `?` or `~`, escaped or not, since even a
+/// pattern that is only an escape sequence still needs de-escaping before
+/// it can be compared as plain text.
+fn key_has_wildcard(key: &CellValue) -> bool {
+    matches!(key, CellValue::Text(s) if s.contains(['*', '?', '~']))
+}
+
+/// One token of a parsed wildcard pattern: `*` matches any run of characters
+/// (including none), `?` matches exactly one, and anything else — including
+/// `*`, `?` or `~` written after a `~` — matches itself literally.
+enum WildcardToken {
+    Any,
+    One,
+    Literal(char),
+}
+
+fn parse_wildcard_pattern(pattern: &str) -> Vec<WildcardToken> {
+    let mut tokens = Vec::new();
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        tokens.push(match c {
+            '~' => WildcardToken::Literal(chars.next().unwrap_or('~')),
+            '*' => WildcardToken::Any,
+            '?' => WildcardToken::One,
+            other => WildcardToken::Literal(other),
+        });
+    }
+    tokens
+}
+
+/// Excel's wildcard match, case-insensitive like every other text comparison
+/// this crate makes. Classic DP over pattern tokens and text characters:
+/// `matched[i][j]` is whether the first `i` tokens of the pattern account for
+/// the first `j` characters of the text.
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let pattern = parse_wildcard_pattern(&pattern.to_uppercase());
+    let text: Vec<char> = text.to_uppercase().chars().collect();
+    let (m, n) = (pattern.len(), text.len());
+
+    let mut matched = vec![vec![false; n + 1]; m + 1];
+    matched[0][0] = true;
+    for i in 1..=m {
+        if let WildcardToken::Any = pattern[i - 1] {
+            matched[i][0] = matched[i - 1][0];
+        }
+    }
+    for i in 1..=m {
+        for j in 1..=n {
+            matched[i][j] = match pattern[i - 1] {
+                WildcardToken::Any => matched[i - 1][j] || matched[i][j - 1],
+                WildcardToken::One => matched[i - 1][j - 1],
+                WildcardToken::Literal(c) => c == text[j - 1] && matched[i - 1][j - 1],
+            };
+        }
+    }
+    matched[m][n]
 }

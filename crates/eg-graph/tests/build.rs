@@ -249,6 +249,34 @@ fn a_range_spanning_two_regions_depends_on_both() {
 }
 
 #[test]
+fn a_3d_reference_lifts_to_every_sheet_it_spans() {
+    // `SUM(Jan:Mar!B2)` is the shape a real monthly rollup uses: before this
+    // fix, `end_sheet_name` was ignored entirely and the dependency lifted to
+    // Jan only — Feb and Mar got no edge, no dangling record, no counter, and
+    // the audit agreed anyway because it made the identical mistake.
+    let wb = workbook(vec![
+        grid(0, "Summary", &["Total", "=SUM(Jan:Mar!B2)"]),
+        grid(1, "Jan", &[". .", ". 10"]),
+        grid(2, "Feb", &[". .", ". 20"]),
+        grid(3, "Mar", &[". .", ". 30"]),
+    ]);
+    let built = build(&wb);
+    assert_eq!(check(&built), vec![]);
+    assert_eq!(
+        built.report.edges_of(EdgeKind::CrossSheetRef),
+        3,
+        "one edge per spanned sheet, not just the one written first"
+    );
+
+    let report = eg_graph::audit(&wb, &built.graph, &eg_graph::AuditOptions::default());
+    assert!(
+        report.agrees(),
+        "the audit must derive the same three-sheet span, not just re-check Jan: {:?}",
+        report.findings
+    );
+}
+
+#[test]
 fn the_graph_is_the_same_on_every_build() {
     // Edges are accumulated in a hash map, whose order is not stable. Sorting
     // before insertion is what makes two runs comparable when a number moves.

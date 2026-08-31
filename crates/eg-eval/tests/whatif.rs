@@ -1,7 +1,9 @@
 //! Changing a cell, against workbooks small enough to check by hand.
 
 use eg_eval::whatif::{what_if, Blocked, Change, Stopped, WhatIfOptions};
-use eg_model::{Cell, CellRef, CellValue, RangeRef, Sheet, SheetId, Workbook, WorkbookFormat};
+use eg_model::{
+    Cell, CellRef, CellValue, DefinedName, RangeRef, Sheet, SheetId, Workbook, WorkbookFormat,
+};
 
 /// A cell holding a formula and the value Excel last calculated for it.
 fn formula(text: &str, stored: f64) -> Cell {
@@ -405,4 +407,217 @@ fn a_lookup_column_that_moves_mid_walk_is_not_answered_from_the_old_index() {
         Some(CellValue::Number(80.0)),
         "and the lookup for it finds row 9, not the map built before it moved"
     );
+}
+
+// ---- C2: defined names in the closure walk --------------------------------
+
+/// A workbook with `Tax_Rate` defined as `Rates!$B$1` (a plain reference),
+/// and `Main!D1 = Tax_Rate*A1` — a dependency on `Rates!B1` the closure walk
+/// can only see by resolving the name, since `D1`'s own text never mentions
+/// `Rates!B1` directly.
+fn book_with_named_rate() -> Workbook {
+    let mut main = book().sheets.remove(0);
+    main.set(0, 3, formula("Tax_Rate*A1", 0.15)); // D1
+    let mut rates = Sheet::new(SheetId(1), "Rates");
+    rates.set(0, 1, literal(1.5)); // Rates!B1
+    Workbook {
+        path: "book.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash".into(),
+        sheets: vec![main, rates],
+        defined_names: vec![DefinedName {
+            name: "Tax_Rate".into(),
+            refers_to: "=Rates!$B$1".into(),
+            scope: None,
+        }],
+        external_links: Vec::new(),
+    }
+}
+
+#[test]
+fn a_cell_reading_the_change_only_through_a_name_is_reported_moved() {
+    let wb = book_with_named_rate();
+    // D1 = Tax_Rate*A1 = Rates!B1 * A1. Change Rates!B1, which nothing in D1's
+    // own text names — only `Tax_Rate` does.
+    let impact = what_if(
+        &wb,
+        &[Change::new(
+            CellRef::new(SheetId(1), 0, 1),
+            CellValue::Number(2.0),
+        )],
+        &WhatIfOptions::default(),
+    );
+    assert_eq!(
+        after(&impact, "Main!D1"),
+        Some(CellValue::Number(0.2)),
+        "D1 must be discovered as a reader through the name, not silently skipped"
+    );
+}
+
+#[test]
+fn a_cell_reading_a_blocked_cell_only_through_a_name_is_blocked_not_moved() {
+    // D1 = Tax_Rate*2 reads Rates!B1 only through the name — nothing in D1's
+    // own text mentions Rates!B1 or Main!A1. Rates!B1 itself is unmodellable
+    // and, being a reader of Main!A1:A2, is discovered and blocked in level
+    // 1; D1 must then be discovered (through the name) and blocked in level
+    // 2, not evaluated against Rates!B1's stale stored value.
+    let mut main = book().sheets.remove(0);
+    main.set(0, 3, formula("Tax_Rate*2", 3.0)); // D1
+    let mut rates = Sheet::new(SheetId(1), "Rates");
+    rates.set(0, 1, formula("SUMPRODUCT(Main!A1:A2,Main!A1:A2)", 1.5)); // Rates!B1
+    let wb = Workbook {
+        path: "book.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash".into(),
+        sheets: vec![main, rates],
+        defined_names: vec![DefinedName {
+            name: "Tax_Rate".into(),
+            refers_to: "=Rates!$B$1".into(),
+            scope: None,
+        }],
+        external_links: Vec::new(),
+    };
+
+    let impact = what_if(&wb, &[change(0, 0, 0.2)], &WhatIfOptions::default());
+    let rates_b1 = impact
+        .unanswered
+        .iter()
+        .find(|u| u.a1 == "Rates!B1")
+        .expect("Rates!B1 reads the change directly and is itself unmodellable");
+    assert!(matches!(rates_b1.reason, Blocked::Formula(_)));
+    let d1 = impact
+        .unanswered
+        .iter()
+        .find(|u| u.a1 == "Main!D1")
+        .expect("D1 reads the blocked cell through the name and must be reported, not omitted");
+    assert_eq!(
+        d1.reason,
+        Blocked::Upstream("Rates!B1".into()),
+        "blocked because of what it reads, not guessed unchanged"
+    );
+    assert!(
+        impact.moved.iter().all(|m| m.a1 != "Main!D1"),
+        "must not also appear as Moved"
+    );
+}
+
+#[test]
+fn a_name_standing_for_a_formula_blocks_its_readers() {
+    let mut wb = book();
+    // `Tax_Rate` is defined as a formula, not a reference — this evaluator
+    // refuses to follow it (see `calc::Eval::defined_name`), and a formula
+    // naming it must be refused too, not silently treated as unaffected.
+    wb.defined_names.push(DefinedName {
+        name: "Tax_Rate".into(),
+        refers_to: "=A1+1".into(),
+        scope: None,
+    });
+    wb.sheet_mut(SheetId(0))
+        .unwrap()
+        .set(0, 3, formula("Tax_Rate*2", 2.2)); // D1
+
+    let impact = what_if(&wb, &[change(0, 0, 0.5)], &WhatIfOptions::default());
+    let d1 =
+        impact.unanswered.iter().find(|u| u.a1 == "Main!D1").expect(
+            "D1 might depend on the change through Tax_Rate's own A1+1, and must be reported",
+        );
+    assert!(matches!(d1.reason, Blocked::Formula(_)));
+    assert!(impact.moved.iter().all(|m| m.a1 != "Main!D1"));
+}
+
+// ---- H1: a cycle spanning levels -------------------------------------------
+
+#[test]
+fn a_cross_level_cycle_is_reported_rather_than_ping_ponged() {
+    // B1 reads A1 (the change) and C1; C1 reads only B1. Neither is a
+    // same-level cycle: B1 is found at level 1 (it reads A1 directly), C1
+    // only at level 2 (it reads B1) — `order_within`'s own cycle detection,
+    // scoped to one level, never sees the two together. Before this fix they
+    // ping-ponged between levels, each holding whatever its last visit
+    // computed, until `Stopped::Levels`.
+    let mut sheet = Sheet::new(SheetId(0), "Main");
+    sheet.set(0, 0, literal(1.0)); // A1
+    sheet.set(0, 1, formula("A1+C1", 2.0)); // B1
+    sheet.set(0, 2, formula("B1", 2.0)); // C1
+    let wb = Workbook {
+        path: "book.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash".into(),
+        sheets: vec![sheet],
+        defined_names: Vec::new(),
+        external_links: Vec::new(),
+    };
+
+    let impact = what_if(
+        &wb,
+        &[Change::new(
+            CellRef::new(SheetId(0), 0, 0),
+            CellValue::Number(5.0),
+        )],
+        &WhatIfOptions::default(),
+    );
+
+    assert_eq!(
+        impact.report.moved, 0,
+        "the whole affected set is the cycle — nothing settles into Moved"
+    );
+    assert_eq!(
+        impact.report.stopped, None,
+        "the cycle is caught, not silently exhausted against the level limit"
+    );
+    assert!(impact.moved.is_empty());
+    let mut cycles: Vec<&str> = impact
+        .unanswered
+        .iter()
+        .filter(|u| u.reason == Blocked::Cycle)
+        .map(|u| u.a1.as_str())
+        .collect();
+    cycles.sort_unstable();
+    assert_eq!(cycles, ["Main!B1", "Main!C1"]);
+}
+
+// ---- M11: a reverted revisit propagates too --------------------------------
+
+#[test]
+fn a_cell_that_reverts_still_makes_its_readers_revisit() {
+    // D=-A, E=D, B=A+E, C=B+1. B is first reached with a stale E (level 1),
+    // moves on a wrong value, and C inherits that wrong value at level 2.
+    // Once E catches up (level 2) and B is revisited (level 3), B recomputes
+    // to exactly its stored value — Unchanged, because -A and A cancel — but
+    // C was never told: without propagating that revert, C stays stuck on
+    // the stale value from level 2 forever.
+    let mut sheet = Sheet::new(SheetId(0), "Main");
+    sheet.set(0, 0, literal(1.0)); // A1
+    sheet.set(0, 3, formula("-A1", -1.0)); // D1
+    sheet.set(0, 4, formula("D1", -1.0)); // E1
+    sheet.set(0, 1, formula("A1+E1", 0.0)); // B1
+    sheet.set(0, 2, formula("B1+1", 1.0)); // C1
+    let wb = Workbook {
+        path: "book.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash".into(),
+        sheets: vec![sheet],
+        defined_names: Vec::new(),
+        external_links: Vec::new(),
+    };
+
+    let impact = what_if(
+        &wb,
+        &[Change::new(
+            CellRef::new(SheetId(0), 0, 0),
+            CellValue::Number(5.0),
+        )],
+        &WhatIfOptions::default(),
+    );
+
+    assert!(
+        impact.moved.iter().all(|m| m.a1 != "Main!C1"),
+        "C1 must not be left listed as Moved on a value that no longer stands"
+    );
+    assert!(
+        impact.moved.iter().all(|m| m.a1 != "Main!B1"),
+        "B1 itself must also end reverted"
+    );
+    assert_eq!(after(&impact, "Main!D1"), Some(CellValue::Number(-5.0)));
+    assert_eq!(after(&impact, "Main!E1"), Some(CellValue::Number(-5.0)));
 }

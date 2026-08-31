@@ -91,6 +91,18 @@ pub fn cells_in(workbook: &Workbook, range: RangeRef, limit: usize) -> (Vec<Cell
     let Some(sheet) = workbook.sheet(range.sheet) else {
         return (Vec::new(), false);
     };
+    // `iter_range` probes one `BTreeMap` range per row of `range`'s height,
+    // which is fine for an ordinary citation but not for a whole-column
+    // reference (`Sheet1!A:A`, 1,048,576 rows) now that those parse — a
+    // sheet's used range is never larger than what is actually there to find,
+    // so clipping to it first bounds the probe count by the sheet's real
+    // size rather than the reference's stated one.
+    let Some(range) = sheet
+        .used_range()
+        .and_then(|used| range.intersection(&used))
+    else {
+        return (Vec::new(), false);
+    };
     let mut out = Vec::new();
     let mut capped = false;
     for (at, cell) in sheet.iter_range(range) {

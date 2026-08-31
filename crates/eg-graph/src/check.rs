@@ -17,10 +17,16 @@
 //!   sixth invariant here.
 //! - **Whether the weights are right**, for the two dependency kinds that can
 //!   fan out. `CROSS_WORKBOOK_REF` and `REFERENCES_NAME` are pinned exactly to
-//!   the counts that produced them, so double-counting either is caught. A
-//!   `DEPENDS_ON` or `CROSS_SHEET_REF` reference may legitimately land on
-//!   several regions, so only a lower bound is checkable here; the ratio of
-//!   summed weight to `references_scanned` is the number that would move.
+//!   the counts that produced them, so double- or under-counting either is
+//!   caught — but only in total, summed over every edge of that kind in the
+//!   graph. A name resolved to the *wrong* defined-name node still leaves the
+//!   sum untouched if the edge it should have carried lands on some other edge
+//!   of the same kind instead, so this catches a global miscount, not a
+//!   misdirected individual edge; only [`crate::audit`], re-deriving each edge
+//!   by its own endpoints, catches that (V1). A `DEPENDS_ON` or
+//!   `CROSS_SHEET_REF` reference may legitimately land on several regions, so
+//!   only a lower bound is checkable here; the ratio of summed weight to
+//!   `references_scanned` is the number that would move.
 //! - **Anything about the cells themselves.** These checks read the graph, not
 //!   the workbook. If ingest lost a formula, the graph is consistently missing
 //!   its edges.
@@ -96,17 +102,26 @@ pub fn check(built: &BuiltGraph) -> Vec<Violation> {
 
     // A structural edge never leaves its sheet, and a same-sheet dependency
     // never crosses one. Both would make `CROSS_SHEET_REF` meaningless.
+    //
+    // Three independent invariants share this one pass over the edges, so a
+    // `break` the moment any one of them fired used to stop the other two
+    // from ever being checked again — one edge with a zero weight silenced
+    // every later edge's sheet-crossing violation, understating how broken
+    // the graph actually was. Each invariant is instead reported once (its
+    // first example) and the scan runs to completion regardless.
+    let (mut zero_weight_reported, mut same_sheet_reported, mut cross_sheet_reported) =
+        (false, false, false);
     for edge in graph.edge_indices() {
         let (a, b) = graph.edge_endpoints(edge).expect("edge has endpoints");
         let weight = graph[edge];
         let (sa, sb) = (graph[a].sheet(), graph[b].sheet());
 
-        if weight.weight == 0 {
+        if weight.weight == 0 && !zero_weight_reported {
+            zero_weight_reported = true;
             out.push(Violation {
                 invariant: "every edge stands for at least one reference",
                 detail: format!("{} edge of weight 0", weight.kind.as_str()),
             });
-            break;
         }
 
         let same_sheet_required = match weight.kind {
@@ -118,7 +133,8 @@ pub fn check(built: &BuiltGraph) -> Vec<Violation> {
             ),
             _ => false,
         };
-        if same_sheet_required && sa != sb {
+        if same_sheet_required && sa != sb && !same_sheet_reported {
+            same_sheet_reported = true;
             out.push(Violation {
                 invariant: "same-sheet edges stay on one sheet",
                 detail: format!(
@@ -128,14 +144,13 @@ pub fn check(built: &BuiltGraph) -> Vec<Violation> {
                     graph[b].label()
                 ),
             });
-            break;
         }
-        if weight.kind == EdgeKind::CrossSheetRef && sa == sb {
+        if weight.kind == EdgeKind::CrossSheetRef && sa == sb && !cross_sheet_reported {
+            cross_sheet_reported = true;
             out.push(Violation {
                 invariant: "CROSS_SHEET_REF actually crosses a sheet",
                 detail: format!("{:?} to {:?}", graph[a].label(), graph[b].label()),
             });
-            break;
         }
     }
 

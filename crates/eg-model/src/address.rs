@@ -153,6 +153,23 @@ impl RangeRef {
             && other.left <= self.right
     }
 
+    /// The overlap of two ranges, or `None` when they do not intersect (or
+    /// sit on different sheets). Unlike [`RangeRef::intersects`], this hands
+    /// back the overlap itself — the shape a caller needs to clip a
+    /// geometrically huge reference (a whole column, say) down to the part
+    /// worth iterating.
+    pub fn intersection(&self, other: &RangeRef) -> Option<RangeRef> {
+        if self.sheet != other.sheet {
+            return None;
+        }
+        let top = self.top.max(other.top);
+        let left = self.left.max(other.left);
+        let bottom = self.bottom.min(other.bottom);
+        let right = self.right.min(other.right);
+        (top <= bottom && left <= right)
+            .then(|| RangeRef::new(self.sheet, top, left, bottom, right))
+    }
+
     /// Smallest range covering both operands. Panics if they are on different sheets.
     pub fn union(&self, other: &RangeRef) -> RangeRef {
         debug_assert_eq!(self.sheet, other.sheet, "cannot union ranges across sheets");
@@ -251,6 +268,21 @@ impl ParsedRef {
     pub fn is_single_cell(&self) -> bool {
         self.top == self.bottom && self.left == self.right
     }
+
+    /// Whether this reference spans every row of the sheet — Excel's `A:A`
+    /// shorthand, or an explicit reference that amounts to the same thing
+    /// (`A1:A1048576`). Excel does not distinguish the two, and neither does
+    /// this: both mean "every row of these columns", and evaluating either
+    /// safely requires the same clipping to what the sheet actually uses.
+    pub fn is_whole_column(&self) -> bool {
+        self.top == 0 && self.bottom == MAX_ROW
+    }
+
+    /// Whether this reference spans every column of the sheet — `3:3`, or its
+    /// explicit equivalent `A3:XFD3`.
+    pub fn is_whole_row(&self) -> bool {
+        self.left == 0 && self.right == MAX_COL as u16
+    }
 }
 
 /// Parse a full A1 reference, optionally sheet- and workbook-qualified.
@@ -272,9 +304,15 @@ pub fn parse_a1(s: &str) -> Result<ParsedRef, AddressError> {
     let (left, top, abs_left, abs_top, right, bottom, abs_right, abs_bottom) =
         match local.split_once(':') {
             Some((a, b)) => {
-                let (c1, r1, ac1, ar1) = parse_local_parts(a)?;
-                let (c2, r2, ac2, ar2) = parse_local_parts(b)?;
-                (c1, r1, ac1, ar1, c2, r2, ac2, ar2)
+                if let Some(cols) = parse_whole_columns(a, b) {
+                    cols
+                } else if let Some(rows) = parse_whole_rows(a, b) {
+                    rows
+                } else {
+                    let (c1, r1, ac1, ar1) = parse_local_parts(a)?;
+                    let (c2, r2, ac2, ar2) = parse_local_parts(b)?;
+                    (c1, r1, ac1, ar1, c2, r2, ac2, ar2)
+                }
             }
             None => {
                 let (c, r, ac, ar) = parse_local_parts(local)?;
@@ -361,17 +399,34 @@ fn parse_sheet_prefix(prefix: &str) -> Result<SheetPrefix, AddressError> {
         p = &unquoted_owned;
     }
 
-    let (workbook, sheets) = if let Some(rest) = p.strip_prefix('[') {
-        match rest.split_once(']') {
-            Some((wb, sheets)) => (Some(wb.to_string()), sheets),
+    // A workbook marker, `[Book.xlsx]`, sits at the very start for the common
+    // in-session form (`[1]Sheet1`), but Excel writes a *closed* linked
+    // workbook with a full path before it — `C:\Reports\[Book1.xlsx]Sheet1`
+    // or `/data/[Book1.xlsx]Sheet1` — so the bracket pair must be found
+    // wherever it is, not assumed to open at position zero. Once a pair is
+    // found, everything before it is a directory path, never a sheet name (a
+    // path cannot itself be a 3-D range endpoint), so `:` is only a 3-D
+    // separator when there is no bracket pair at all.
+    let (workbook, sheets) = match p.find('[') {
+        Some(open) => match p[open..].find(']') {
+            Some(rel_close) => {
+                let close = open + rel_close;
+                (Some(p[open + 1..close].to_string()), &p[close + 1..])
+            }
             None => return Err(AddressError::Malformed(prefix.to_string())),
-        }
-    } else {
-        (None, p)
+        },
+        None => (None, p),
     };
 
+    // This function only ever runs when a `!` sheet separator was found in
+    // the text — `parse_a1` calls it with `Some(prefix)` exactly then — so an
+    // empty sheet name here is not "no sheet was named", it is one written
+    // and left blank: `''!A1` (an explicit empty quoted name) or `!A1` (no
+    // name at all before the bang). Excel accepts neither, and silently
+    // reading either as an unqualified reference would answer a different
+    // question from the one written.
     if sheets.is_empty() {
-        return Ok((workbook, None, None));
+        return Err(AddressError::Malformed(prefix.to_string()));
     }
 
     Ok(match sheets.split_once(':') {
@@ -433,6 +488,78 @@ fn parse_local_parts(s: &str) -> Result<(u16, u32, bool, bool), AddressError> {
     Ok((col, (row_1based - 1) as u32, abs_col, abs_row))
 }
 
+/// `(left, top, abs_left, abs_top, right, bottom, abs_right, abs_bottom)` —
+/// the same shape [`parse_a1`]'s local-part resolution builds every corner
+/// tuple in, named once so the whole-axis helpers below don't each spell it
+/// out.
+type Corners = (u16, u32, bool, bool, u16, u32, bool, bool);
+
+/// Parse `a:b` as Excel's `A:A` whole-column shorthand — every row of these
+/// columns — if both sides are a bare column (optional `$`, letters, no row
+/// digits). `None` when either side is not that shape, so the caller falls
+/// through to ordinary corner parsing.
+///
+/// The row bound is synthesised as the sheet's full height and marked
+/// absolute unconditionally: it does not depend on where a formula
+/// referencing it sits, so `SUM(A:A)` normalises to the same R1C1 shape
+/// wherever it is filled down, the same way an explicit `$A$1:$A$1048576`
+/// would.
+fn parse_whole_columns(a: &str, b: &str) -> Option<Corners> {
+    let (c1, ac1) = parse_column_only(a)?;
+    let (c2, ac2) = parse_column_only(b)?;
+    Some((c1, 0, ac1, true, c2, MAX_ROW, ac2, true))
+}
+
+/// As [`parse_whole_columns`], for `3:3` — every column of these rows.
+fn parse_whole_rows(a: &str, b: &str) -> Option<Corners> {
+    let (r1, ar1) = parse_row_only(a)?;
+    let (r2, ar2) = parse_row_only(b)?;
+    Some((0, r1, true, ar1, MAX_COL as u16, r2, true, ar2))
+}
+
+/// Parse a bare column token: optional `$`, then one to three letters, and
+/// nothing else — no row digits, which is what tells it apart from an
+/// ordinary cell reference.
+fn parse_column_only(s: &str) -> Option<(u16, bool)> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let abs = bytes.first() == Some(&b'$');
+    if abs {
+        i += 1;
+    }
+    let start = i;
+    while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+        i += 1;
+    }
+    if i == start || i != bytes.len() {
+        return None;
+    }
+    Some((letters_to_col(&s[start..i]).ok()?, abs))
+}
+
+/// Parse a bare row token: optional `$`, then digits, and nothing else — no
+/// column letters.
+fn parse_row_only(s: &str) -> Option<(u32, bool)> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let abs = bytes.first() == Some(&b'$');
+    if abs {
+        i += 1;
+    }
+    let start = i;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == start || i != bytes.len() {
+        return None;
+    }
+    let row_1based: u64 = s[start..i].parse().ok()?;
+    if row_1based == 0 || row_1based > MAX_ROW as u64 + 1 {
+        return None;
+    }
+    Some(((row_1based - 1) as u32, abs))
+}
+
 /// Convert column letters to a 0-based index. `A` -> 0, `Z` -> 25, `AA` -> 26.
 pub fn letters_to_col(letters: &str) -> Result<u16, AddressError> {
     if letters.is_empty() || letters.len() > 3 {
@@ -478,14 +605,21 @@ pub fn col_to_letters(col: u32) -> String {
 
 /// Quote a sheet name for inclusion in an A1 reference, if Excel would.
 ///
-/// Excel quotes when the name is not a bare identifier: any character outside
-/// `[A-Za-z0-9_.]`, or a leading digit, forces quotes. Embedded quotes double.
+/// Excel quotes when the name is not a bare identifier: a character that is
+/// not alphanumeric, `_` or `.` forces quotes — Unicode alphanumeric, not
+/// only ASCII `[A-Za-z0-9]`, since Excel itself accepts an unquoted sheet
+/// name like `Café`. So does a leading digit, or the name being shaped
+/// exactly like a cell reference (`A1`, `$B$2`, …) — Excel disallows naming a
+/// sheet that ambiguously in its own UI, but a workbook can still arrive with
+/// one (renamed via another tool, or a corrupted file), and citing it bare
+/// would read as the cell, not the sheet. Embedded quotes double.
 pub fn quote_sheet_name(name: &str) -> String {
     let needs_quotes = name.is_empty()
         || name.chars().next().is_some_and(|c| c.is_ascii_digit())
         || !name
             .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '.');
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        || parse_local_parts(name).is_ok();
     if needs_quotes {
         format!("'{}'", name.replace('\'', "''"))
     } else {
@@ -701,6 +835,22 @@ mod tests {
     }
 
     #[test]
+    fn intersection_clips_a_huge_range_to_a_small_one() {
+        let whole_column = RangeRef::new(S0, 0, 1, MAX_ROW, 1);
+        let used = RangeRef::parse_local("A1:D4", S0).unwrap();
+        let clipped = whole_column.intersection(&used).unwrap();
+        assert_eq!(clipped.to_a1(), "B1:B4");
+
+        assert!(RangeRef::parse_local("A1:B2", S0)
+            .unwrap()
+            .intersection(&RangeRef::parse_local("D4:F6", S0).unwrap())
+            .is_none());
+
+        let other_sheet = RangeRef::new(SheetId(1), 0, 0, 0, 0);
+        assert!(used.intersection(&other_sheet).is_none());
+    }
+
+    #[test]
     fn iter_cells_is_row_major() {
         let r = RangeRef::parse_local("A1:B2", S0).unwrap();
         let got: Vec<String> = r.iter_cells().map(|c| c.to_a1()).collect();
@@ -757,6 +907,30 @@ mod tests {
     }
 
     #[test]
+    fn a_closed_workbook_link_carries_its_directory_path() {
+        // Excel writes the full path before the bracket when the linked
+        // workbook is closed — this used to split on the drive letter's `:`
+        // as if it were a 3-D range, lifting to a bogus sheet named "C".
+        let p = parse_a1("'C:\\Reports\\[Book1.xlsx]Sheet1'!A1").unwrap();
+        assert_eq!(p.workbook.as_deref(), Some("Book1.xlsx"));
+        assert_eq!(p.sheet_name.as_deref(), Some("Sheet1"));
+        assert_eq!(p.end_sheet_name, None);
+
+        let p = parse_a1("'/data/[Book1.xlsx]Sheet1'!A1").unwrap();
+        assert_eq!(p.workbook.as_deref(), Some("Book1.xlsx"));
+        assert_eq!(p.sheet_name.as_deref(), Some("Sheet1"));
+        assert_eq!(p.end_sheet_name, None);
+
+        // A path containing more than one `:` (a UNC-style or oddly quoted
+        // one) must not confuse which colon, if any, is a 3-D separator —
+        // there is a bracket pair here, so none of them are.
+        let p = parse_a1("'C:\\Reports\\2024:Archive\\[Book1.xlsx]Sheet1'!A1").unwrap();
+        assert_eq!(p.workbook.as_deref(), Some("Book1.xlsx"));
+        assert_eq!(p.sheet_name.as_deref(), Some("Sheet1"));
+        assert_eq!(p.end_sheet_name, None);
+    }
+
+    #[test]
     fn absoluteness_is_tracked_per_component() {
         let p = parse_a1("$B7").unwrap();
         assert!(p.abs_left && !p.abs_top);
@@ -781,6 +955,38 @@ mod tests {
         assert_eq!(quote_sheet_name("2024"), "'2024'");
         assert_eq!(quote_sheet_name("Bob's"), "'Bob''s'");
         assert_eq!(quote_sheet_name(""), "''");
+    }
+
+    #[test]
+    fn a_sheet_named_like_a_cell_reference_is_quoted() {
+        // L21: Excel itself refuses to name a sheet "A1" in its UI, but a
+        // workbook can still arrive with one — renamed through another tool,
+        // or a corrupted file — and citing it bare would read as the cell,
+        // not the sheet.
+        assert_eq!(quote_sheet_name("A1"), "'A1'");
+        assert_eq!(quote_sheet_name("XFD1048576"), "'XFD1048576'");
+        assert_eq!(quote_sheet_name("$B$2"), "'$B$2'");
+        // A name that merely starts like a column but is not a valid cell
+        // shape (too many letters, or the row out of range) is unaffected.
+        assert_eq!(quote_sheet_name("Sheet1"), "Sheet1");
+        assert_eq!(quote_sheet_name("XFE1"), "XFE1", "past the last column");
+    }
+
+    #[test]
+    fn a_non_ascii_alphanumeric_sheet_name_still_needs_no_quotes() {
+        // The doc comment used to describe an ASCII-only rule the code never
+        // implemented — `char::is_alphanumeric` is Unicode-aware, and so is
+        // Excel's own bare-identifier rule.
+        assert_eq!(quote_sheet_name("Café"), "Café");
+    }
+
+    #[test]
+    fn an_empty_quoted_sheet_name_is_rejected_not_read_as_unqualified() {
+        // L21: `''!A1` names an empty sheet, not no sheet at all — Excel
+        // rejects it, and reading it as a plain `A1` would silently answer a
+        // different reference from the one written.
+        assert!(parse_a1("''!A1").is_err());
+        assert!(parse_a1("!A1").is_err(), "no sheet name before the bang");
     }
 
     #[test]
@@ -825,6 +1031,52 @@ mod tests {
             CellRef::new(S0, 1, 1),
         );
         assert_eq!(r.to_r1c1(), "'Q3 Sales'!RC:R[1]C[1]");
+    }
+
+    #[test]
+    fn whole_column_references_parse() {
+        let p = parse_a1("A:A").unwrap();
+        assert!(p.is_whole_column());
+        assert!(!p.is_whole_row());
+        assert_eq!((p.left, p.right), (0, 0));
+        assert_eq!((p.top, p.bottom), (0, MAX_ROW));
+        // Absolute so that shape normalisation does not depend on the
+        // formula's own row.
+        assert!(p.abs_top && p.abs_bottom);
+
+        let p = parse_a1("$B:$D").unwrap();
+        assert_eq!((p.left, p.right), (1, 3));
+        assert!(p.abs_left && p.abs_right);
+
+        let p = parse_a1("Sheet1!C:C").unwrap();
+        assert_eq!(p.sheet_name.as_deref(), Some("Sheet1"));
+        assert!(p.is_whole_column());
+    }
+
+    #[test]
+    fn whole_row_references_parse() {
+        let p = parse_a1("3:3").unwrap();
+        assert!(p.is_whole_row());
+        assert!(!p.is_whole_column());
+        assert_eq!((p.top, p.bottom), (2, 2));
+        assert_eq!((p.left, p.right), (0, MAX_COL as u16));
+        assert!(p.abs_left && p.abs_right);
+
+        let p = parse_a1("$5:$9").unwrap();
+        assert_eq!((p.top, p.bottom), (4, 8));
+        assert!(p.abs_top && p.abs_bottom);
+
+        let p = parse_a1("'Q3 Sales'!3:5").unwrap();
+        assert_eq!(p.sheet_name.as_deref(), Some("Q3 Sales"));
+        assert_eq!((p.top, p.bottom), (2, 4));
+    }
+
+    #[test]
+    fn mismatched_axis_shorthand_is_rejected() {
+        // `A:3` is not valid Excel syntax in either direction, and must not
+        // be quietly accepted as a truncated something.
+        assert!(parse_a1("A:3").is_err());
+        assert!(parse_a1("3:A").is_err());
     }
 
     #[test]

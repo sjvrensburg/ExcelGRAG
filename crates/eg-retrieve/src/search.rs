@@ -117,6 +117,11 @@ const FRAME: &[&str] = &[
 /// was found on, which an agent can weigh for itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
+    /// The question had no content word to search on at all — every word was
+    /// a frame word (`FRAME`), or there was no word. Distinct from `Nothing`:
+    /// that is "we looked and found nothing", this is "there was nothing to
+    /// look for", and retrieval is not even run over a query like this.
+    NoContentWords,
     /// Nothing matched at all.
     Nothing,
     /// The result was not found on anything the question asked about — either
@@ -133,6 +138,7 @@ pub enum Verdict {
 impl Verdict {
     pub fn as_str(self) -> &'static str {
         match self {
+            Verdict::NoContentWords => "no content words",
             Verdict::Nothing => "nothing matched",
             Verdict::Blind => "blind",
             Verdict::Partial => "partial",
@@ -164,10 +170,29 @@ pub struct Search {
     pub matched: Vec<String>,
     /// Of those, the ones the top result itself carries.
     pub covered: Vec<String>,
+    /// Matched words whose own coverage probe hit its depth cap without
+    /// finding the top result — so whether the top result carries the word
+    /// is unknown, not negative. A word this common could easily rank the
+    /// top result past the probe's depth on its own merits while still
+    /// containing it. Left out of `covered` and out of the `Partial`/`Full`
+    /// decision alike, rather than counted as a miss the probe never
+    /// actually confirmed.
+    pub uncertain: Vec<String>,
     /// Hits that both halves ranked. Zero when only one half ran.
     pub corroborated: usize,
     /// Whether the semantic half ran at all.
     pub both_halves: bool,
+    /// Whether the per-word coverage probe failed for at least one content
+    /// word. That word is left out of both `matched` and `unmatched` rather
+    /// than reported unmatched — a probe failure means its coverage was never
+    /// checked, and claiming the corpus lacks the word would be a guess, the
+    /// same kind of mistake this whole evidence layer exists to avoid.
+    pub probe_incomplete: bool,
+    /// Whether the question had no content word at all — every word was a
+    /// frame word, or there was no word. `hits` is empty for this the same
+    /// way it is for a genuine `Nothing` miss, but the reason is different
+    /// enough to need its own verdict: see [`Verdict::NoContentWords`].
+    pub no_content_words: bool,
 }
 
 impl Search {
@@ -176,13 +201,26 @@ impl Search {
     }
 
     pub fn verdict(&self) -> Verdict {
+        if self.no_content_words {
+            return Verdict::NoContentWords;
+        }
         if self.hits.is_empty() {
             return Verdict::Nothing;
         }
+        // Every matched word partitions into confirmed-covered, confirmed
+        // NOT covered by the top result, or `uncertain` (its own probe hit
+        // the depth cap before finding the top result, so absence there
+        // proves nothing). Only a confirmed miss may downgrade the verdict —
+        // an all-`uncertain` empty `covered` is unresolved, not `Blind`.
+        let confirmed_miss = self.matched.len() - self.covered.len() - self.uncertain.len();
         if self.covered.is_empty() {
-            return Verdict::Blind;
+            return if confirmed_miss > 0 || self.matched.is_empty() {
+                Verdict::Blind
+            } else {
+                Verdict::Partial
+            };
         }
-        if self.covered.len() < self.matched.len() || !self.unmatched.is_empty() {
+        if confirmed_miss > 0 || !self.unmatched.is_empty() {
             return Verdict::Partial;
         }
         Verdict::Full
@@ -192,6 +230,9 @@ impl Search {
     /// point — a caveat that appears only sometimes is one a reader learns to
     /// skip, and the failure being fixed here is two answers looking alike.
     pub fn evidence(&self) -> String {
+        if self.no_content_words {
+            return "the question carried no content word to search on".to_string();
+        }
         if self.hits.is_empty() {
             return "nothing matched".to_string();
         }
@@ -207,7 +248,7 @@ impl Search {
         let missed: Vec<String> = self
             .matched
             .iter()
-            .filter(|w| !self.covered.contains(w))
+            .filter(|w| !self.covered.contains(w) && !self.uncertain.contains(w))
             .cloned()
             .collect();
         if !missed.is_empty() {
@@ -219,12 +260,24 @@ impl Search {
                 quoted(&self.unmatched)
             ));
         }
+        if !self.uncertain.is_empty() {
+            out.push_str(&format!(
+                "; whether the top result also carries {} could not be checked \
+                 (too common to probe that deep)",
+                quoted(&self.uncertain)
+            ));
+        }
         if self.both_halves {
             out.push_str(&format!(
                 "; {} of {} results found by word and by meaning",
                 self.corroborated,
                 self.hits.len()
             ));
+        }
+        if self.probe_incomplete {
+            out.push_str(
+                "; coverage for at least one word could not be checked (index probe failed)",
+            );
         }
         out
     }
@@ -237,6 +290,10 @@ impl Search {
     pub fn warning(&self) -> Option<String> {
         match self.verdict() {
             Verdict::Partial | Verdict::Full => None,
+            Verdict::NoContentWords => Some(
+                "every word in the question is a frame word — ask with the terms you want found."
+                    .to_string(),
+            ),
             Verdict::Nothing => Some("NOTHING MATCHED.".to_string()),
             Verdict::Blind if self.matched.is_empty() => Some(format!(
                 "BLIND MATCH: none of {} appears anywhere in this corpus, so nothing \
@@ -247,7 +304,7 @@ impl Search {
             Verdict::Blind => Some(format!(
                 "BLIND MATCH: the best result carries none of {} — the words of the \
                  question this corpus does know. It was found on something else \
-                 entirely. Verify with `read_cells` before relying on it.",
+                 entirely. Read the cells it names before relying on it.",
                 quoted(&self.matched)
             )),
         }
@@ -274,12 +331,19 @@ pub fn find(
     fusion: &Fusion,
 ) -> Result<Search, SearchError> {
     let text = TextIndex::open(dir).map_err(|e| SearchError::Text(e.to_string()))?;
-    let mut opened = embedder(dir).ok();
+    // `embedder(dir)` loads the ONNX model — seconds, and on a fresh machine
+    // an attempt at the ~130 MB download — exactly the costs `lexical_only`
+    // exists to avoid, so it is not even called on that path.
+    let mut opened = if fusion.lexical_only {
+        None
+    } else {
+        embedder(dir).ok()
+    };
     let semantic = opened
         .as_mut()
         .filter(|(_, vectors)| !vectors.is_empty())
         .map(|(embedder, vectors)| (embedder, &*vectors));
-    Ok(find_in(&text, semantic, query, options, fusion))
+    find_in(&text, semantic, query, options, fusion)
 }
 
 /// As [`find`], against indexes the caller is already holding open.
@@ -294,21 +358,45 @@ pub fn find_in(
     query: &str,
     options: &SearchOptions,
     fusion: &Fusion,
-) -> Search {
-    let terms = term_hits(text, query, options);
+) -> Result<Search, SearchError> {
+    let (terms, probe_incomplete) = term_hits(text, query, options);
+    if terms.is_empty() && !probe_incomplete {
+        // Every word of the query is a frame word (`FRAME`), or there was no
+        // word: there is no content to search on. Retrieval is not run at
+        // all — a thresholdless top-k semantic search over a query like
+        // "show me all" returns hits that are neighbours of nothing the
+        // question actually named, and a caller could easily mistake them
+        // for an answer.
+        //
+        // `terms` can also come back empty because *every* probe failed
+        // (`probe_incomplete`), which is not the same situation and must not
+        // be reported as one: that is the index itself in trouble, and
+        // falling through to the real search below is what lets that surface
+        // as the error H3 exists to propagate, instead of a false "nothing to
+        // search for" here.
+        return Ok(Search {
+            no_content_words: true,
+            ..Search::default()
+        });
+    }
 
     let lexical_only = fusion.lexical_only || semantic.is_none();
     if lexical_only {
-        let hits = text.search(query, options).unwrap_or_default();
-        let (unmatched, matched, covered) = coverage(&terms, hits.first());
-        return Search {
+        let hits = text
+            .search(query, options)
+            .map_err(|e| SearchError::Query(e.to_string()))?;
+        let (unmatched, matched, covered, uncertain) = coverage(&terms, hits.first());
+        return Ok(Search {
             hits,
             matched,
             unmatched,
             covered,
+            uncertain,
             corroborated: 0,
             both_halves: false,
-        };
+            probe_incomplete,
+            no_content_words: false,
+        });
     }
     let (embedder, vectors) = semantic.expect("checked above");
     // Both halves are asked for `depth` and the fused list is cut afterwards.
@@ -318,7 +406,13 @@ pub fn find_in(
         limit: options.limit.max(fusion.depth),
         ..options.clone()
     };
-    let lexical = text.search(query, &deep).unwrap_or_default();
+    let lexical = text
+        .search(query, &deep)
+        .map_err(|e| SearchError::Query(e.to_string()))?;
+    // Failing to *embed* this one query is not a lexical index failure — the
+    // lexical half above already ran and is trustworthy — so this degrades to
+    // a lexical-only answer rather than failing the whole search, the same
+    // trade `find` makes when there is no semantic half to ask at all.
     let semantic = embedder
         .embed_query(query)
         .map(|vector| vectors.search(&vector, &deep))
@@ -326,15 +420,18 @@ pub fn find_in(
     if semantic.is_empty() {
         let mut hits = lexical;
         hits.truncate(options.limit);
-        let (unmatched, matched, covered) = coverage(&terms, hits.first());
-        return Search {
+        let (unmatched, matched, covered, uncertain) = coverage(&terms, hits.first());
+        return Ok(Search {
             hits,
             matched,
             unmatched,
             covered,
+            uncertain,
             corroborated: 0,
             both_halves: false,
-        };
+            probe_incomplete,
+            no_content_words: false,
+        });
     }
 
     let hits = fuse_weighted(
@@ -362,15 +459,18 @@ pub fn find_in(
         })
         .count();
 
-    let (unmatched, matched, covered) = coverage(&terms, hits.first());
-    Search {
+    let (unmatched, matched, covered, uncertain) = coverage(&terms, hits.first());
+    Ok(Search {
         hits,
         matched,
         unmatched,
         covered,
+        uncertain,
         corroborated,
         both_halves: true,
-    }
+        probe_incomplete,
+        no_content_words: false,
+    })
 }
 
 /// What each content word of the question matches, as node keys.
@@ -380,43 +480,62 @@ pub fn find_in(
 /// as the query itself, so a word counts as known exactly when it could have
 /// contributed — the custom tokenizer's case and letter-digit splitting
 /// included, which is why this is not a lookup in a term dictionary.
-fn term_hits(
-    text: &TextIndex,
-    query: &str,
-    options: &SearchOptions,
-) -> Vec<(String, FxHashSet<(String, u32)>)> {
+/// Returns the per-word hits, and whether the probe failed for any word.
+///
+/// A probe failure degrades rather than propagates, unlike the main search
+/// above: this is diagnostic evidence about a search that already ran, not
+/// the search itself, so a probe error should not turn a real, useful ranking
+/// into a hard failure. But the failure must still be visible — a word left
+/// out here must not silently fall into "unmatched" in [`coverage`], which
+/// would tell the caller the corpus lacks a word nobody actually checked.
+/// A content word, and the node keys it matched — what each of [`term_hits`]
+/// and [`coverage`] pass between them.
+/// A content word, the node keys it matched (up to the probe depth), and
+/// whether that list was cut short by the depth cap rather than exhausted.
+type TermHits = Vec<(String, FxHashSet<(String, u32)>, bool)>;
+
+fn term_hits(text: &TextIndex, query: &str, options: &SearchOptions) -> (TermHits, bool) {
     // Deep enough that a word common in the workbook still lists the node the
     // ranking chose. Shallower and a frequent word would look as if it missed.
+    // Not deep enough to promise that for every corpus — L14: a word common
+    // enough to blow past this on its own merits still gets probed only this
+    // far, so `coverage` treats a capped, top-result-not-found probe as
+    // unresolved rather than as proof the top result lacks the word.
+    const PROBE_DEPTH: usize = 200;
     let probe = SearchOptions {
-        limit: 200,
+        limit: PROBE_DEPTH,
         ..options.clone()
     };
     let mut out = Vec::new();
     let mut seen: FxHashSet<String> = FxHashSet::default();
+    let mut probe_incomplete = false;
     for word in query.split(|c: char| !c.is_alphanumeric()) {
         let lower = word.to_lowercase();
         if lower.is_empty() || FRAME.contains(&lower.as_str()) || !seen.insert(lower.clone()) {
             continue;
         }
-        let hits = text
-            .search(word, &probe)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|h| (h.workbook, h.node))
-            .collect();
-        out.push((lower, hits));
+        match text.search(word, &probe) {
+            Ok(hits) => {
+                let capped = hits.len() >= PROBE_DEPTH;
+                let hits = hits.into_iter().map(|h| (h.workbook, h.node)).collect();
+                out.push((lower, hits, capped));
+            }
+            Err(_) => probe_incomplete = true,
+        }
     }
-    out
+    (out, probe_incomplete)
 }
 
-/// Split the question's words into unknown, known, and carried by `top`.
+/// Split the question's words into unmatched, matched, carried by `top`, and
+/// matched-but-unresolved-for-`top` (see [`Search::uncertain`]).
 fn coverage(
-    terms: &[(String, FxHashSet<(String, u32)>)],
+    terms: &TermHits,
     top: Option<&Hit>,
-) -> (Vec<String>, Vec<String>, Vec<String>) {
+) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
     let key = top.map(|h| (h.workbook.clone(), h.node));
-    let (mut unmatched, mut matched, mut covered) = (Vec::new(), Vec::new(), Vec::new());
-    for (word, hits) in terms {
+    let (mut unmatched, mut matched, mut covered, mut uncertain) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for (word, hits, capped) in terms {
         if hits.is_empty() {
             unmatched.push(word.clone());
             continue;
@@ -424,9 +543,11 @@ fn coverage(
         matched.push(word.clone());
         if key.as_ref().is_some_and(|k| hits.contains(k)) {
             covered.push(word.clone());
+        } else if *capped {
+            uncertain.push(word.clone());
         }
     }
-    (unmatched, matched, covered)
+    (unmatched, matched, covered, uncertain)
 }
 
 /// The model and the vectors it wrote, for a corpus that has them.
@@ -435,4 +556,108 @@ pub fn embedder(dir: &str) -> Result<(Embedder, VectorIndex), String> {
     let vectors =
         VectorIndex::open(dir, embedder.name(), embedder.dim()).map_err(|e| e.to_string())?;
     Ok((embedder, vectors))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eg_graph::NodeKind;
+
+    fn hit(workbook: &str, node: u32) -> Hit {
+        Hit {
+            score: 1.0,
+            workbook: workbook.to_string(),
+            path: "book.xlsx".into(),
+            node,
+            kind: NodeKind::Column,
+            sheet: None,
+            label: "label".into(),
+            a1: None,
+        }
+    }
+
+    fn hits(pairs: &[(&str, u32)]) -> FxHashSet<(String, u32)> {
+        pairs.iter().map(|(wb, n)| (wb.to_string(), *n)).collect()
+    }
+
+    #[test]
+    fn a_capped_probe_that_never_found_the_top_result_is_uncertain_not_a_miss() {
+        // L14: at exactly the probe's depth cap, absence from the sample
+        // proves nothing — the true match set may run deeper and include the
+        // top result anyway.
+        let terms: TermHits = vec![("debt".to_string(), hits(&[("wbA", 1), ("wbA", 2)]), true)];
+        let (unmatched, matched, covered, uncertain) = coverage(&terms, Some(&hit("wbA", 99)));
+        assert!(unmatched.is_empty());
+        assert_eq!(matched, vec!["debt".to_string()]);
+        assert!(covered.is_empty());
+        assert_eq!(uncertain, vec!["debt".to_string()]);
+    }
+
+    #[test]
+    fn an_uncapped_probe_that_never_found_the_top_result_is_a_confirmed_miss() {
+        // The whole match set fit under the cap, so its absence is certain —
+        // must not be softened into `uncertain` just because some *other*
+        // word in the same query happened to be capped.
+        let terms: TermHits = vec![("debt".to_string(), hits(&[("wbA", 1), ("wbA", 2)]), false)];
+        let (_, matched, covered, uncertain) = coverage(&terms, Some(&hit("wbA", 99)));
+        assert_eq!(matched, vec!["debt".to_string()]);
+        assert!(covered.is_empty());
+        assert!(uncertain.is_empty());
+    }
+
+    #[test]
+    fn an_uncertain_word_does_not_turn_a_real_result_blind() {
+        // Before L14 this configuration was `Blind`, wrongly asserting the
+        // top result "carries none of" a word whose coverage was never
+        // actually resolved.
+        let search = Search {
+            hits: vec![hit("wbA", 99)],
+            matched: vec!["debt".to_string()],
+            uncertain: vec!["debt".to_string()],
+            ..Search::default()
+        };
+        assert_eq!(search.verdict(), Verdict::Partial);
+    }
+
+    #[test]
+    fn an_uncertain_word_does_not_block_a_full_verdict() {
+        let search = Search {
+            hits: vec![hit("wbA", 99)],
+            matched: vec!["debt".to_string(), "aged".to_string()],
+            covered: vec!["debt".to_string()],
+            uncertain: vec!["aged".to_string()],
+            ..Search::default()
+        };
+        assert_eq!(search.verdict(), Verdict::Full);
+    }
+
+    #[test]
+    fn a_confirmed_miss_alongside_an_uncertain_word_is_still_partial() {
+        let search = Search {
+            hits: vec![hit("wbA", 99)],
+            matched: vec!["debt".to_string(), "aged".to_string(), "bucket".to_string()],
+            covered: vec!["debt".to_string()],
+            uncertain: vec!["aged".to_string()],
+            ..Search::default()
+        };
+        // "bucket" is matched, not covered, not uncertain — a confirmed miss.
+        assert_eq!(search.verdict(), Verdict::Partial);
+    }
+
+    #[test]
+    fn evidence_reports_an_uncertain_word_separately_from_a_confirmed_miss() {
+        let search = Search {
+            hits: vec![hit("wbA", 99)],
+            matched: vec!["debt".to_string(), "aged".to_string()],
+            covered: vec!["debt".to_string()],
+            uncertain: vec!["aged".to_string()],
+            ..Search::default()
+        };
+        let evidence = search.evidence();
+        assert!(evidence.contains("could not be checked"), "{evidence}");
+        assert!(
+            !evidence.contains("matched elsewhere"),
+            "an uncertain word is not a confirmed miss: {evidence}"
+        );
+    }
 }

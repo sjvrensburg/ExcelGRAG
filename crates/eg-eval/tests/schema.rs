@@ -68,6 +68,31 @@ fn a_filled_down_vlookup_is_a_foreign_key() {
 }
 
 #[test]
+fn a_written_but_empty_fourth_argument_is_an_exact_key_not_a_dropped_formula() {
+    // `VLOOKUP(...,)` — a trailing comma, empty fourth argument — coerces to
+    // FALSE the same way `calc.rs`'s evaluator now does, not the omitted
+    // argument's TRUE default. Before this fix the empty literal matched
+    // neither the `Bool` nor `Number` arm below and fell to `Unrecognised`,
+    // dropping a declared key from schema inference entirely.
+    let wb = book(&[
+        "VLOOKUP(C2,Rates!$A$1:$B$2,2,)",
+        "VLOOKUP(C3,Rates!$A$1:$B$2,2,)",
+        "VLOOKUP(C4,Rates!$A$1:$B$2,2,)",
+    ]);
+    let schema = infer_schema(&wb);
+    assert_eq!(
+        schema.lookups.len(),
+        1,
+        "must not be dropped as unrecognised"
+    );
+    assert!(
+        !schema.lookups[0].approximate,
+        "empty coerces to FALSE, exact"
+    );
+    assert_eq!(schema.keys().count(), 1, "and so counts as a declared key");
+}
+
+#[test]
 fn an_approximate_lookup_is_a_banding_and_is_flagged_as_one() {
     // Without a FALSE, the formula asks for the last row not past its argument.
     // The first column is a set of thresholds, and joining on equality would be
