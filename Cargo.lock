@@ -809,10 +809,12 @@ version = "0.1.0"
 dependencies = [
  "eg-graph",
  "eg-index",
+ "eg-ingest",
  "eg-model",
  "petgraph",
  "rustc-hash",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

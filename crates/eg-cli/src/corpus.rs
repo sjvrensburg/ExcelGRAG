@@ -6,9 +6,9 @@ use std::time::Instant;
 use eg_graph::store::Corpus;
 use eg_graph::{build_with, AuditOptions, GraphOptions, NodeKind, MAX_STORED_FORMULA_GROUPS};
 use eg_index::vector::{embeddable, VectorIndex};
-use eg_index::{fuse, Embedder, Hit, SearchOptions, TextIndex};
+use eg_index::{Embedder, SearchOptions, TextIndex};
 use eg_ingest::{load_with, LoadOptions};
-use eg_retrieve::{expand, render, ExpandOptions, RenderOptions};
+use eg_retrieve::{expand, find, render, ExpandOptions, RenderOptions};
 
 /// Read workbooks into the corpus, then bring both indexes up to date.
 ///
@@ -162,7 +162,7 @@ pub fn index(
 
         if want_vectors {
             if embedder.is_none() {
-                match open_embedder(dir) {
+                match eg_retrieve::embedder(dir) {
                     Ok(pair) => embedder = Some(pair),
                     Err(e) => {
                         println!("  no semantic half ({e}); indexing by word only");
@@ -194,13 +194,6 @@ pub fn index(
     Ok(())
 }
 
-fn open_embedder(dir: &str) -> Result<(Embedder, VectorIndex), String> {
-    let embedder = Embedder::new().map_err(|e| e.to_string())?;
-    let vectors =
-        VectorIndex::open(dir, embedder.name(), embedder.dim()).map_err(|e| e.to_string())?;
-    Ok((embedder, vectors))
-}
-
 pub struct AskOptions {
     pub seeds: usize,
     pub hops: usize,
@@ -216,7 +209,8 @@ pub fn ask(dir: &str, query: &str, options: AskOptions) -> Result<(), String> {
         limit: options.seeds.max(1),
         ..Default::default()
     };
-    let hits = find(dir, query, &search_options, options.lexical_only)?;
+    let hits =
+        find(dir, query, &search_options, options.lexical_only).map_err(|e| e.to_string())?;
     if hits.is_empty() {
         println!("{query:?} — nothing matched.");
         return Ok(());
@@ -274,7 +268,7 @@ pub fn search(
         sheet,
         ..Default::default()
     };
-    let hits = find(dir, query, &options, lexical_only)?;
+    let hits = find(dir, query, &options, lexical_only).map_err(|e| e.to_string())?;
     if hits.is_empty() {
         println!("{query:?} — nothing matched.");
         return Ok(());
@@ -287,35 +281,6 @@ pub fn search(
         }
     }
     Ok(())
-}
-
-/// Both halves of the search, fused. The semantic half is optional: a corpus
-/// with no vectors, or a machine that cannot reach the model, still answers.
-fn find(
-    dir: &str,
-    query: &str,
-    options: &SearchOptions,
-    lexical_only: bool,
-) -> Result<Vec<Hit>, String> {
-    let text =
-        TextIndex::open(dir).map_err(|e| format!("could not open the lexical index: {e}"))?;
-    let lexical = text
-        .search(query, options)
-        .map_err(|e| format!("lexical search failed: {e}"))?;
-    if lexical_only {
-        return Ok(lexical);
-    }
-    let semantic = match open_embedder(dir) {
-        Ok((mut embedder, vectors)) if !vectors.is_empty() => embedder
-            .embed_query(query)
-            .map(|vector| vectors.search(&vector, options))
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    };
-    if semantic.is_empty() {
-        return Ok(lexical);
-    }
-    Ok(fuse(&[&lexical, &semantic], options.limit))
 }
 
 pub fn workbooks(dir: &str) -> Result<(), String> {
