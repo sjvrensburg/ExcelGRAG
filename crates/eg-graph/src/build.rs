@@ -44,6 +44,48 @@ pub struct BuiltGraph {
     pub report: BuildReport,
 }
 
+impl BuiltGraph {
+    /// Drop the formula-group layer, leaving what a build with
+    /// [`GraphOptions::formula_group_nodes`] off would have produced.
+    ///
+    /// Here because whether the layer is worth keeping is a *count*, and the
+    /// count is only known once it has been built: past
+    /// [`crate::MAX_STORED_FORMULA_GROUPS`] the corpus drops it. Building a
+    /// second time to learn nothing new costs region detection and the whole
+    /// dependency lift again — the bulk of a build, seven seconds of it on the
+    /// reference workbook — so the layer comes off the graph in hand instead.
+    ///
+    /// Sound because nothing hangs off a group node: lifting anchors on the
+    /// region a formula sits in and never on its group (see
+    /// [`Builder::lift_dependencies`]), so a group's only edges are the
+    /// `CONTAINS` and `HEADER_OF` ones pointing *at* it, which leave with it.
+    ///
+    /// The node and edge totals are recounted. The two grouping diagnostics in
+    /// the report are deliberately not cleared: a group anchored outside every
+    /// region, or straddling two, is a finding about region detection that the
+    /// grouping pass really did make, and `check` reads the first of them —
+    /// rebuilding without groups is what silently loses both.
+    pub fn drop_formula_groups(&mut self) {
+        let doomed: Vec<NodeIndex> = self
+            .graph
+            .node_indices()
+            .filter(|&i| self.graph[i].kind() == NodeKind::FormulaGroup)
+            .collect();
+        // Highest index first, with the root followed through each removal:
+        // petgraph fills the hole left by a removed node with what was the
+        // last node, so that index is the only one that can move. Descending
+        // order means the node being moved is never one still to be removed.
+        for node in doomed.into_iter().rev() {
+            let last = NodeIndex::new(self.graph.node_count() - 1);
+            self.graph.remove_node(node);
+            if self.root == last {
+                self.root = node;
+            }
+        }
+        self.report.count_graph(&self.graph);
+    }
+}
+
 /// How to build. The defaults are what the measurements in the plan used.
 #[derive(Debug, Clone)]
 pub struct GraphOptions {
