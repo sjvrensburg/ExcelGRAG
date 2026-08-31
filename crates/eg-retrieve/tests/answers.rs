@@ -21,7 +21,7 @@ use eg_graph::build;
 use eg_graph::store::Corpus;
 use eg_index::{SearchOptions, TextIndex};
 use eg_model::{Cell, CellValue, Sheet, SheetId, Workbook, WorkbookFormat};
-use eg_retrieve::{expand, find, render, ExpandOptions, RenderOptions};
+use eg_retrieve::{expand, find, render, ExpandOptions, Fusion, RenderOptions};
 
 fn grid(id: u16, name: &str, rows: &[&str]) -> Sheet {
     let mut sheet = Sheet::new(SheetId(id), name);
@@ -199,7 +199,7 @@ fn answer(root: &std::path::Path, q: &Question) -> (Option<usize>, bool) {
             limit: 8,
             ..Default::default()
         },
-        true,
+        &Fusion::lexical(),
     )
     .unwrap();
     let rank = hits

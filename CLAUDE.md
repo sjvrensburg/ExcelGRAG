@@ -75,7 +75,10 @@ above it.
 - `eg-index` — `TextIndex` (tantivy) and `VectorIndex` (fastembed,
   `bge-small-en-v1.5` via ONNX, full scan, no ANN) over the same node flattening,
   keyed by the same blake3. Rankings are fused by reciprocal rank (`fuse`), not by
-  score — BM25 and cosine are not on one scale. Custom tokenizer indexes each run
+  score — BM25 and cosine are not on one scale. The word ranking is weighted
+  `LEXICAL_WEIGHT` (2) against the meaning ranking and both are asked 50 deep
+  before fusing; both numbers were measured with the answer scorer, not chosen,
+  and `RRF_K` stays at 60 because sweeping it changes nothing. Custom tokenizer indexes each run
   whole *and* split at case/letter-digit boundaries (`NetRevenue` → `net`,
   `revenue`, `netrevenue`).
 - `eg-retrieve` — `find()` is the hybrid search the CLI and the scorer both run

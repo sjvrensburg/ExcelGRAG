@@ -7,7 +7,11 @@
 //! that answers it — had none. This is that check.
 //!
 //! Usage: `answers <corpus> <questions.json> [--seeds N] [--budget N]
-//! [--lexical-only] [--verbose]`
+//! [--lexical-only] [--verbose] [--sweep] [--depth N] [--k N] [--weight N]`
+//!
+//! `--sweep` runs the whole set once per fusion setting instead of once, and
+//! prints the table. That is what the fusion constant and the fusion depth were
+//! chosen against, and re-running it is how to argue with the choice.
 //!
 //! The question file is a list of `{ask, want, why}`. `want` names the nodes a
 //! good answer must reach, by citation (`'Work Doc'!AR2:AR115004`) or by label
@@ -43,7 +47,7 @@ use std::time::Instant;
 
 use eg_graph::store::Corpus;
 use eg_index::{Hit, SearchOptions};
-use eg_retrieve::{expand, find, render, ExpandOptions, RenderOptions};
+use eg_retrieve::{expand, find, render, ExpandOptions, Fusion, RenderOptions};
 use serde::Deserialize;
 
 /// One question, and what a good answer has to reach.
@@ -90,6 +94,17 @@ fn main() {
     let chars = flag("--chars", 4000);
     let lexical_only = rest.iter().any(|a| a == "--lexical-only");
     let verbose = rest.iter().any(|a| a == "--verbose");
+    let sweeping = rest.iter().any(|a| a == "--sweep");
+    let depth = flag("--depth", Fusion::default().depth);
+    let number = |name: &str, default: f32| -> f32 {
+        rest.iter()
+            .position(|a| a == name)
+            .and_then(|i| rest.get(i + 1))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    };
+    let k = number("--k", Fusion::default().k);
+    let weight = number("--weight", Fusion::default().lexical_weight);
 
     let text = match std::fs::read_to_string(&file) {
         Ok(t) => t,
@@ -113,31 +128,40 @@ fn main() {
         }
     };
 
-    let started = Instant::now();
-    let mut scored = Vec::new();
-    for question in &questions {
-        scored.push(score(
-            &dir,
-            &corpus,
-            question,
-            seeds,
-            budget,
-            chars,
-            lexical_only,
-        ));
+    let run = |fusion: &Fusion| -> Vec<Scored> {
+        questions
+            .iter()
+            .map(|q| score(&dir, &corpus, q, seeds, budget, chars, fusion))
+            .collect()
+    };
+
+    if sweeping {
+        sweep(&run, seeds);
+        return;
     }
+
+    let fusion = Fusion {
+        depth,
+        k,
+        lexical_weight: weight,
+        lexical_only,
+    };
+    let started = Instant::now();
+    let scored = run(&fusion);
     let elapsed = started.elapsed();
 
     println!("corpus at {dir}: {} workbook(s)", corpus.len());
     println!(
-        "  {} question(s), {} seeds, budget {budget}, {} search{}",
+        "  {} question(s), {} seeds, budget {budget}, {}",
         questions.len(),
         seeds,
-        if lexical_only { "by word" } else { "hybrid" },
         if lexical_only {
-            ""
+            "by word only".to_string()
         } else {
-            " (word + meaning)"
+            format!(
+                "word + meaning fused at k={}, word weighted {}, over {} deep",
+                fusion.k, fusion.lexical_weight, fusion.depth
+            )
         }
     );
 
@@ -215,13 +239,13 @@ fn score(
     seeds: usize,
     budget: usize,
     chars: usize,
-    lexical_only: bool,
+    fusion: &Fusion,
 ) -> Scored {
     let options = SearchOptions {
         limit: seeds.max(1),
         ..Default::default()
     };
-    let hits = find(dir, &question.ask, &options, lexical_only).unwrap_or_default();
+    let hits = find(dir, &question.ask, &options, fusion).unwrap_or_default();
     let rank = hits
         .iter()
         .position(|h| wanted(h, &question.want))
@@ -285,5 +309,83 @@ fn describe(hit: &Hit) -> String {
     match &hit.a1 {
         Some(a1) => format!("{} {:?} at {a1}", hit.kind.as_str(), hit.label),
         None => format!("{} {:?}", hit.kind.as_str(), hit.label),
+    }
+}
+
+/// Aggregate one run into the three numbers worth comparing.
+fn totals(scored: &[Scored]) -> (f64, f64, f64) {
+    let n = scored.len().max(1) as f64;
+    let at1 = scored.iter().filter(|s| s.rank == Some(1)).count() as f64 / n;
+    let mrr: f64 = scored
+        .iter()
+        .map(|s| s.rank.map_or(0.0, |r| 1.0 / r as f64))
+        .sum::<f64>()
+        / n;
+    let context = scored.iter().filter(|s| s.in_context).count() as f64 / n;
+    (at1, mrr, context)
+}
+
+/// Score the same questions under every fusion setting worth considering.
+///
+/// The two knobs interact, so they are swept together rather than one after the
+/// other. `k` decides how much appearing in both rankings is worth against
+/// being first in one; `depth` decides how much information an *absence* from a
+/// ranking carries, since missing from a short list may only mean one place
+/// past its end.
+fn sweep(run: &dyn Fn(&Fusion) -> Vec<Scored>, seeds: usize) {
+    println!("fusion sweep, {seeds} seeds\n");
+    println!("  {:<30} {:>7} {:>7} {:>9}", "", "hit@1", "MRR", "context");
+    let row = |name: String, scored: &[Scored]| {
+        let (a, m, c) = totals(scored);
+        println!(
+            "  {:<30} {:>6.1}% {:>7.3} {:>8.1}%",
+            name,
+            a * 100.0,
+            m,
+            c * 100.0
+        );
+    };
+    row("by word only".to_string(), &run(&Fusion::lexical()));
+    println!();
+
+    // Depth first, at the published constant, because it is the knob that says
+    // what an absence from a ranking means.
+    for depth in [8usize, 25, 50, 200] {
+        row(
+            format!("depth {depth:>3}, k 60, weight 1"),
+            &run(&Fusion {
+                depth,
+                k: 60.0,
+                lexical_weight: 1.0,
+                lexical_only: false,
+            }),
+        );
+    }
+    println!();
+    for k in [0.0f32, 1.0, 5.0, 10.0, 20.0, 60.0] {
+        row(
+            format!("depth  50, k {k:>2}, weight 1"),
+            &run(&Fusion {
+                depth: 50,
+                k,
+                lexical_weight: 1.0,
+                lexical_only: false,
+            }),
+        );
+    }
+    println!();
+    // The lever the first sweep did not have. Words are usually the better
+    // evidence on a spreadsheet; meaning earns its place on the questions where
+    // the workbook calls the thing something else.
+    for weight in [1.0f32, 1.5, 2.0, 3.0, 5.0, 10.0] {
+        row(
+            format!("depth  50, k 10, weight {weight:>4}"),
+            &run(&Fusion {
+                depth: 50,
+                k: 10.0,
+                lexical_weight: weight,
+                lexical_only: false,
+            }),
+        );
     }
 }

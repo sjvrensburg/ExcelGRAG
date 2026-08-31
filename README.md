@@ -794,13 +794,12 @@ question file for the reference workbook lives in `private/` with the workbook.
 **Two things it found immediately.** Neither was visible before there was a
 number:
 
-- **Fusing the two searches costs precision.** On twelve questions, searching by
-  word alone put the right node first eight times; fusing word and meaning put
-  it first five times, demoted seven answers by one to five places, and rescued
-  exactly one that the lexical half missed entirely. Reciprocal-rank fusion has
-  no way to know that a node ranked first by one half and absent from the other
-  deserves to stay there. Context recall still favours the fusion, 83% against
-  75%, so this is a trade rather than a mistake — but it was being made blind.
+- **Fusing the two searches was costing precision.** On twelve questions,
+  searching by word alone put the right node first eight times; fusing word and
+  meaning put it first five, demoted seven answers, and rescued exactly one the
+  lexical half missed entirely. Context recall favoured the fusion, 83% against
+  75%, so it was a trade — but it was being made blind. See below for what it
+  turned out to be.
 - **A question about the column a table is keyed by cannot be answered.** Region
   detection reads the leftmost column as row labels, so it heads nothing and
   gets no node: asking a debtors table about "customer" returns everything
@@ -810,6 +809,46 @@ number:
   working and nobody updated the record.
 
 Twelve questions is a baseline, not a verdict.
+
+### What the fusion was actually doing
+
+The obvious suspect was `K`, the rank-fusion constant, at the published 60.
+Over a ranking of eight, `1/(60+1)` to `1/(60+8)` spans 11% while a second
+appearance adds 100%, so rank looks like noise and the fusion looks like a vote
+on set membership. The span is real. The effect is not: sweeping `K` from 0 to
+60 moves MRR by 0.005. It stays at 60, because changing a constant that buys
+nothing is a second number to explain.
+
+Two other things did matter.
+
+**How deep each half is asked before fusing.** Absence from a ranking is the
+only evidence the fusion has that one half dislikes a node, and missing from a
+list of eight may only mean rank nine. Asking each half for 50 and cutting the
+fused list afterwards costs one more index read.
+
+**Which of two *exclusive* finds goes first.** This is narrower than "words beat
+meaning" and is the whole of it. A node both halves ranked outscores either
+half's exclusive find at any weight — that is the fusion working. But between a
+node only the words found and a node only the embeddings found, unweighted RRF
+scored a tie and broke it on the label. On a spreadsheet the words are the
+better evidence: a column really is called `Total Debt`. Weighting them at 2
+settles that tie the right way.
+
+| | hit@1 | MRR | passage cites it |
+|---|---|---|---|
+| by word only | 66.7% | 0.694 | 75.0% |
+| as shipped before | 41.7% | 0.562 | 83.3% |
+| depth 50, words weighted 2 | **58.3%** | **0.665** | **83.3%** |
+
+Most of the lexical half's precision back, with the recall that made the fusion
+worth running. The weight plateaus from 1.5 to 3 and the questions cannot tell
+those apart, so it is set to 2 — the middle of the plateau rather than its peak.
+At 5 the semantic half stops rescuing the questions it exists for and passage
+recall falls back to 75%.
+
+```sh
+cargo run --release -p eg-retrieve --example answers -- corpus/ questions.json --sweep
+```
 
 The most important test is format parity: the same logical workbook read as
 `.xlsx` and as `.xlsb` must produce identical values *and* formulas. It has
