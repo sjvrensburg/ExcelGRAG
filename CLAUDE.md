@@ -6,12 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ExcelGRAG turns spreadsheets (xlsx/xlsm/xlsb/xls/ods) into a queryable property
 graph so an agent can search a workbook in words and ground the answer in
-specific cells. Rust, because the target is XLSB: a 170 MB binary workbook with
-43.5M populated cells, which no Python library reads with formulas.
+specific cells. Rust, because the target is XLSB: a binary workbook of hundreds
+of megabytes and tens of millions of populated cells, which no Python library
+reads with formulas.
 
-`README.md` is the design document — it carries the reasoning and the measured
-numbers behind nearly every decision below, and is worth reading before changing
-anything structural.
+`README.md` is the design document — it carries the reasoning behind nearly
+every decision below, and is worth reading before changing anything structural.
+The measurements that reasoning rests on are deliberately not in it (see
+**Confidential workbooks**); re-run the examples to see them.
 
 ## Commands
 
@@ -63,13 +65,14 @@ above it.
   presentation — only value kinds, blank runs, and formula-shape homogeneity.
 - `eg-structure` — regions (tables/blocks recovered from blank runs and value-kind
   contrast), formula grouping (formulas normalised to an R1C1 *shape*, so a
-  filled-down column of 575k cells collapses to one node), `read_table` (a region
-  as typed columns, kind by strict majority, rows lazy and gap-filled) and
+  filled-down column of hundreds of thousands of cells collapses to one node),
+  `read_table` (a region as typed columns, kind by strict majority, rows lazy
+  and gap-filled) and
   `profile_table` (what a column holds: counts, errors, distinct values where
   there are few, sum/min/max where numeric). Both take **one row-major pass** per
   region — a sheet is an ordered map keyed by (row, column), so asking it for a
   single column costs a probe per row, and doing that per column made indexing
-  3.5x slower before it was noticed.
+  several times slower before it was noticed.
 - `eg-graph` — nodes are aggregates (workbook, sheet, region, column, formula
   group, defined name), not cells. Every cell reference is **lifted** to the
   region containing it, and identical lifted references merge into one edge
@@ -79,11 +82,11 @@ above it.
   comparing, which is the only thing that catches an edge lifted to the *wrong*
   region. `store::Corpus` is a directory (`manifest.json`, `graphs/<blake3>.json`)
   keyed by the blake3 of the source file, plus `profiles/<blake3>.json`, holding
-  the region layer *and* the
-  formula groups (1,272 of them, 520 KB total) up to
-  `MAX_STORED_FORMULA_GROUPS`; past that the group layer is dropped and rebuilt
-  on demand. The README explains why the old "119 MiB, never store them" figure
-  was an artifact of the pre-fork reader.
+  the region layer *and* the formula groups, up to `MAX_STORED_FORMULA_GROUPS`;
+  past that the group layer is dropped in place
+  (`BuiltGraph::drop_formula_groups`) and rebuilt on demand. The README explains
+  why the old "never store them" measurement was an artifact of the pre-fork
+  reader.
 - `eg-index` — `TextIndex` (tantivy) and `VectorIndex` (fastembed,
   `bge-small-en-v1.5` via ONNX, full scan, no ANN) over the same node flattening,
   keyed by the same blake3. Rankings are fused by reciprocal rank (`fuse`), not by
@@ -135,9 +138,9 @@ above it.
 ## Invariants worth not breaking
 
 - **Containment is followed inwards for free, outwards only on request.** The
-  explosion in a k-hop walk lives entirely in `CONTAINS` (a region has up to 136
-  columns). Dependencies go both ways, nearest first, heaviest within a distance —
-  taking weight before distance silently drops nodes.
+  explosion in a k-hop walk lives entirely in `CONTAINS` (a wide region has well
+  over a hundred columns). Dependencies go both ways, nearest first, heaviest
+  within a distance — taking weight before distance silently drops nodes.
 - **Recompute never recurses.** Precedents are read as stored values, so a
   disagreement is about one formula, not a chain. No dependency order, no cycle
   detection.
@@ -185,10 +188,10 @@ Four independent checks, because they fail differently:
    diffed. Diff both readers before committing a change to the XLSB/ingest path.
 3. **The lifted edges against the cells** — every dependency edge re-derived
    from the formulas and compared with the graph's, both ways round. `eg index`
-   runs this on every workbook before storing it (2.7s against a 7s build) and
-   stores it anyway if it fails, loudly; `eg-graph --example lifting` is the
-   same thing on its own. `cargo test -p eg-graph --test audit` breaks a correct
-   graph five ways and asserts `check` stays silent about each.
+   runs this on every workbook before storing it, at a fraction of what the
+   build costs, and stores it anyway if it fails, loudly; `eg-graph --example
+   lifting` is the same thing on its own. `cargo test -p eg-graph --test audit`
+   breaks a correct graph five ways and asserts `check` stays silent about each.
 
 4. **Whether the answers are any good** (`cargo test -p eg-retrieve --test
    answers`, and `eg-retrieve --example answers` against a real corpus) —
@@ -198,19 +201,24 @@ Four independent checks, because they fail differently:
 
 The sharpest check on the whole stack is `eg check <workbook>`: recompute every
 formula and compare with what Excel cached. That sweep found four reader defects
-and one here; it currently agrees on 100% of what it can evaluate, so **any new
+and one here; it currently agrees on everything it can evaluate, so **any new
 disagreement is a regression**.
 
 ## Confidential workbooks
 
-`private/` is gitignored in full and holds a real 170 MB XLSB containing
-commercial and personal data. **A corpus's `profiles/` directory holds cell
-values** — distinct values, sums, minima — unlike `graphs/`, which holds only
-structure. Index with `--redact-values` for a corpus that must not carry the
-workbook's contents, or `--no-profiles` for none at all. Never commit a real spreadsheet, and never put
-anything derived from it — sheet names, cell values, labels — into git, a commit
-message or the README without asking; the README uses consistent pseudonyms for
-that reason. To inspect one safely:
+`private/` is gitignored in full and holds a real XLSB containing commercial and
+personal data. **A corpus's `profiles/` directory holds cell values** — distinct
+values, sums, minima — unlike `graphs/`, which holds only structure. Index with
+`--redact-values` for a corpus that must not carry the workbook's contents, or
+`--no-profiles` for none at all.
+
+Never commit a real spreadsheet, and never put anything derived from it into
+git. That means its contents — sheet names, cell values, labels — and also its
+**measurements**: cell and formula counts, node and edge totals, timings, index
+sizes, agreement percentages. Report those on the terminal, where the person who
+asked for them is; a commit message says the check passed, and the README
+describes the shape of a result rather than quoting one. Sheet names appear in
+the README only as consistent pseudonyms. To inspect one safely:
 
 ```sh
 cargo run --release -p eg-ingest --example audit -- private/book.xlsb   # counts and A1 addresses only
