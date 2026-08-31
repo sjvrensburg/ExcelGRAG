@@ -122,9 +122,11 @@ above it.
   hits under a budget, recording for every node which node pulled it in and
   along which edge; `render()` turns the subgraph into a numbered, citable
   passage. Passages carry **no cell values** — they say where to look.
-  `tests/answers.rs` is the retrieval floor and `examples/answers.rs` scores a
-  real corpus against a question file; questions for the reference workbook live
-  in `private/answers.json`.
+  `tests/answers.rs` is the retrieval floor on a made-up workbook,
+  `tests/demo_answers.rs` the same on the generated demo one, and
+  `examples/answers.rs` scores any corpus against any question file. The public
+  questions are `tests/fixtures/demo/answers.json`; the reference workbook's
+  live in `private/answers.json`.
 - `eg-eval` — the cell layer the graph dropped, recovered on demand, plus the two
   things that read *across* a table: `query::query` (filter/group/aggregate over
   one `Table`, living here so its arithmetic is the evaluator's — it accumulates
@@ -208,14 +210,22 @@ Four independent checks, because they fail differently:
    lifting` is the same thing on its own. `cargo test -p eg-graph --test audit`
    breaks a correct graph five ways and asserts `check` stays silent about each.
 
-4. **The demo workbook, against a second engine** (`cargo test -p eg-eval
+4. **Whether the answers are any good, on a workbook with depth** (`cargo test
+   -p eg-retrieve --test demo_answers`) — the same scoring as item 5, against
+   the generated demo workbook, from `tests/fixtures/demo/answers.json`. That
+   file is also what `eg-retrieve --example answers` reads, so the committed
+   floor and the scorer anyone can run are the same questions. Questions carry
+   a `known_gap` when retrieval cannot answer them; they stay in the file, are
+   still scored, and the suite asserts the misses are exactly those.
+
+5. **The demo workbook, against a second engine** (`cargo test -p eg-eval
    --test demo`, `cargo test -p eg-ingest --test parity`) — thousands of
    formulas whose values LibreOffice computed, asserting no disagreements and
    that the only refusals are the two the fixture plants. It caught three
    reader/schema defects in its first hour; two are calamine's and are recorded
    in `docs/upstream-issues.md` as issues 9 and 10.
 
-5. **Whether the answers are any good** (`cargo test -p eg-retrieve --test
+6. **Whether the answers are any good** (`cargo test -p eg-retrieve --test
    answers`, and `eg-retrieve --example answers` against a real corpus) —
    questions with known answers, scored by rank and by whether the rendered
    passage cites the answer. The suite asserts the unanswered set is *exactly*

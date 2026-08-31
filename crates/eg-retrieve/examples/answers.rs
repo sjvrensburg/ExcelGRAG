@@ -60,11 +60,23 @@ struct Question {
     #[serde(default)]
     #[allow(dead_code)]
     why: String,
+    /// Set when retrieval is known not to answer this, and why.
+    ///
+    /// A recorded gap is still asked and still scored — it is *not* excused —
+    /// but it is reported apart from the misses nobody expected, so that a
+    /// question file with a known hole in it does not read as a failing run.
+    /// The committed suite in `tests/demo_answers.rs` reads the same field out
+    /// of the same file and asserts the misses are exactly these.
+    #[serde(default)]
+    known_gap: Option<String>,
 }
 
 /// How one question came out.
 struct Scored {
     ask: String,
+    /// Carried through from the question, so the report can tell a surprise
+    /// from a gap someone already wrote down.
+    known_gap: Option<String>,
     /// 1-based position of the first wanted node in the ranking.
     rank: Option<usize>,
     /// Whether the rendered passage cites a wanted node.
@@ -199,8 +211,13 @@ fn main() {
     );
 
     // A question that is answered needs no explaining; the ones that are not
-    // are the entire point of running this.
-    let missed: Vec<&Scored> = scored.iter().filter(|s| !s.in_context).collect();
+    // are the entire point of running this. Split, because a gap the question
+    // file already records is a different fact from one nobody expected — and
+    // a run that reported them together would train its reader to skim.
+    let missed: Vec<&Scored> = scored
+        .iter()
+        .filter(|s| !s.in_context && s.known_gap.is_none())
+        .collect();
     if !missed.is_empty() {
         println!("\nnot in the passage:");
         for s in &missed {
@@ -212,6 +229,37 @@ fn main() {
                     None => format!("nowhere in {seeds}"),
                 },
                 s.top.as_deref().unwrap_or("nothing")
+            );
+        }
+    }
+
+    // A recorded gap that has started working is worth as much noise as a new
+    // miss: it means the record is now wrong.
+    let fixed: Vec<&Scored> = scored
+        .iter()
+        .filter(|s| s.in_context && s.known_gap.is_some())
+        .collect();
+    if !fixed.is_empty() {
+        println!("\nrecorded as a known gap, and answered anyway — update the record:");
+        for s in &fixed {
+            println!("  {:?}", s.ask);
+        }
+    }
+
+    let gaps = scored
+        .iter()
+        .filter(|s| !s.in_context && s.known_gap.is_some())
+        .count();
+    if gaps > 0 {
+        println!("\n{gaps} recorded gap(s), unchanged:");
+        for s in scored
+            .iter()
+            .filter(|s| !s.in_context && s.known_gap.is_some())
+        {
+            println!(
+                "  {:?}\n    {}",
+                s.ask,
+                s.known_gap.as_deref().unwrap_or_default()
             );
         }
     }
@@ -289,6 +337,7 @@ fn score(
 
     Scored {
         ask: question.ask.clone(),
+        known_gap: question.known_gap.clone(),
         rank,
         in_context,
         top,

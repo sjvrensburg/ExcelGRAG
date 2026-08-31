@@ -1,0 +1,109 @@
+[
+  {
+    "ask": "provision for doubtful debts",
+    "want": [
+      "Provision",
+      "Provision Percent"
+    ],
+    "why": "the provision is what the workbook exists to compute; 'doubtful' is not a word the sheet uses"
+  },
+  {
+    "ask": "what rate is each debt discounted at",
+    "want": [
+      "Discount Rate",
+      "Rates"
+    ],
+    "why": "the rate column, or the table it is looked up in"
+  },
+  {
+    "ask": "present value of what is owed",
+    "want": [
+      "Present Value"
+    ],
+    "why": "the discounted column; the question shares only 'present value' with it"
+  },
+  {
+    "ask": "how long has each account been overdue",
+    "want": [
+      "Days Overdue",
+      "Ageing Bucket"
+    ],
+    "why": "either the raw count of days or the bucket it falls in answers this"
+  },
+  {
+    "ask": "ageing buckets",
+    "want": [
+      "Ageing Bucket"
+    ],
+    "why": "the column of bucket labels, which is a formula rather than data"
+  },
+  {
+    "ask": "what rate applies to each type of debtor",
+    "want": [
+      "Rates",
+      "Discount Rate",
+      "Debt Type"
+    ],
+    "why": "the lookup relation: debt type keys into the rates table"
+  },
+  {
+    "ask": "impairment",
+    "want": [
+      "Impairment"
+    ],
+    "why": "the single word the whole workbook is named for"
+  },
+  {
+    "ask": "total balance outstanding",
+    "want": [
+      "Balance",
+      "Summary"
+    ],
+    "why": "the balance column, or the summary that totals it"
+  },
+  {
+    "ask": "notes on how the calculation works",
+    "want": [
+      "Notes"
+    ],
+    "why": "prose rather than numbers, and a sheet a person would look for by name"
+  },
+  {
+    "ask": "what was billed in january",
+    "want": [
+      "Jan",
+      "Billed"
+    ],
+    "why": "a month sheet and its one data column"
+  },
+  {
+    "ask": "tax rate",
+    "want": [
+      "Tax_Rate"
+    ],
+    "why": "a defined name, which nothing else in the graph is called"
+  },
+  {
+    "ask": "which suburb is an account in",
+    "want": [
+      "Suburb"
+    ],
+    "why": "a plain categorical column, and the easiest question here"
+  },
+  {
+    "ask": "percentage provided against each band of days",
+    "want": [
+      "Provision Percent",
+      "Days Overdue From"
+    ],
+    "why": "the banding table on the rates sheet, keyed by a threshold rather than a value"
+  },
+  {
+    "ask": "account number",
+    "want": [
+      "Account"
+    ],
+    "why": "the column the table is keyed by, which is the ordinary question about any table",
+    "known_gap": "region detection reads the leftmost column as row labels, so it heads nothing and gets no node — there is nothing in the graph called 'Account' for any ranking to return. Asking a table about the column it is keyed by is an ordinary question, and this is the honest record that it does not work."
+  }
+]

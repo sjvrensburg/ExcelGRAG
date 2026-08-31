@@ -18,3 +18,4 @@ thiserror.workspace = true
 [dev-dependencies]
 eg-ingest.workspace = true
 serde_json.workspace = true
+serde.workspace = true
