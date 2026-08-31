@@ -63,7 +63,10 @@ above it.
   group, defined name), not cells. Every cell reference is **lifted** to the
   region containing it, and identical lifted references merge into one edge
   carrying a weight = number of references behind it. `check()` asserts the
-  invariants; `store::Corpus` is a directory (`manifest.json`, `graphs/<blake3>.json`)
+  structural invariants and says plainly what they miss; `audit()` covers the
+  main omission by re-deriving every dependency edge from the cells and
+  comparing, which is the only thing that catches an edge lifted to the *wrong*
+  region. `store::Corpus` is a directory (`manifest.json`, `graphs/<blake3>.json`)
   keyed by the blake3 of the source file. Formula-group nodes are built but
   deliberately **not stored** (119 MiB) — rebuilt when drilling into a workbook.
 - `eg-index` — `TextIndex` (tantivy) and `VectorIndex` (fastembed,
@@ -124,7 +127,7 @@ purpose — it is what pins the fork to an exact commit.
 
 ## Testing the reader
 
-Two independent checks, because they fail differently:
+Three independent checks, because they fail differently:
 
 1. **Format parity** (`crates/eg-ingest/tests/parity.rs`) — the same logical
    workbook read as `.xlsx` and as `.xlsb` must give identical values *and*
@@ -134,6 +137,10 @@ Two independent checks, because they fail differently:
 2. **A second reader** — `eg-ingest --example dump_cells` writes the schema
    `sheet-oracle` (SheetJS, at `../sheet-oracle`) writes, and the two dumps are
    diffed. Diff both readers before committing a change to the XLSB/ingest path.
+3. **The lifted edges against the cells** (`eg-graph --example lifting`) — every
+   dependency edge re-derived from the formulas and compared with the graph's,
+   both ways round. `cargo test -p eg-graph --test audit` breaks a correct graph
+   five ways and asserts `check` stays silent about each.
 
 The sharpest check on the whole stack is `eg check <workbook>`: recompute every
 formula and compare with what Excel cached. That sweep found four reader defects

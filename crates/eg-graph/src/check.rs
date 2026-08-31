@@ -11,7 +11,10 @@
 //! - **Whether an edge points at the right region.** A reference lifted to the
 //!   wrong region still yields a reachable, single-sheet, positively weighted
 //!   edge. Only comparing against what a reader would draw catches that, which
-//!   is P8's job.
+//!   is [`crate::audit`]'s job — it re-derives every dependency edge from the
+//!   cells and reports where the two disagree. It costs a pass over every
+//!   formula in the workbook, which is why it is a separate call and not a
+//!   sixth invariant here.
 //! - **Whether the weights are right**, for the two dependency kinds that can
 //!   fan out. `CROSS_WORKBOOK_REF` and `REFERENCES_NAME` are pinned exactly to
 //!   the counts that produced them, so double-counting either is caught. A
