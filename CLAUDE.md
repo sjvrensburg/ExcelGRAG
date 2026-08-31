@@ -78,10 +78,14 @@ above it.
   score — BM25 and cosine are not on one scale. Custom tokenizer indexes each run
   whole *and* split at case/letter-digit boundaries (`NetRevenue` → `net`,
   `revenue`, `netrevenue`).
-- `eg-retrieve` — `expand()` walks out from hits under a budget, recording for
-  every node which node pulled it in and along which edge; `render()` turns the
-  subgraph into a numbered, citable passage. Passages carry **no cell values** —
-  they say where to look.
+- `eg-retrieve` — `find()` is the hybrid search the CLI and the scorer both run
+  (fused by reciprocal rank, semantic half optional); `expand()` walks out from
+  hits under a budget, recording for every node which node pulled it in and
+  along which edge; `render()` turns the subgraph into a numbered, citable
+  passage. Passages carry **no cell values** — they say where to look.
+  `tests/answers.rs` is the retrieval floor and `examples/answers.rs` scores a
+  real corpus against a question file; questions for the reference workbook live
+  in `private/answers.json`.
 - `eg-eval` — the cell layer the graph dropped, recovered on demand:
   `precedents_of` (cheap, in the formula's own text), `dependents_of` (expensive,
   scans every formula), and `recompute`/`check` which evaluate a formula and
@@ -136,7 +140,7 @@ purpose — it is what pins the fork to an exact commit.
 
 ## Testing the reader
 
-Three independent checks, because they fail differently:
+Four independent checks, because they fail differently:
 
 1. **Format parity** (`crates/eg-ingest/tests/parity.rs`) — the same logical
    workbook read as `.xlsx` and as `.xlsb` must give identical values *and*
@@ -152,6 +156,12 @@ Three independent checks, because they fail differently:
    stores it anyway if it fails, loudly; `eg-graph --example lifting` is the
    same thing on its own. `cargo test -p eg-graph --test audit` breaks a correct
    graph five ways and asserts `check` stays silent about each.
+
+4. **Whether the answers are any good** (`cargo test -p eg-retrieve --test
+   answers`, and `eg-retrieve --example answers` against a real corpus) —
+   questions with known answers, scored by rank and by whether the rendered
+   passage cites the answer. The suite asserts the unanswered set is *exactly*
+   the gaps recorded in it, so a new miss fails and a fixed one does too.
 
 The sharpest check on the whole stack is `eg check <workbook>`: recompute every
 formula and compare with what Excel cached. That sweep found four reader defects

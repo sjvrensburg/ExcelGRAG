@@ -759,6 +759,58 @@ back as a *result* with `isError`, not as a protocol error: the model can act on
 cargo test --workspace
 ```
 
+### Whether the answers are any good
+
+Every layer below this one fails loudly when it breaks: the reader is diffed
+against a second reader, the graph's edges are re-derived from the cells, every
+formula is recomputed against what Excel cached. The layer the project exists
+for had nothing. A change to the tokenizer, the cell-count multiplier, the
+fusion or the walk's budget could make answers worse and no number would move.
+
+So there is a scorer. It takes questions whose right answer is already known and
+reports two things, because they are different questions:
+
+- **Search** — where the wanted node lands, as hit@1 and mean reciprocal rank.
+  MRR is the one to watch: it moves when a right answer slips from second to
+  third, and hit@5 does not.
+- **Context** — whether the passage `eg ask` renders actually *cites* that node.
+  This is the one that matters, because the passage is the product. A node
+  ranked first and then squeezed out by the budget has answered nothing.
+
+`cargo test -p eg-retrieve --test answers` is the committed floor: a small made-
+up debtors workbook, eight questions phrased the way a person asks rather than
+the way the sheet is spelled, and an assertion that the passage answers all of
+them and that MRR stays above 0.85. It runs by word only, because a model
+download is not something a test may depend on.
+
+```sh
+cargo run --release -p eg-retrieve --example answers -- corpus/ questions.json
+```
+
+The example is the same scoring against a real corpus and a question file of
+your own — which is where the interesting answers are, and which is why the
+question file for the reference workbook lives in `private/` with the workbook.
+
+**Two things it found immediately.** Neither was visible before there was a
+number:
+
+- **Fusing the two searches costs precision.** On twelve questions, searching by
+  word alone put the right node first eight times; fusing word and meaning put
+  it first five times, demoted seven answers by one to five places, and rescued
+  exactly one that the lexical half missed entirely. Reciprocal-rank fusion has
+  no way to know that a node ranked first by one half and absent from the other
+  deserves to stay there. Context recall still favours the fusion, 83% against
+  75%, so this is a trade rather than a mistake — but it was being made blind.
+- **A question about the column a table is keyed by cannot be answered.** Region
+  detection reads the leftmost column as row labels, so it heads nothing and
+  gets no node: asking a debtors table about "customer" returns everything
+  except the customer column. The committed suite keeps that question and
+  asserts that the set of unanswered questions is *exactly* the set recorded as
+  known gaps — so it fails if a new one appears, and also if this one starts
+  working and nobody updated the record.
+
+Twelve questions is a baseline, not a verdict.
+
 The most important test is format parity: the same logical workbook read as
 `.xlsx` and as `.xlsb` must produce identical values *and* formulas. It has
 already caught three real bugs — see `docs/upstream-issues.md`.

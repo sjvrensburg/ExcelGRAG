@@ -29,8 +29,10 @@
 
 pub mod context;
 pub mod expand;
+pub mod search;
 
 pub use context::{render, RenderOptions, Rendered};
 pub use expand::{
     expand, ExpandOptions, RetrieveError, Retrieved, RetrievedNode, Role, WorkbookContext,
 };
+pub use search::{embedder, find, SearchError};
