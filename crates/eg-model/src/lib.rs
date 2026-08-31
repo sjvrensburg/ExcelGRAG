@@ -10,7 +10,7 @@ pub mod workbook;
 
 pub use address::{
     col_to_letters, letters_to_col, parse_a1, quote_sheet_name, AddressError, CellRef, ParsedRef,
-    R1C1Coord, R1C1Ref, RangeRef, SheetId, MAX_COL, MAX_ROW,
+    R1C1Coord, R1C1Ref, RangeRef, SheetId, SheetSpan, MAX_COL, MAX_ROW,
 };
 pub use cell::{shown, Cell, CellFormat, CellValue, ErrorKind, ValueKind};
 pub use formula::{

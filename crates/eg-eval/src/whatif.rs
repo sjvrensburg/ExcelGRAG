@@ -616,7 +616,8 @@ fn close_cycle(
     let mut spans = Vec::new();
     scan_references_into(formula, &mut spans);
     for span in &spans {
-        if let crate::trace::Target::Cells(range) = resolve(at, span, formula, sheets).target {
+        let reference = resolve(at, span, formula, sheets);
+        for range in reference.target.ranges() {
             if range.cell_count() != 1 {
                 continue;
             }
@@ -695,11 +696,8 @@ fn name_targets(workbook: &Workbook, sheets: &FxHashMap<String, SheetId>) -> Nam
         scan_references_into(refers_to, &mut spans);
         let mut ranges = Vec::new();
         for span in &spans {
-            if let crate::trace::Target::Cells(range) =
-                resolve(anchor, span, refers_to, sheets).target
-            {
-                ranges.push(range);
-            }
+            let reference = resolve(anchor, span, refers_to, sheets);
+            ranges.extend(reference.target.ranges().iter().copied());
         }
         out.insert((defined.scope, defined.name.to_uppercase()), ranges);
     }
@@ -737,9 +735,12 @@ fn dependency_ranges(
     out.clear();
     scan_references_into(formula, ref_spans);
     for span in ref_spans.iter() {
-        if let crate::trace::Target::Cells(range) = resolve(at, span, formula, sheets).target {
-            out.push(range);
-        }
+        // Every range the reference names, which for a 3-D one (`Jan:Dec!B2`)
+        // is a range per sheet it spans. Reading only the first left every
+        // other sheet's readers off the frontier, and a cell never visited is
+        // a cell reported unaffected — the one thing this walk may not do.
+        let reference = resolve(at, span, formula, sheets);
+        out.extend(reference.target.ranges().iter().copied());
     }
     scan_names_into(formula, name_spans);
     for name in name_spans.iter() {

@@ -20,7 +20,9 @@
 use std::time::Instant;
 
 use eg_model::formula::{scan_names_into, scan_references_into};
-use eg_model::{CellRef, NameSpan, ParsedRef, RangeRef, ReferenceSpan, Sheet, SheetId, Workbook};
+use eg_model::{
+    CellRef, NameSpan, ParsedRef, RangeRef, ReferenceSpan, Sheet, SheetId, SheetSpan, Workbook,
+};
 use eg_structure::{detect_regions_with, group_formulas, Region, RegionOptions};
 use petgraph::graph::{DiGraph, NodeIndex};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -403,13 +405,12 @@ impl<'a> Builder<'a> {
 
         // A 3-D reference (`Jan:Dec!A1`) is every sheet it spans getting the
         // same treatment an ordinary one gets, not just the sheet it happens
-        // to be written with first — `target_sheets` has one entry for an
-        // ordinary reference and one per spanned sheet for a 3-D one.
+        // to be written with first — `target_sheets` names one sheet for an
+        // ordinary reference and every spanned one for a 3-D reference.
         let mut any_edges = false;
         let mut any_hit = false;
         let mut any_cross = false;
-        for target_sheet in &target_sheets {
-            let target_sheet = *target_sheet;
+        for target_sheet in target_sheets.iter() {
             let range = span.parsed.resolve(target_sheet);
             let cross = target_sheet != sheet.id;
             let kind = if cross {
@@ -474,7 +475,7 @@ impl<'a> Builder<'a> {
             // for the whole reference; a 3-D one this deep into "found
             // nothing" is not worth a citation per sheet.
             let workbook = self.workbook;
-            let cite_sheet = target_sheets[0];
+            let cite_sheet = target_sheets.first();
             self.record_dangling(|| DanglingRef {
                 from: at,
                 text: workbook.cite_range(span.parsed.resolve(cite_sheet)),
@@ -592,18 +593,14 @@ fn find_region<'e>(
     None
 }
 
-/// Every sheet a reference names, by tab order.
+/// Every sheet a reference names, by tab order — [`ParsedRef::spanned_sheets`]
+/// against this workbook's sheet table.
 ///
-/// One sheet for an ordinary reference; every sheet between the two named
-/// ones, inclusive, for a 3-D reference (`Jan:Dec!A1`) — `SheetId` *is* tab
-/// order (see its own doc comment), so the span is a contiguous index range,
-/// whichever end was written first.
-///
-/// Shared between [`crate::build`] and [`crate::audit`] on purpose: which
-/// sheets a 3-D reference lifts to must be decided in exactly one place, not
-/// re-derived twice and trusted to agree — the mistake that let earlier
-/// defects in *this* kind of decision go uncaught by an audit re-deriving its
-/// own, subtly different, answer.
+/// A one-line wrapper so that [`crate::build`] and [`crate::audit`] name the
+/// same lookup as well as the same decision: which sheets a 3-D reference
+/// lifts to is settled in `eg-model`, where the cell layer reads it too, and
+/// the mistake this guards against is exactly an audit re-deriving its own,
+/// subtly different, answer and agreeing with lifting for the wrong reason.
 ///
 /// `Err` names the one sheet (start or end) that does not exist in this
 /// workbook.
@@ -611,21 +608,8 @@ pub(crate) fn spanned_sheets<'a>(
     workbook: &Workbook,
     from: SheetId,
     parsed: &'a ParsedRef,
-) -> Result<Vec<SheetId>, &'a str> {
-    let start = match &parsed.sheet_name {
-        None => from,
-        Some(name) => workbook.sheet_id_by_name(name).ok_or(name.as_str())?,
-    };
-    match &parsed.end_sheet_name {
-        None => Ok(vec![start]),
-        Some(end_name) => {
-            let end = workbook
-                .sheet_id_by_name(end_name)
-                .ok_or(end_name.as_str())?;
-            let (lo, hi) = (start.0.min(end.0), start.0.max(end.0));
-            Ok((lo..=hi).map(SheetId).collect())
-        }
-    }
+) -> Result<SheetSpan, &'a str> {
+    parsed.spanned_sheets(from, |name| workbook.sheet_id_by_name(name))
 }
 
 /// Nodes of one kind, for callers walking a single layer.

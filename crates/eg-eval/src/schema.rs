@@ -286,7 +286,11 @@ fn read(
     let range = |expr: Option<&Expr>| -> Option<Result<RangeRef, ()>> {
         match expr? {
             Expr::Reference { parsed, .. } => {
-                if parsed.workbook.is_some() {
+                // A table this crate cannot address is refused rather than
+                // narrowed: reading `Jan:Dec!A:B` as `Jan!A:B` would state a
+                // foreign key over one sheet of twelve, which is a claim
+                // about the workbook that the workbook does not make.
+                if parsed.workbook.is_some() || parsed.end_sheet_name.is_some() {
                     return Some(Err(()));
                 }
                 let sheet = match &parsed.sheet_name {

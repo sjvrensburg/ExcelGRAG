@@ -24,7 +24,7 @@
 
 use std::time::Instant;
 
-use eg_eval::{cells_in, dependents_of, precedents_of, Target};
+use eg_eval::{cells_in, dependents_of, precedents_of};
 use eg_ingest::{load_with, LoadOptions};
 use eg_model::{parse_a1, RangeRef};
 
@@ -160,13 +160,7 @@ fn main() {
                 println!("    … more, raise --limit");
                 break;
             }
-            let target = match &reference.target {
-                Target::Cells(r) => workbook.cite_range(*r),
-                Target::UnknownSheet(name) => format!("#REF! — no sheet called {name:?}"),
-                Target::ExternalWorkbook(token) => {
-                    format!("another workbook, written as [{token}]")
-                }
-            };
+            let target = reference.target.cite(workbook);
             println!("    {:<28} {} → {target}", fact.a1, reference.text);
             printed += 1;
         }

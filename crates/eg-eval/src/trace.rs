@@ -52,11 +52,58 @@ pub struct CellFact {
 pub enum Target {
     /// Cells of this workbook.
     Cells(RangeRef),
-    /// A sheet the workbook does not have — a `#REF!` break.
+    /// The same cells on every sheet a 3-D reference spans (`Jan:Dec!B2`), in
+    /// tab order. A separate variant rather than a `Cells` per sheet because
+    /// one reference was written, and the callers that count references — the
+    /// what-if's levels, the dependents report — count it once.
+    Spanned(Vec<RangeRef>),
+    /// A sheet the workbook does not have — a `#REF!` break. For a 3-D
+    /// reference, either end going missing breaks the whole span.
     UnknownSheet(String),
     /// Another workbook, named by the token the formula wrote. Not resolved,
     /// because no reader available to us maps that token to a path.
     ExternalWorkbook(String),
+}
+
+impl Target {
+    /// The ranges named, in tab order; empty for a target this workbook does
+    /// not contain.
+    ///
+    /// The way to read a target, and the reason it is a slice rather than an
+    /// `Option<RangeRef>`: a caller that matched `Cells` alone handled the
+    /// ordinary reference and silently dropped the 3-D one, which is how a
+    /// what-if came to report the sheets of a `Jan:Dec!B2` as unaffected.
+    pub fn ranges(&self) -> &[RangeRef] {
+        match self {
+            Target::Cells(range) => std::slice::from_ref(range),
+            Target::Spanned(ranges) => ranges,
+            Target::UnknownSheet(_) | Target::ExternalWorkbook(_) => &[],
+        }
+    }
+
+    /// This target, written for a reader.
+    ///
+    /// One rendering, because the CLI, the MCP server and the examples each
+    /// had their own identical copy — three places to remember when a variant
+    /// is added, which is two more than anyone remembers.
+    pub fn cite(&self, workbook: &Workbook) -> String {
+        match self {
+            Target::Cells(range) => workbook.cite_range(*range),
+            // First and last, not all twelve: the span is contiguous in tab
+            // order, so its ends and its size say the whole of it.
+            Target::Spanned(ranges) => match (ranges.first(), ranges.last()) {
+                (Some(first), Some(last)) => format!(
+                    "{} … {} ({} sheets)",
+                    workbook.cite_range(*first),
+                    workbook.cite_range(*last),
+                    ranges.len()
+                ),
+                _ => "no sheets".to_string(),
+            },
+            Target::UnknownSheet(name) => format!("#REF! — no sheet called {name:?}"),
+            Target::ExternalWorkbook(token) => format!("another workbook, written as [{token}]"),
+        }
+    }
 }
 
 /// One reference, from the cell that wrote it to what it names.
@@ -184,14 +231,19 @@ pub fn dependents_of(
             for span in &spans {
                 report.references_scanned += 1;
                 let reference = resolve(at, span, formula, &sheets);
-                if let Target::Cells(target) = &reference.target {
-                    if overlaps(*target, range) {
-                        report.matches += 1;
-                        if out.len() < limit {
-                            out.push(reference);
-                        } else {
-                            report.capped = true;
-                        }
+                // Any sheet of a 3-D span reading the range makes the formula
+                // a dependent, and it is reported once however many do.
+                if reference
+                    .target
+                    .ranges()
+                    .iter()
+                    .any(|t| overlaps(*t, range))
+                {
+                    report.matches += 1;
+                    if out.len() < limit {
+                        out.push(reference);
+                    } else {
+                        report.capped = true;
                     }
                 }
             }
@@ -227,14 +279,17 @@ pub(crate) fn resolve(
         };
     }
 
-    let target = match &parsed.sheet_name {
-        // Unqualified: the sheet the formula lives on.
-        None => Target::Cells(parsed.resolve(at.sheet)),
-        Some(name) => match sheets.get(&name.to_uppercase()) {
-            Some(&id) => Target::Cells(parsed.resolve(id)),
-            None => Target::UnknownSheet(name.clone()),
-        },
-    };
+    // Every sheet the reference names — the formula's own for an unqualified
+    // one, and all of `Jan:Dec` for a 3-D one. Decided by `eg-model` rather
+    // than here, because the graph lifts against the same function: this
+    // layer having its own answer, the start sheet and nothing else, made a
+    // what-if report every other sheet of a span as unaffected.
+    let target =
+        match parsed.spanned_sheets(at.sheet, |name| sheets.get(&name.to_uppercase()).copied()) {
+            Err(name) => Target::UnknownSheet(name.to_string()),
+            Ok(span) if !span.is_multi_sheet() => Target::Cells(parsed.resolve(span.first())),
+            Ok(span) => Target::Spanned(span.iter().map(|s| parsed.resolve(s)).collect()),
+        };
     Reference {
         from: at,
         text,

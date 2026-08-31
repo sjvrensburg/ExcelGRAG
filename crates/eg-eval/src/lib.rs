@@ -16,14 +16,15 @@
 //! by name rather than guessing.
 //!
 //! ```no_run
-//! # use eg_eval::{precedents_of, Target};
+//! # use eg_eval::precedents_of;
 //! # use eg_model::{CellRef, SheetId};
 //! let loaded = eg_ingest::load("book.xlsx")?;
 //! let at = CellRef::new(SheetId(0), 1, 5);
 //! for reference in precedents_of(&loaded.workbook, at) {
-//!     match reference.target {
-//!         Target::Cells(range) => println!("{} reads {}", reference.text, range.to_a1()),
-//!         other => println!("{} points outside the workbook: {other:?}", reference.text),
+//!     // `ranges` is every range named — one, or one per sheet of a 3-D
+//!     // span, or none at all for a reference out of this workbook.
+//!     for range in reference.target.ranges() {
+//!         println!("{} reads {}", reference.text, range.to_a1());
 //!     }
 //! }
 //! # Ok::<(), eg_ingest::IngestError>(())

@@ -9,7 +9,7 @@
 use std::time::Instant;
 
 use eg_eval::whatif::{what_if, Blocked, Change, WhatIfOptions};
-use eg_eval::{cells_in, check as check_formulas, dependents_of, precedents_of, Outcome, Target};
+use eg_eval::{cells_in, check as check_formulas, dependents_of, precedents_of, Outcome};
 use eg_ingest::{load_with, LoadOptions};
 use eg_model::{parse_a1, redact_formula_literals, CellValue, RangeRef, Workbook};
 
@@ -150,13 +150,7 @@ pub fn trace(path: &str, citation: &str, dependents: bool, limit: usize) -> Resu
                 println!("  … more, raise --limit");
                 return Ok(());
             }
-            let target = match &reference.target {
-                Target::Cells(range) => workbook.cite_range(*range),
-                Target::UnknownSheet(name) => format!("#REF! — no sheet called {name:?}"),
-                Target::ExternalWorkbook(token) => {
-                    format!("another workbook, written as [{token}]")
-                }
-            };
+            let target = reference.target.cite(&workbook);
             println!(
                 "  {:<28} {} → {target}",
                 workbook.cite(cell),

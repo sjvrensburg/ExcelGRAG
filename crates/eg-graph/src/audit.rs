@@ -354,9 +354,10 @@ fn keep(
 /// Resolve a scanned reference to the cells of this workbook it names — one
 /// range for an ordinary reference, one per spanned sheet for a 3-D one
 /// (`Jan:Dec!A1`), using [`crate::build::spanned_sheets`], the exact function
-/// `build` itself lifts against. Sharing it is the point: a 3-D span decided
-/// two different ways by build and audit would make the audit a false alarm
-/// rather than a check.
+/// `build` itself lifts against, which is in turn the one
+/// [`eg_model::ParsedRef::spanned_sheets`] every layer reads. Sharing it is
+/// the point: a 3-D span decided two different ways by build and audit would
+/// make the audit a false alarm rather than a check.
 ///
 /// `None` for a reference into another workbook or onto a sheet (or, for a
 /// 3-D reference, an end sheet) this one does not have. Both are real
@@ -367,7 +368,7 @@ fn resolve(workbook: &Workbook, from: SheetId, span: &ReferenceSpan) -> Option<V
         return None;
     }
     let sheets = crate::build::spanned_sheets(workbook, from, &span.parsed).ok()?;
-    Some(sheets.into_iter().map(|s| span.parsed.resolve(s)).collect())
+    Some(sheets.iter().map(|s| span.parsed.resolve(s)).collect())
 }
 
 fn edge_label(graph: &Graph, workbook: &Workbook, &(a, b, kind): &Key) -> String {
