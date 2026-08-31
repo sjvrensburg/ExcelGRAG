@@ -309,3 +309,95 @@ fn node_indices_survive_the_round_trip() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+#[test]
+fn profiles_are_stored_beside_the_graph_and_not_inside_it() {
+    // Everything in `graphs/` is structure, and a reader can hand that whole
+    // directory to someone who may not see the workbook. A profile carries
+    // distinct values and sums, which are the workbook's data — so it is its
+    // own file, and the invariant about the graph stays true rather than
+    // becoming a footnote.
+    let root = dir();
+    let wb = workbook("hash-profiles");
+    let built = build(&wb);
+    let profiles = eg_structure::Profiles {
+        columns: vec![eg_structure::ColumnProfile {
+            header: "Debt Type".into(),
+            range: eg_model::RangeRef::new(SheetId(0), 1, 1, 3, 1),
+            kind: eg_structure::ColumnKind::Text,
+            populated: 3,
+            empty: 0,
+            errors: 0,
+            distinct: Some(vec![eg_structure::ValueCount {
+                value: "Residential".into(),
+                count: 2,
+                truncated: false,
+            }]),
+            distinct_count: Some(1),
+            numeric: None,
+        }],
+        values: true,
+    };
+
+    let mut corpus = Corpus::open(&root).unwrap();
+    corpus
+        .put(&wb.content_hash, &wb.path, 1, 3, true, &built)
+        .unwrap();
+    assert_eq!(
+        corpus.profiles(&wb.content_hash).unwrap(),
+        None,
+        "a workbook nobody profiled is an ordinary state, not an error"
+    );
+
+    corpus
+        .put_profiles(&wb.content_hash, &wb.path, &profiles)
+        .unwrap();
+    let back = corpus.profiles(&wb.content_hash).unwrap().unwrap();
+    assert_eq!(back, profiles);
+
+    // Two files, and the graph's is untouched by any of it.
+    let graph_bytes = std::fs::read(corpus.graph_path(&wb.content_hash)).unwrap();
+    assert!(
+        !String::from_utf8_lossy(&graph_bytes).contains("Residential"),
+        "no value reached the graph file"
+    );
+    assert!(corpus.profiles_path(&wb.content_hash).exists());
+
+    // And withdrawable on its own.
+    corpus.forget_profiles(&wb.content_hash).unwrap();
+    assert_eq!(corpus.profiles(&wb.content_hash).unwrap(), None);
+    assert!(
+        corpus.get(&wb.content_hash).unwrap().is_some(),
+        "the graph is still there"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_corpus_written_before_profiles_existed_still_opens() {
+    // The manifest gained two fields. Defaulting them rather than bumping the
+    // format is the difference between reading an old corpus as "no profiles"
+    // and dropping every corpus on disk.
+    let root = dir();
+    let wb = workbook("hash-old");
+    {
+        let mut corpus = Corpus::open(&root).unwrap();
+        corpus
+            .put(&wb.content_hash, &wb.path, 1, 3, true, &build(&wb))
+            .unwrap();
+    }
+    let manifest = root.join("manifest.json");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    let stripped = text
+        .replace(",\n      \"profiled_columns\": 0", "")
+        .replace(",\n      \"profile_values\": false", "");
+    assert_ne!(stripped, text, "the fields were there to strip");
+    std::fs::write(&manifest, stripped).unwrap();
+
+    let corpus = Corpus::open(&root).unwrap();
+    let entry = corpus.entries().next().expect("the workbook survived");
+    assert_eq!(entry.1.profiled_columns, 0);
+    assert!(!entry.1.profile_values);
+    let _ = std::fs::remove_dir_all(&root);
+}

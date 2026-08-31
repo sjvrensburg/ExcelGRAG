@@ -57,8 +57,14 @@ above it.
   cell styling for any format**, so structural analysis may never depend on
   presentation — only value kinds, blank runs, and formula-shape homogeneity.
 - `eg-structure` — regions (tables/blocks recovered from blank runs and value-kind
-  contrast) and formula grouping (formulas normalised to an R1C1 *shape*, so a
-  filled-down column of 575k cells collapses to one node).
+  contrast), formula grouping (formulas normalised to an R1C1 *shape*, so a
+  filled-down column of 575k cells collapses to one node), `read_table` (a region
+  as typed columns, kind by strict majority, rows lazy and gap-filled) and
+  `profile_table` (what a column holds: counts, errors, distinct values where
+  there are few, sum/min/max where numeric). Both take **one row-major pass** per
+  region — a sheet is an ordered map keyed by (row, column), so asking it for a
+  single column costs a probe per row, and doing that per column made indexing
+  3.5x slower before it was noticed.
 - `eg-graph` — nodes are aggregates (workbook, sheet, region, column, formula
   group, defined name), not cells. Every cell reference is **lifted** to the
   region containing it, and identical lifted references merge into one edge
@@ -67,7 +73,8 @@ above it.
   main omission by re-deriving every dependency edge from the cells and
   comparing, which is the only thing that catches an edge lifted to the *wrong*
   region. `store::Corpus` is a directory (`manifest.json`, `graphs/<blake3>.json`)
-  keyed by the blake3 of the source file, holding the region layer *and* the
+  keyed by the blake3 of the source file, plus `profiles/<blake3>.json`, holding
+  the region layer *and* the
   formula groups (1,272 of them, 520 KB total) up to
   `MAX_STORED_FORMULA_GROUPS`; past that the group layer is dropped and rebuilt
   on demand. The README explains why the old "119 MiB, never store them" figure
@@ -180,7 +187,10 @@ disagreement is a regression**.
 ## Confidential workbooks
 
 `private/` is gitignored in full and holds a real 170 MB XLSB containing
-commercial and personal data. Never commit a real spreadsheet, and never put
+commercial and personal data. **A corpus's `profiles/` directory holds cell
+values** — distinct values, sums, minima — unlike `graphs/`, which holds only
+structure. Index with `--redact-values` for a corpus that must not carry the
+workbook's contents, or `--no-profiles` for none at all. Never commit a real spreadsheet, and never put
 anything derived from it — sheet names, cell values, labels — into git, a commit
 message or the README without asking; the README uses consistent pseudonyms for
 that reason. To inspect one safely:

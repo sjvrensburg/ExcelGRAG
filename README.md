@@ -179,6 +179,66 @@ for each that `check` stays silent and the audit does not.
 cargo run --release -p eg-graph --example lifting -- private/book.xlsb
 ```
 
+## Reading a region as a table
+
+Region detection already recovers the rectangle, the header rows, the row-label
+columns and one header per body column. That is a table definition in all but
+name, and nothing could turn it back into rows: the graph said *where* a table
+was, and a caller wanting what is in it had a rectangle of cells.
+
+`read_table` closes that. A column is a header, the cells beneath it, and a type
+read off those cells — by majority, because there is no formatting to read it
+off. A strict majority, not a plurality: a column that is 40% number, 35% text
+and 25% error is `Mixed` and says so, because summing it and reading it as text
+are both wrong and picking whichever kind was counted first is how a total ends
+up silently incorrect.
+
+Rows are produced lazily and their gaps are filled in. A sheet holds only its
+populated cells, so the third cell of a row that skipped it is *absent* rather
+than blank — a reader that let the row shorten would misalign every column after
+the gap, for that row only.
+
+## What the columns hold
+
+The graph says where a table is and the table says what shape it has. Neither
+says what is *in* it, and that is the gap a person's question falls into:
+nothing in the index knew that a `Debt Type` column holds `Residential`,
+`Business` and `Indigent`, so a question naming a value rather than a header
+matched nothing.
+
+`eg index` now profiles every column: how many rows, how many blank, how many
+hold an error value, and — where a column has few enough of them — its distinct
+values with counts, plus the range and total of a numeric one.
+
+```
+25 sheets, 43561729 cells read in 9.8s → 2007 nodes, 3271 edges in 18.7s
+952 column(s) profiled, 262 of them categorical
+```
+
+On the reference workbook: **952 columns in 6.0s, 376 KB**, of which 262 read as
+categories — few values, each repeated, which is what a question names. It found
+something else on the way: 67 columns hold nothing but error values, and one
+holds 46,386 of them in 46,528 cells.
+
+A profile is bounded on purpose. The distinct list is abandoned above a
+threshold, so a key column of 195,366 customer numbers profiles to a count and
+nothing else; listing it would be storing the column. Text values are cut to 64
+characters and say that they were.
+
+**It is also the one thing a corpus holds that is the workbook's data.**
+Everything in `graphs/` is structure — ranges, headers, counts — and that
+directory can be handed to someone who may not see the spreadsheet. Distinct
+values and sums cannot. So profiles are written to their own `profiles/`
+directory, deletable on their own, and the graph's invariant stays true rather
+than becoming a footnote. `--no-profiles` skips them; `--redact-values` keeps
+the counts and the types and drops everything that came out of a cell.
+
+```sh
+cargo run --release -p eg-structure --example profile -- private/book.xlsb
+eg index corpus/ book.xlsb --redact-values     # shape without contents
+eg index corpus/ book.xlsb --no-profiles
+```
+
 ## The corpus
 
 The graph of that 170 MB workbook is **520 KB of JSON**, so the store is a

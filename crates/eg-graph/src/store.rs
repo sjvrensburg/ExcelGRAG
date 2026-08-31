@@ -51,6 +51,8 @@ use std::path::{Path, PathBuf};
 use petgraph::graph::NodeIndex;
 use serde::{Deserialize, Serialize};
 
+use eg_structure::Profiles;
+
 use crate::build::{BuiltGraph, Graph};
 use crate::report::BuildReport;
 
@@ -143,6 +145,23 @@ impl StoredGraph {
     }
 }
 
+/// One workbook's column profiles, as written to disk.
+///
+/// A separate file from the graph, and deliberately so. Everything in
+/// `graphs/` is structure — ranges, headers, counts — and a reader can hand the
+/// whole directory to someone who may not see the workbook. A profile carries
+/// distinct values and sums, which are the workbook's data. Keeping them apart
+/// means `profiles/` can be withheld or deleted without touching the graph, and
+/// that the invariant about the graph stays true rather than becoming a
+/// footnote.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredProfiles {
+    pub version: u32,
+    pub content_hash: String,
+    pub path: String,
+    pub profiles: Profiles,
+}
+
 /// What the corpus holds, one line per workbook.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Manifest {
@@ -160,6 +179,18 @@ pub struct Entry {
     pub nodes: u64,
     pub edges: u64,
     pub formula_group_nodes: bool,
+    /// Columns profiled for this workbook, zero when it has no profiles.
+    ///
+    /// Defaulted rather than versioned: a manifest written before profiles
+    /// existed is still a manifest, and reading it as "no profiles" is exactly
+    /// right. Bumping the format for a field whose absence has an obvious
+    /// meaning would drop every corpus on disk.
+    #[serde(default)]
+    pub profiled_columns: u64,
+    /// Whether those profiles carry values — distinct lists and sums — or only
+    /// counts and types.
+    #[serde(default)]
+    pub profile_values: bool,
 }
 
 /// A directory of stored workbook graphs.
@@ -173,6 +204,8 @@ impl Corpus {
     pub fn open(root: impl AsRef<Path>) -> Result<Corpus, StoreError> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(root.join("graphs"))
+            .map_err(io_err(format!("creating {}", root.display())))?;
+        fs::create_dir_all(root.join("profiles"))
             .map_err(io_err(format!("creating {}", root.display())))?;
 
         let manifest_path = root.join("manifest.json");
@@ -288,6 +321,16 @@ impl Corpus {
                 nodes: built.report.total_nodes(),
                 edges: built.report.total_edges(),
                 formula_group_nodes,
+                profiled_columns: self
+                    .manifest
+                    .workbooks
+                    .get(content_hash)
+                    .map_or(0, |e| e.profiled_columns),
+                profile_values: self
+                    .manifest
+                    .workbooks
+                    .get(content_hash)
+                    .is_some_and(|e| e.profile_values),
             },
         );
         self.write_manifest()
@@ -312,17 +355,93 @@ impl Corpus {
         Ok(true)
     }
 
+    /// Store the column profiles for a workbook already in the corpus.
+    ///
+    /// Separate from [`Corpus::put`] because it is separately refusable: a
+    /// corpus can hold every graph and no profile, which is what a caller that
+    /// will not write cell values to disk wants.
+    pub fn put_profiles(
+        &mut self,
+        content_hash: &str,
+        path: &str,
+        profiles: &Profiles,
+    ) -> Result<(), StoreError> {
+        let stored = StoredProfiles {
+            version: FORMAT_VERSION,
+            content_hash: content_hash.to_string(),
+            path: path.to_string(),
+            profiles: profiles.clone(),
+        };
+        let bytes = serde_json::to_vec(&stored).expect("profiles of plain data serialise");
+        write_atomically(&self.profiles_path(content_hash), &bytes)?;
+        if let Some(entry) = self.manifest.workbooks.get_mut(content_hash) {
+            entry.profiled_columns = profiles.len() as u64;
+            entry.profile_values = profiles.values;
+        }
+        self.write_manifest()
+    }
+
+    /// The profiles for a workbook, if any were stored.
+    ///
+    /// `Ok(None)` for a workbook profiled by nobody, which is an ordinary state
+    /// and not an error — the graph is the corpus, the profiles are an extra.
+    pub fn profiles(&self, content_hash: &str) -> Result<Option<Profiles>, StoreError> {
+        let file = self.profiles_path(content_hash);
+        let bytes = match fs::read(&file) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io_err(format!("reading {}", file.display()))(e)),
+        };
+        if from_another_version(&bytes) {
+            return Ok(None);
+        }
+        let stored: StoredProfiles =
+            serde_json::from_slice(&bytes).map_err(|source| StoreError::Decode {
+                path: file.display().to_string(),
+                source,
+            })?;
+        Ok(Some(stored.profiles))
+    }
+
+    /// Forget one workbook's profiles, leaving its graph.
+    pub fn forget_profiles(&mut self, content_hash: &str) -> Result<(), StoreError> {
+        match fs::remove_file(self.profiles_path(content_hash)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => {
+                let path = self.profiles_path(content_hash);
+                return Err(io_err(format!("removing {}", path.display()))(e));
+            }
+        }
+        if let Some(entry) = self.manifest.workbooks.get_mut(content_hash) {
+            entry.profiled_columns = 0;
+            entry.profile_values = false;
+        }
+        self.write_manifest()
+    }
+
+    /// Where a workbook's profiles are written.
+    pub fn profiles_path(&self, content_hash: &str) -> PathBuf {
+        self.root.join("profiles").join(self.stem(content_hash))
+    }
+
     /// Where a workbook's graph is written. Public so a caller can measure what
     /// the store costs, or say where an answer came from.
     pub fn graph_path(&self, content_hash: &str) -> PathBuf {
-        // The hash is hex from blake3, so it cannot escape the directory. Kept
-        // to its first 32 characters, which is still far past collision.
+        self.root.join("graphs").join(self.stem(content_hash))
+    }
+
+    /// A hash as a filename.
+    ///
+    /// The hash is hex from blake3, so it cannot escape the directory. Kept to
+    /// its first 32 characters, which is still far past collision.
+    fn stem(&self, content_hash: &str) -> String {
         let stem: String = content_hash
             .chars()
             .filter(|c| c.is_ascii_alphanumeric())
             .take(32)
             .collect();
-        self.root.join("graphs").join(format!("{stem}.json"))
+        format!("{stem}.json")
     }
 
     fn write_manifest(&self) -> Result<(), StoreError> {
