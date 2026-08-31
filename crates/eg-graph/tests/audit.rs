@@ -329,8 +329,9 @@ fn references_that_leave_the_workbook_are_not_this_audits_business() {
 
 #[test]
 fn a_graph_without_formula_group_nodes_audits_the_same() {
-    // What the corpus stores: groups are 119 MiB and are rebuilt on demand, so
-    // the graph that gets audited in anger is this one.
+    // A graph stored without its group layer — what the corpus falls back to
+    // past `MAX_STORED_FORMULA_GROUPS`. Lifting never reads group nodes, so the
+    // audit must reach the same verdict either way.
     let wb = two_sheets();
     let stored = build_with(
         &wb,

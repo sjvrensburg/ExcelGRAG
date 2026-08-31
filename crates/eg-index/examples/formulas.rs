@@ -2,15 +2,16 @@
 //!
 //! Usage: `formulas <index-dir> <workbook> [--limit n] <query>...`
 //!
-//! The corpus deliberately does not store formula-group nodes: 464,131 of them
-//! on the reference workbook, 119 MiB, and wanted only when drilling into one
-//! file. Whether they are worth *indexing* is a separate question, and this
-//! example is what answers it — how long the extra 464,000 documents take to
-//! index, how much disk they cost, and whether a search over them still
-//! returns in under a millisecond.
+//! This is the measurement that decided the formula-group layer is worth
+//! keeping: how many documents it adds, how much disk they cost, and whether a
+//! search over them still returns in under a millisecond. The answer was yes on
+//! every count, and `eg index` now stores and indexes the layer as a matter of
+//! course, up to `MAX_STORED_FORMULA_GROUPS`.
 //!
-//! The index goes in its own directory, not the corpus's, because a graph built
-//! with groups and one built without are not two versions of the same thing.
+//! It is still useful on its own, for a workbook past that ceiling or one not
+//! in a corpus at all. The index goes in its own directory, not the corpus's,
+//! because a graph built with groups and one built without are not two versions
+//! of the same thing.
 //!
 //! ```sh
 //! cargo run --release -p eg-index --example formulas -- private/formulas private/book.xlsb vlookup

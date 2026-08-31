@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use eg_graph::store::Corpus;
-use eg_graph::{build_with, GraphOptions};
+use eg_graph::{build_with, GraphOptions, NodeKind, MAX_STORED_FORMULA_GROUPS};
 use eg_index::vector::{embeddable, VectorIndex};
 use eg_index::{fuse, Embedder, Hit, SearchOptions, TextIndex};
 use eg_ingest::{load_with, LoadOptions};
@@ -36,23 +36,37 @@ pub fn index(
         .map_err(|e| format!("could not load {path}: {e}"))?;
         let read = started.elapsed();
 
-        // Only the region-level graph is stored. Formula groups are hundreds of
-        // thousands of nodes on a real workbook and are wanted only when
-        // drilling into one, at which point they are rebuilt from the file.
-        let built = build_with(
+        // The formula-group layer is stored with the rest, because rebuilding
+        // it costs a full ingest of the source file and keeping it costs a few
+        // hundred kilobytes. A workbook of one-off formulas groups into nothing
+        // and would blow that out, so past the budget the layer is dropped and
+        // goes back to being rebuilt on demand.
+        let mut built = build_with(
             &loaded.workbook,
             &GraphOptions {
-                formula_group_nodes: false,
+                formula_group_nodes: true,
                 ..Default::default()
             },
         );
+        let groups = built.report.nodes_of(NodeKind::FormulaGroup) as usize;
+        let mut stored_groups = groups <= MAX_STORED_FORMULA_GROUPS;
+        if !stored_groups {
+            built = build_with(
+                &loaded.workbook,
+                &GraphOptions {
+                    formula_group_nodes: false,
+                    ..Default::default()
+                },
+            );
+            stored_groups = false;
+        }
         corpus
             .put(
                 &loaded.workbook.content_hash,
                 path,
                 loaded.workbook.sheets.len(),
                 loaded.workbook.total_cells() as u64,
-                false,
+                stored_groups,
                 &built,
             )
             .map_err(|e| format!("could not store {path}: {e}"))?;
@@ -66,6 +80,12 @@ pub fn index(
             built.graph.edge_count(),
             started.elapsed().as_secs_f64() - read.as_secs_f64(),
         );
+        if !stored_groups {
+            println!(
+                "  {groups} formula groups is past the {MAX_STORED_FORMULA_GROUPS} the store keeps; \
+                 they will be rebuilt on demand"
+            );
+        }
         for warning in &loaded.warnings {
             println!("  warning: {warning}");
         }

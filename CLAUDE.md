@@ -67,8 +67,11 @@ above it.
   main omission by re-deriving every dependency edge from the cells and
   comparing, which is the only thing that catches an edge lifted to the *wrong*
   region. `store::Corpus` is a directory (`manifest.json`, `graphs/<blake3>.json`)
-  keyed by the blake3 of the source file. Formula-group nodes are built but
-  deliberately **not stored** (119 MiB) — rebuilt when drilling into a workbook.
+  keyed by the blake3 of the source file, holding the region layer *and* the
+  formula groups (1,272 of them, 520 KB total) up to
+  `MAX_STORED_FORMULA_GROUPS`; past that the group layer is dropped and rebuilt
+  on demand. The README explains why the old "119 MiB, never store them" figure
+  was an artifact of the pre-fork reader.
 - `eg-index` — `TextIndex` (tantivy) and `VectorIndex` (fastembed,
   `bge-small-en-v1.5` via ONNX, full scan, no ANN) over the same node flattening,
   keyed by the same blake3. Rankings are fused by reciprocal rank (`fuse`), not by

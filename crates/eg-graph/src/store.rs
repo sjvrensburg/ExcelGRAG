@@ -1,22 +1,34 @@
 //! Keeping graphs between runs.
 //!
 //! P3a measured what there is to store, and the answer decided the design. The
-//! graph of a 170 MB workbook, without formula-group nodes, is **732 nodes and
-//! 892 edges** — a few hundred kilobytes of JSON. Fifty such workbooks are a
-//! few megabytes. That is far below the scale at which an embedded key-value
-//! store or a memory-mapped columnar format earns its complexity, so this is a
-//! directory of files and a manifest.
+//! graph of a 170 MB workbook is **2,007 nodes and 3,271 edges** — 520 KB of
+//! JSON, reloaded in 1.4ms. Fifty such workbooks are a few tens of megabytes.
+//! That is far below the scale at which an embedded key-value store or a
+//! memory-mapped columnar format earns its complexity, so this is a directory
+//! of files and a manifest.
 //!
-//! What is *not* stored is as deliberate:
+//! Formula groups used to be left out of that, on a measurement that no longer
+//! holds. They were 464,131 nodes and 119 MiB — but that was a workbook read
+//! through calamine before the fork's fixes, where mis-decoded relative
+//! references gave a filled-down column a different shape every row, so almost
+//! nothing grouped. Read correctly the same workbook has **1,272 groups**, and
+//! keeping them costs 397 KB and 0.9ms on reload. Rebuilding them instead costs
+//! a full ingest of the source file: ten seconds and 6 GB. So they are stored,
+//! up to [`MAX_STORED_FORMULA_GROUPS`], and the lexical index can then find a
+//! formula without the workbook being present at all.
 //!
-//! - **Formula-group nodes.** 464,131 of them on the reference workbook, 119
-//!   MiB, and near-identical text by construction. They are rebuilt when a
-//!   caller drills into one workbook, which is the only time they are wanted.
-//!   [`StoredGraph::formula_group_nodes`] records which kind a file holds, so a
-//!   loader is never guessing.
+//! What is still *not* stored is as deliberate:
+//!
 //! - **Cell values.** The workbook is 6 GB in memory. Nodes carry the ranges
 //!   they stand for, so the cells are one read away, and a stored copy could
-//!   only ever go stale.
+//!   only ever go stale. A formula-group node carries the formula *text* and
+//!   its R1C1 shape, which are structure; no value it computed is written here.
+//! - **A formula-group layer past the budget.** The old number is a reminder
+//!   that this layer has no natural bound: a workbook of one-off formulas
+//!   groups into nothing, and its group layer would be as large as its formula
+//!   count. Past the budget the layer goes back to being rebuilt on demand, and
+//!   [`StoredGraph::formula_group_nodes`] records which kind a file holds, so a
+//!   loader is never guessing.
 //!
 //! Freshness is by content hash, not timestamp: the key of a stored graph is
 //! the blake3 of the source file, so a workbook that has not changed is a hit
@@ -45,6 +57,20 @@ use crate::report::BuildReport;
 /// Bumped when the stored shape changes. A file from another version is
 /// reported as a miss rather than deserialised into something plausible.
 pub const FORMAT_VERSION: u32 = 1;
+
+/// How many formula-group nodes are worth keeping in a stored graph.
+///
+/// The layer is cheap on a workbook that groups well — 1,272 nodes and 397 KB
+/// on the reference file — and unbounded on one that does not, since a workbook
+/// of one-off formulas groups into nothing. At roughly 320 bytes a group, this
+/// ceiling is about 6 MB of JSON and tens of milliseconds to reload, which is
+/// where a store whose whole point is a sub-millisecond warm read stops being
+/// one. Past it, the layer is rebuilt from the source file on demand, as the
+/// whole layer used to be.
+///
+/// Fifteen times what the reference workbook needs, so it is a guard against a
+/// pathological workbook and not a limit anything normal meets.
+pub const MAX_STORED_FORMULA_GROUPS: usize = 20_000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -286,7 +312,9 @@ impl Corpus {
         Ok(true)
     }
 
-    fn graph_path(&self, content_hash: &str) -> PathBuf {
+    /// Where a workbook's graph is written. Public so a caller can measure what
+    /// the store costs, or say where an answer came from.
+    pub fn graph_path(&self, content_hash: &str) -> PathBuf {
         // The hash is hex from blake3, so it cannot escape the directory. Kept
         // to its first 32 characters, which is still far past collision.
         let stem: String = content_hash

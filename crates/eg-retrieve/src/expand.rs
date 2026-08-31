@@ -6,13 +6,13 @@
 //!
 //! # Why the two edge classes are not walked the same way
 //!
-//! The measurement decides this. On the reference workbook the graph is 732
-//! nodes and 892 edges, and the dependency layer is **161 edges** — 66
-//! `DEPENDS_ON` and 95 `CROSS_SHEET_REF`, with a maximum in-degree of 13. That
-//! is sparse, and walking it is cheap.
+//! The measurement decides this. On the reference workbook the region-level
+//! graph is 735 nodes and 951 edges, and the dependency layer is **212 edges** —
+//! 81 `DEPENDS_ON` and 131 `CROSS_SHEET_REF`, with a maximum in-degree of 13.
+//! That is sparse, and walking it is cheap.
 //!
 //! Every hub in that graph is structural. The most connected nodes have
-//! out-degrees of 136, 83, 82, 74 and 71, and every one of them is a region
+//! out-degrees of 136, 92, 91, 74 and 71, and every one of them is a region
 //! pointing at its own columns. So a plain k-hop walk from a column reaches its
 //! region in one hop and that region's 136 columns in two — 19% of the whole
 //! workbook, none of it asked for. This is exactly the explosion

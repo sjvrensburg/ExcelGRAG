@@ -43,8 +43,10 @@ use crate::doc::{docs_for, NodeDoc};
 use crate::tokenize::{SpreadsheetTokenizer, TOKENIZER};
 
 /// How much heap the writer may use before it flushes. Tantivy's floor is 15
-/// MB; the reference workbook's region-level graph is 732 documents, so this is
-/// sized for the formula-group case, which is 464,131.
+/// MB; the reference workbook indexes 2,007 documents, of which 1,272 are
+/// formula groups. The headroom is for a workbook that groups badly, where the
+/// group layer is as large as its formula count — the shape the reference file
+/// appeared to have before the reader was fixed.
 const WRITER_HEAP: usize = 64 << 20;
 
 /// Weights for the three text fields.

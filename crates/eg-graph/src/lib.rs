@@ -37,4 +37,4 @@ pub use node::{
     FormulaGroupNode, Node, NodeKind, RegionNode, SheetNode, WorkbookNode,
 };
 pub use report::{degree_stats, BuildReport, DegreeStats};
-pub use store::{Corpus, StoreError, StoredGraph};
+pub use store::{Corpus, StoreError, StoredGraph, MAX_STORED_FORMULA_GROUPS};
