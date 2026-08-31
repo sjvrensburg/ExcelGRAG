@@ -217,12 +217,18 @@ pub fn ask(dir: &str, query: &str, options: AskOptions) -> Result<(), String> {
         limit: options.seeds.max(1),
         ..Default::default()
     };
-    let hits = find(dir, query, &search_options, &fusion(options.lexical_only))
+    let found = find(dir, query, &search_options, &fusion(options.lexical_only))
         .map_err(|e| e.to_string())?;
-    if hits.is_empty() {
-        println!("{query:?} — nothing matched.");
+    if let Some(warning) = found.warning() {
+        println!("{warning}\n");
+    }
+    if found.is_empty() {
         return Ok(());
     }
+    // Always, above the passage. The failure this fixes is that a passage which
+    // missed the right table read exactly like one that found it.
+    println!("Matched: {}\n", found.evidence());
+    let hits = found.hits;
 
     let found = expand(
         &corpus,
@@ -276,11 +282,17 @@ pub fn search(
         sheet,
         ..Default::default()
     };
-    let hits = find(dir, query, &options, &fusion(lexical_only)).map_err(|e| e.to_string())?;
-    if hits.is_empty() {
-        println!("{query:?} — nothing matched.");
+    let found = find(dir, query, &options, &fusion(lexical_only)).map_err(|e| e.to_string())?;
+    if let Some(warning) = found.warning() {
+        println!("{warning}\n");
+    }
+    if found.is_empty() {
         return Ok(());
     }
+    // `search` is the diagnostic verb, so it says how it did even when there is
+    // no warning: the counts are what a person tuning a query needs.
+    println!("match: {} — {}", found.verdict().as_str(), found.evidence());
+    let hits = found.hits;
     println!("{} hit(s) for {query:?}", hits.len());
     for hit in &hits {
         println!("  {:.2}  {:<8} {}", hit.score, hit.kind.as_str(), hit.label);

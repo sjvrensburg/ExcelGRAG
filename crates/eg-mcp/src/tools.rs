@@ -19,9 +19,9 @@ use eg_eval::whatif::{what_if, Blocked, Change, WhatIfOptions};
 use eg_eval::{
     cell as cell_fact, cells_in, dependents_of, precedents_of, recompute, Outcome, Target,
 };
-use eg_index::{fuse, Hit, SearchOptions};
+use eg_index::SearchOptions;
 use eg_model::{parse_a1, CellValue, RangeRef, Workbook};
-use eg_retrieve::{expand, render, ExpandOptions, RenderOptions};
+use eg_retrieve::{expand, find_in, render, ExpandOptions, Fusion, RenderOptions, Search};
 use serde_json::{json, Value};
 
 use crate::state::State;
@@ -222,26 +222,23 @@ fn workbooks(state: &mut State) -> Result<String, String> {
 }
 
 /// The search half, shared by `search` and `context`.
-fn find(state: &mut State, query: &str, opts: &SearchOptions, lexical_only: bool) -> Vec<Hit> {
-    let lexical = state.text.search(query, opts).unwrap_or_default();
-    if lexical_only {
-        return lexical;
-    }
-    let limit = opts.limit;
-    // The vector half wants the same restrictions the lexical half had, so the
-    // two are ranking the same candidate set rather than different ones.
-    let semantic = match state.semantic() {
-        Some((embedder, vectors)) => embedder
-            .embed_query(query)
-            .ok()
-            .map(|vector| vectors.search(&vector, opts))
-            .unwrap_or_default(),
-        None => Vec::new(),
+/// The one search, against the indexes this server keeps open.
+///
+/// This used to be a third copy of the pipeline, and the copy is how the
+/// fusion weighting came to be missing from the surface an agent talks to.
+fn find(state: &mut State, query: &str, opts: &SearchOptions, lexical_only: bool) -> Search {
+    let fusion = Fusion {
+        lexical_only,
+        ..Default::default()
     };
-    if semantic.is_empty() {
-        return lexical;
+    let (text, mut held) = state.halves();
+    if lexical_only {
+        held = None;
     }
-    fuse(&[&lexical, &semantic], limit)
+    let semantic = held
+        .as_mut()
+        .map(|(embedder, vectors)| (&mut **embedder, &*vectors));
+    find_in(text, semantic, query, opts, &fusion)
 }
 
 fn search(state: &mut State, args: &Value) -> Result<String, String> {
@@ -256,12 +253,23 @@ fn search(state: &mut State, args: &Value) -> Result<String, String> {
         sheet: opt_str(args, "sheet"),
         ..Default::default()
     };
-    let hits = find(state, &query, &opts, opt_bool(args, "lexical_only"));
-    if hits.is_empty() {
+    let found = find(state, &query, &opts, opt_bool(args, "lexical_only"));
+    let warning = found.warning();
+    let evidence = found.evidence();
+    if found.is_empty() {
         return Ok(format!("{query:?} — nothing matched."));
     }
+    let hits = found.hits;
 
-    let mut out = format!("{} hit(s) for {query:?}\n", hits.len());
+    // In front of the results, not after them. A caveat below a list of answers
+    // is a caveat most readers never reach.
+    let mut out = String::new();
+    if let Some(warning) = &warning {
+        out.push_str(warning);
+        out.push_str("\n\n");
+    }
+    out.push_str(&format!("Matched: {evidence}\n\n"));
+    out.push_str(&format!("{} hit(s) for {query:?}\n", hits.len()));
     for hit in &hits {
         out.push_str(&format!(
             "  {:.2}  {:<8} {}\n",
@@ -286,10 +294,13 @@ fn context(state: &mut State, args: &Value) -> Result<String, String> {
         limit: seeds,
         ..Default::default()
     };
-    let hits = find(state, &query, &opts, opt_bool(args, "lexical_only"));
-    if hits.is_empty() {
+    let found = find(state, &query, &opts, opt_bool(args, "lexical_only"));
+    let warning = found.warning();
+    let evidence = found.evidence();
+    if found.is_empty() {
         return Ok(format!("{query:?} — nothing matched."));
     }
+    let hits = found.hits;
 
     let expand_opts = ExpandOptions {
         hops: opt_usize(args, "hops", 2),
@@ -307,7 +318,15 @@ fn context(state: &mut State, args: &Value) -> Result<String, String> {
         },
     );
 
-    let mut out = rendered.text;
+    let mut out = String::new();
+    if let Some(warning) = &warning {
+        out.push_str(warning);
+        out.push_str("\n\n");
+    }
+    // Always, above the passage: an answer that missed and an answer that hit
+    // used to be indistinguishable to whoever read them.
+    out.push_str(&format!("Matched: {evidence}\n\n"));
+    out.push_str(&rendered.text);
     out.push_str(&format!(
         "\n---\n{} node(s) from {} seed(s), {} citation(s)",
         found.total_nodes(),

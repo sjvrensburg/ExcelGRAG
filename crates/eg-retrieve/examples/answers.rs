@@ -245,7 +245,9 @@ fn score(
         limit: seeds.max(1),
         ..Default::default()
     };
-    let hits = find(dir, &question.ask, &options, fusion).unwrap_or_default();
+    let hits = find(dir, &question.ask, &options, fusion)
+        .map(|f| f.hits)
+        .unwrap_or_default();
     let rank = hits
         .iter()
         .position(|h| wanted(h, &question.want))

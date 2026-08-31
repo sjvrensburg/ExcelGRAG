@@ -21,7 +21,7 @@ use eg_graph::build;
 use eg_graph::store::Corpus;
 use eg_index::{SearchOptions, TextIndex};
 use eg_model::{Cell, CellValue, Sheet, SheetId, Workbook, WorkbookFormat};
-use eg_retrieve::{expand, find, render, ExpandOptions, Fusion, RenderOptions};
+use eg_retrieve::{expand, find, render, ExpandOptions, Fusion, RenderOptions, Verdict};
 
 fn grid(id: u16, name: &str, rows: &[&str]) -> Sheet {
     let mut sheet = Sheet::new(SheetId(id), name);
@@ -192,7 +192,7 @@ fn indexed(tag: &str) -> std::path::PathBuf {
 /// Where the first acceptable answer lands, and whether the passage cites it.
 fn answer(root: &std::path::Path, q: &Question) -> (Option<usize>, bool) {
     let dir = root.to_str().unwrap();
-    let hits = find(
+    let found = find(
         dir,
         q.ask,
         &SearchOptions {
@@ -202,6 +202,7 @@ fn answer(root: &std::path::Path, q: &Question) -> (Option<usize>, bool) {
         &Fusion::lexical(),
     )
     .unwrap();
+    let hits = found.hits;
     let rank = hits
         .iter()
         .position(|h| {
@@ -316,5 +317,75 @@ fn what_the_graph_has_no_node_for_cannot_be_found() {
     assert!(
         !headers.iter().any(|h| h == "Customer"),
         "the row-label column is not: {headers:?}"
+    );
+}
+
+#[test]
+fn an_answer_says_what_it_was_found_on() {
+    // The failure being fixed: a passage that missed the right table read
+    // exactly like one that found it. Every answer now carries the words it
+    // matched, so the two stop looking alike even where nothing can tell which
+    // is which.
+    let root = indexed("evidence");
+    let dir = root.to_str().unwrap();
+    let opts = SearchOptions {
+        limit: 5,
+        ..Default::default()
+    };
+
+    let good = find(dir, "impairment provision", &opts, &Fusion::lexical()).unwrap();
+    assert_eq!(good.verdict(), Verdict::Full, "{}", good.evidence());
+    assert!(
+        good.warning().is_none(),
+        "a full match raises no banner: {:?}",
+        good.warning()
+    );
+    for word in ["impairment", "provision"] {
+        assert!(
+            good.covered.iter().any(|c| c == word),
+            "{word:?} should be accounted for: {}",
+            good.evidence()
+        );
+    }
+
+    // "debt" is in this workbook everywhere; "sausages" is in it nowhere. The
+    // evidence has to show that the answer rests on the first word alone.
+    let thin = find(dir, "debt sausages", &opts, &Fusion::lexical()).unwrap();
+    assert_eq!(thin.verdict(), Verdict::Partial, "{}", thin.evidence());
+    assert_eq!(thin.unmatched, vec!["sausages".to_string()]);
+    assert!(
+        thin.evidence().contains("sausages"),
+        "the evidence names the word the corpus does not have: {}",
+        thin.evidence()
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_question_about_nothing_in_the_corpus_says_so_before_it_answers() {
+    // The one case with no room to argue: whatever came back was not found on
+    // the question. That gets a banner, and it is the only thing that does —
+    // a warning on most answers is a warning on none.
+    let root = indexed("blind");
+    let dir = root.to_str().unwrap();
+    let found = find(
+        dir,
+        "colour of the invoice paper",
+        &SearchOptions {
+            limit: 5,
+            ..Default::default()
+        },
+        &Fusion::lexical(),
+    )
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert_eq!(found.verdict(), Verdict::Blind);
+    let warning = found.warning().expect("a blind match raises a banner");
+    assert!(warning.starts_with("BLIND MATCH:"), "{warning}");
+    assert!(
+        warning.contains("invoice"),
+        "it names the words that are absent: {warning}"
     );
 }

@@ -35,4 +35,4 @@ pub use context::{render, RenderOptions, Rendered};
 pub use expand::{
     expand, ExpandOptions, RetrieveError, Retrieved, RetrievedNode, Role, WorkbookContext,
 };
-pub use search::{embedder, find, Fusion, SearchError, LEXICAL_WEIGHT};
+pub use search::{embedder, find, find_in, Fusion, Search, SearchError, Verdict, LEXICAL_WEIGHT};

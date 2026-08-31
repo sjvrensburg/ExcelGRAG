@@ -79,6 +79,30 @@ impl State {
         Some((embedder, vectors))
     }
 
+    /// Both indexes at once, for a search that needs them together.
+    ///
+    /// `semantic` borrows all of `self`, so a caller cannot hold it and reach
+    /// for `text` as well. Handing back both from one call is what lets the
+    /// search live in `eg-retrieve` rather than being copied in here.
+    pub fn halves(&mut self) -> (&TextIndex, Option<(&mut Embedder, VectorIndex)>) {
+        if !self.embedder_failed && self.embedder.is_none() {
+            match Embedder::new() {
+                Ok(embedder) => self.embedder = Some(embedder),
+                Err(_) => self.embedder_failed = true,
+            }
+        }
+        let semantic = match (self.embedder_failed, self.embedder.as_mut()) {
+            (false, Some(embedder)) => {
+                match VectorIndex::open(&self.dir, embedder.name(), embedder.dim()) {
+                    Ok(vectors) if !vectors.is_empty() => Some((embedder, vectors)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        (&self.text, semantic)
+    }
+
     /// A workbook, loaded if this is the first time it has been asked for.
     ///
     /// The returned handle is reference-counted so a tool can work with it
