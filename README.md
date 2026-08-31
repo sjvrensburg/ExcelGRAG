@@ -1044,15 +1044,17 @@ It found three things in its first hour, which is the argument for having it:
 - The schema reader missed every foreign key in any workbook LibreOffice had
   saved, because ODF spells the exact-match flag `FALSE()` and the reader
   wanted the bare literal. Fixed here.
-- Read as `.xls`, every cross-sheet reference resolves to the formula's own
-  sheet — `Rates!$A$4:$B$7` arrives as `Debtors!$A$4:$B$7`. SheetJS reads the
-  same bytes correctly, so the file is not at fault.
+- Read as `.xls`, every cross-sheet reference names the *wrong* sheet — on one
+  sheet, two of them come back swapped — and a 3-D reference decodes to a
+  column past Excel's last. SheetJS reads the same bytes correctly, so the file
+  is not at fault.
 - Read as `.ods`, an error cell reads as an empty one, because ODF marks errors
   with an extension attribute and leaves the string value blank.
 
-The last two are calamine's, are recorded in `docs/upstream-issues.md`, and the
-parity test asserts the ODS gap is still exactly as large as it was — so it
-fails when the defect is fixed, rather than outliving it.
+The last two are calamine's — reproduced against stock 0.36.1, so neither is the
+fork's doing — and are recorded in `docs/upstream-issues.md`. The parity test
+asserts the ODS gap is still exactly as large as it was, so it fails when the
+defect is fixed rather than outliving it.
 
 LibreOffice has no XLSB export filter, so the format this project exists for
 cannot be generated. Parity for XLSB still rests on the vendor fixtures, which

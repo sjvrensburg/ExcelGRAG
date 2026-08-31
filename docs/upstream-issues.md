@@ -18,7 +18,8 @@ upstream. Issue 8 was found by a six-way audit of ExcelGRAG's own code rather
 than by parity or recompute, and is committed directly to `excelgrag` (it has
 no independent topic branch) but not yet opened upstream. Issues 9 and 10 were found by
 reading the generated demo workbook in more than one format, are in the `.xls`
-and `.ods` readers respectively, and are not yet fixed anywhere.
+and `.ods` readers respectively, and are confirmed present in stock 0.36.1 —
+neither is the fork's doing. Neither is fixed anywhere yet.
 
 The workspace patches in an `excelgrag` branch carrying both fixes, since
 `[patch.crates-io]` takes a single source.
@@ -680,30 +681,62 @@ comes back `4`, the totals row counted as data).
 
 ---
 
-## 9. Every cross-sheet reference in `.xls` resolves to the formula's own sheet
+## 9. `.xls` cross-sheet references name the wrong sheet
 
-Found by recomputing `tests/fixtures/demo/impairment.xls`, which the generator
-in `crates/eg-fixtures` writes and LibreOffice converts. The same logical
-workbook read as `.xlsx` recomputes with no disagreements at all; read as
-`.xls`, more than a quarter of its formulas disagree.
+Found by recomputing the generated demo workbook (`crates/eg-fixtures`). Read as
+`.xlsx` it recomputes with no disagreements at all; read as `.xls`, more than a
+quarter of its formulas disagree, and every one of them is a reference to
+another sheet.
 
-Every one of them is a lookup into another sheet, and the sheet qualifier has
-been replaced by the sheet the formula is *written on*:
+The qualifier is not dropped and not defaulted — it names a *different real
+sheet*. On the `Summary` sheet the two it uses come back swapped:
 
 ```
-read as .xlsx     =VLOOKUP(D2,Rates!$A$4:$B$7,2,FALSE)
-read as .xls      =VLOOKUP(D2,Debtors!$A$4:$B$7,2,FALSE)
-                               ^^^^^^^ the formula's own sheet
+written                                  read as .xls
+SUM(Debtors!$E$2:$E$31)                  SUM(Rates!$E$2:$E$31)
+AVERAGE(Debtors!$E$2:$E$31)              AVERAGE(Rates!$E$2:$E$31)
+INDEX(Rates!$B$4:$B$7,MATCH(…))          INDEX(Debtors!$B$4:$B$7,MATCH(…))
+B12-B5                    (local)        B12-B5                    (correct)
 ```
 
-`Debtors!A4:B7` is a real range holding account rows, so the lookup does not
-fail loudly. It returns `#N/A` where the sheet has a rate cached, which is how
-the recompute sweep noticed.
+Local references are untouched, and so are defined names (`Tax_Rate` survives).
+Only the sheet-qualified ones move, and they move to a sheet that exists — so
+nothing fails loudly. `Debtors!A4:B7` holds account rows, so the lookup that
+should have found a rate returns `#N/A` against a cell where the sheet has a
+number cached. That is how the recompute sweep noticed.
+
+### The likely mechanism
+
+The workbook's tab order is `Debtors`(0), `Rates`(1), `Jan`(2), `Feb`(3),
+`Mar`(4), `Summary`(5), `Notes`(6). Every observation fits the **XTI index
+being used directly as a tab index**:
+
+| formula on | names | XTI entry | reported |
+|---|---|---|---|
+| `Debtors` | `Rates` | 0 | `Debtors` (tab 0) |
+| `Summary` | `Debtors` | 1 | `Rates` (tab 1) |
+| `Summary` | `Rates` | 0 | `Debtors` (tab 0) |
+
+A `PtgRef3d`/`PtgArea3d` carries an index into the `EXTERNSHEET` record's XTI
+table, whose entries are ordered by first use and are workbook-global. Reading
+that index as a position in the sheet list gives the right answer only when the
+two orders happen to coincide. This is a hypothesis fitted to four
+observations, not a reading of the code, and it should be confirmed there
+before a patch is written.
+
+### The 3-D reference, separately
+
+`SUM(Jan:Mar!B2)` comes back as `SUM(Jan!$BTRN$2:$BTRN$2)`: the span collapsed
+to its first sheet and the column decoded to `BTRN`, which is past Excel's last
+column `XFD`. The corrupt column resembles issue 5 — a column field read
+without masking off the flag bits it shares — but in the `.xls` path rather
+than XLSB. It may be one defect with issue 9 or two; both need reading the
+BIFF formula decoder.
 
 ### Verification
 
-The file is not at fault, and neither is LibreOffice's export. SheetJS, read
-through `sheet-oracle`, returns the correct qualifier from the same bytes:
+The file is not at fault and neither is LibreOffice's export. SheetJS, through
+`sheet-oracle`, returns the correct qualifier from the same bytes:
 
 ```sh
 node ../sheet-oracle/bin/sheet-oracle.js tests/fixtures/demo/impairment.xls \
@@ -711,34 +744,23 @@ node ../sheet-oracle/bin/sheet-oracle.js tests/fixtures/demo/impairment.xls \
 # "formula": "VLOOKUP(D2,Rates!$A$4:$B$7,2,FALSE)"
 ```
 
-Two independent readers, one file, two different answers — which is the whole
-reason a second reader is part of this project's testing.
+**Confirmed present in stock calamine 0.36.1**, not introduced by the fork. A
+standalone crate depending on `calamine = "=0.36.1"` with no `[patch.crates-io]`
+at all reads `VLOOKUP(D2,Debtors!$A$4:$B$7,2,FALSE)`; adding the `excelgrag`
+patch to the same crate changes nothing. Both defects here are upstream's and
+are ready to file.
 
 ### Reproducing
 
 ```sh
-cargo run --release -p eg-fixtures -- --rows 40 --out /tmp/demo --formats xlsx,xls
+cargo run --release -p eg-fixtures -- --rows 30 --out /tmp/demo --formats xlsx,xls
 cargo run --release -p eg-cli -- check /tmp/demo/impairment.xlsx   # agrees
 cargo run --release -p eg-cli -- check /tmp/demo/impairment.xls    # disagrees
 ```
 
-### Not yet diagnosed
-
-This resembles issue 7 — external references carrying two indices, only one of
-which was used — closely enough to be worth reading that fix first. It has been
-observed against calamine as this workspace pins it, which is the `excelgrag`
-fork; whether stock 0.36.1 behaves the same has not been checked, and it must be
-before anything is filed. The `.xls` path also loses the 3-D reference
-`SUM(Jan:Mar!B2)`, which arrives unparseable ("sheet qualifier followed by
-nothing nameable") rather than as a 3-D reference the evaluator would refuse by
-name. That may be the same defect or a second one.
-
-Nothing in this repository works around it. `.xls` is the least-used format of
-the five and the demo fixture is committed as `.xlsx` and `.ods`; anyone
-investigating can regenerate the `.xls` with the command above.
-
-
----
+Nothing in this repository works around it. `.xls` is the least-used of the five
+formats and the demo fixture is committed as `.xlsx` and `.ods`; anyone
+investigating regenerates the `.xls` with the command above.
 
 ## 10. An ODF error cell reads as an empty cell
 
@@ -775,6 +797,15 @@ sheet never had.
 the alternative to reading it is not "no information", it is *wrong*
 information. Yielding the text of `<text:p>` when the string value is empty and
 the extension marker says error would be enough.
+
+### Verification
+
+**Confirmed present in stock calamine 0.36.1**, not introduced by the fork. The
+same standalone crate used for issue 9 reads `Some(String(""))` for this cell
+from the `.ods` and `Some(Error(Div0))` from the `.xlsx`, with and without the
+`excelgrag` patch. Note the value is an empty *string* rather than a blank cell:
+`eg-ingest` maps it onward to an empty value, but a reader looking at calamine
+directly sees `Data::String("")`.
 
 ### Recorded, not worked around
 
