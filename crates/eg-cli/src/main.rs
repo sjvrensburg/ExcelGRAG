@@ -57,6 +57,18 @@ enum Command {
         /// Skip the embedding model; index by word only.
         #[arg(long)]
         lexical_only: bool,
+        /// Do not profile the columns.
+        ///
+        /// A profile records what a column holds — its distinct values where
+        /// there are few of them, and the range and total where it is numeric.
+        /// That is the workbook's data, unlike everything else the corpus
+        /// stores, and it is written to its own `profiles/` directory so it can
+        /// be withheld. `--redact-values` keeps the counts and types and drops
+        /// what came out of the cells.
+        #[arg(long)]
+        no_profiles: bool,
+        #[command(flatten)]
+        privacy: Privacy,
     },
 
     /// Ask a question and get the context around the answer, as a passage.
@@ -182,7 +194,16 @@ fn main() {
             workbooks,
             reindex,
             lexical_only,
-        } => corpus::index(&dir, &workbooks, reindex, lexical_only),
+            no_profiles,
+            privacy,
+        } => corpus::index(
+            &dir,
+            &workbooks,
+            reindex,
+            lexical_only,
+            !no_profiles,
+            privacy.redact_values,
+        ),
         Command::Ask {
             dir,
             query,

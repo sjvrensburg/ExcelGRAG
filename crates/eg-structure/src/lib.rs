@@ -5,12 +5,18 @@
 //! stay small enough to index and readable enough to cite.
 
 pub mod formula_group;
+pub mod profile;
 pub mod region;
+pub mod table;
 
 pub use formula_group::{
     find_shape_exceptions, group_formulas, FormulaGroup, GroupingStats, ShapeException,
+};
+pub use profile::{
+    profile_table, ColumnProfile, NumericSummary, ProfileOptions, Profiles, ValueCount,
 };
 pub use region::{
     detect_regions, detect_regions_with, detect_workbook_regions, Region, RegionKind,
     RegionOptions, RegionSource,
 };
+pub use table::{read_table, ColumnKind, Table, TableColumn};

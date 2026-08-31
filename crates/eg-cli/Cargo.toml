@@ -14,6 +14,7 @@ path = "src/main.rs"
 eg-model.workspace = true
 eg-ingest.workspace = true
 eg-graph.workspace = true
+eg-structure.workspace = true
 eg-index.workspace = true
 eg-retrieve.workspace = true
 eg-eval.workspace = true

@@ -9,6 +9,7 @@ use eg_index::vector::{embeddable, VectorIndex};
 use eg_index::{Embedder, SearchOptions, TextIndex};
 use eg_ingest::{load_with, LoadOptions};
 use eg_retrieve::{expand, find, render, ExpandOptions, Fusion, RenderOptions};
+use eg_structure::{detect_regions, profile_table, read_table, ProfileOptions, Profiles};
 
 /// Read workbooks into the corpus, then bring both indexes up to date.
 ///
@@ -21,6 +22,8 @@ pub fn index(
     workbooks: &[String],
     reindex: bool,
     lexical_only: bool,
+    profile: bool,
+    redact_values: bool,
 ) -> Result<(), String> {
     let mut corpus = Corpus::open(dir).map_err(|e| format!("could not open the corpus: {e}"))?;
 
@@ -60,6 +63,32 @@ pub fn index(
             );
             stored_groups = false;
         }
+        // Profiles are the workbook's *data* — distinct values, sums — where
+        // everything else stored is structure, so they are written separately
+        // and are separately refusable. `--no-profiles` skips them entirely;
+        // `--redact-values` keeps the counts and types and drops what came out
+        // of the cells.
+        let profiles = if profile {
+            let opts = ProfileOptions {
+                values: !redact_values,
+                ..Default::default()
+            };
+            let mut columns = Vec::new();
+            for sheet in &loaded.workbook.sheets {
+                for region in detect_regions(sheet) {
+                    if let Some(table) = read_table(sheet, &region) {
+                        columns.extend(profile_table(sheet, &table, &opts));
+                    }
+                }
+            }
+            Some(Profiles {
+                columns,
+                values: opts.values,
+            })
+        } else {
+            None
+        };
+
         // Checked before it is stored, not when someone remembers to run the
         // example. The structural invariants are free; the audit re-derives
         // every dependency edge from the cells, which is a pass over the
@@ -81,6 +110,11 @@ pub fn index(
                 &built,
             )
             .map_err(|e| format!("could not store {path}: {e}"))?;
+        if let Some(profiles) = &profiles {
+            corpus
+                .put_profiles(&loaded.workbook.content_hash, path, profiles)
+                .map_err(|e| format!("could not store profiles for {path}: {e}"))?;
+        }
 
         println!(
             "{path}\n  {} sheets, {} cells read in {:.1}s → {} nodes, {} edges in {:.1}s",
@@ -95,6 +129,18 @@ pub fn index(
             println!(
                 "  {groups} formula groups is past the {MAX_STORED_FORMULA_GROUPS} the store keeps; \
                  they will be rebuilt on demand"
+            );
+        }
+        if let Some(profiles) = &profiles {
+            let categorical = profiles.categorical().count();
+            println!(
+                "  {} column(s) profiled, {categorical} of them categorical{}",
+                profiles.len(),
+                if profiles.values {
+                    ""
+                } else {
+                    " (counts and types only — values redacted)"
+                }
             );
         }
         if violations.is_empty() && audit.agrees() {
