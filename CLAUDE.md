@@ -81,8 +81,14 @@ above it.
   and `RRF_K` stays at 60 because sweeping it changes nothing. Custom tokenizer indexes each run
   whole *and* split at case/letter-digit boundaries (`NetRevenue` → `net`,
   `revenue`, `netrevenue`).
-- `eg-retrieve` — `find()` is the hybrid search the CLI and the scorer both run
-  (fused by reciprocal rank, semantic half optional); `expand()` walks out from
+- `eg-retrieve` — `find()`/`find_in()` is the **one** hybrid search — the CLI,
+  the MCP server and the scorer all call it, because the server keeping its own
+  copy is how the fusion weighting came to be missing from the surface agents
+  talk to. Every answer carries `Search::evidence()`, which words of the
+  question the corpus knows and which the top result accounts for; that is
+  printed above every passage, and a `Verdict::Blind` raises a banner. It is
+  deliberately not a confidence score — see the README for the two that were
+  tried and discarded. `expand()` walks out from
   hits under a budget, recording for every node which node pulled it in and
   along which edge; `render()` turns the subgraph into a numbered, citable
   passage. Passages carry **no cell values** — they say where to look.

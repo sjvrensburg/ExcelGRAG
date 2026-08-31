@@ -810,6 +810,52 @@ number:
 
 Twelve questions is a baseline, not a verdict.
 
+### Failing loudly
+
+The layers below this one fail loudly. Retrieval did not: a passage that missed
+the right table read exactly like one that found it, and an agent had no way to
+tell. Two attempts at a confidence score are worth recording because both were
+worse than useless.
+
+Warning whenever a question uses a word the workbook does not fires on four
+questions in five — "present value of expected receipts" is a rank-one hit on a
+workbook containing neither "present" nor "value". Thresholding instead on how
+much of the question the top result accounts for flags a rank-one answer whose
+column happens to be named in two words out of five. Twelve questions cannot
+calibrate a classifier and pretending otherwise would just move the silent
+failure somewhere else.
+
+So there is no score. Every answer states what it was found on:
+
+```
+Matched: the top result matches "debt", "aged" of 3; "buckets" not in this
+corpus at all; 2 of 2 results found by word and by meaning
+```
+
+against
+
+```
+Matched: the top result matches "provision", "doubtful", "debts" of 3;
+3 of 3 results found by word and by meaning
+```
+
+The system still cannot say which of those answers is right. It can no longer
+present them as though they were the same thing, which was the actual defect. An
+agent reading the first one knows the passage rests on two common words and that
+the distinctive one is not in the workbook at all.
+
+One case does raise a banner, because there is no room to argue: when the result
+carries *none* of the question's words, either because none of them is in the
+corpus or because the ranking found something on other grounds entirely.
+
+```
+BLIND MATCH: none of "colour", "invoice", "paper" appears anywhere in this
+corpus, so nothing below was found on the question. Treat it as a guess.
+```
+
+Costs one index probe per word of the question, each a fraction of a
+millisecond against a search already under one.
+
 ### What the fusion was actually doing
 
 The obvious suspect was `K`, the rank-fusion constant, at the published 60.
