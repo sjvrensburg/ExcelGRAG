@@ -44,7 +44,7 @@ use eg_model::{CellRef, CellValue, RangeRef, ReferenceSpan, SheetId, Workbook};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
-use crate::calc::{recompute_over, same, Outcome, Overrides, Unsupported};
+use crate::calc::{same, Evaluator, Outcome, Overrides, Unsupported};
 use crate::trace::{overlaps, resolve, sheet_ids};
 
 /// One substitution: what to put in a cell, in place of what it holds.
@@ -215,6 +215,10 @@ pub struct Impact {
 /// formula or not, exactly as it would if it had been typed in.
 pub fn what_if(workbook: &Workbook, changes: &[Change], opts: &WhatIfOptions) -> Impact {
     let mut overrides = Overrides::new();
+    // One of these for the whole walk. Built per cell it would rebuild the
+    // sheet-name map a million times over, which is most of what the walk would
+    // then be doing.
+    let mut evaluator = Evaluator::new(workbook);
     let mut applied = Vec::new();
     for change in changes {
         let cell = workbook
@@ -228,6 +232,7 @@ pub fn what_if(workbook: &Workbook, changes: &[Change], opts: &WhatIfOptions) ->
             replaced_formula: cell.and_then(|c| c.formula.clone()),
         });
         overrides.set(change.cell, change.value.clone());
+        evaluator.invalidate(change.cell);
     }
 
     let mut report = ImpactReport::default();
@@ -341,7 +346,7 @@ pub fn what_if(workbook: &Workbook, changes: &[Change], opts: &WhatIfOptions) ->
                 continue;
             }
 
-            let Some(after) = recompute_over(workbook, at, &overrides) else {
+            let Some(after) = evaluator.recompute_over(at, &overrides) else {
                 continue;
             };
             match after.outcome {
@@ -351,10 +356,12 @@ pub fn what_if(workbook: &Workbook, changes: &[Change], opts: &WhatIfOptions) ->
                     // back to the stored value so nothing downstream reads the
                     // one it had in between.
                     overrides.set(at, value);
+                    evaluator.invalidate(at);
                     status.insert(at, Status::Unchanged);
                 }
                 Outcome::Differs { computed, stored } => {
                     overrides.set(at, computed.clone());
+                    evaluator.invalidate(at);
                     moved_here.insert(at);
                     status.insert(at, Status::Moved);
                     match listed.get(&at) {
