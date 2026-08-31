@@ -145,9 +145,18 @@ On the reference workbook, over 6,793,166 formulas and 24,480,367 references:
 | the graph holds | 212 | 3,760,745 |
 | agreed exactly | **212** (100.0%) | — |
 
-It takes 2.7s, against 7.0s to build the graph in the first place, so it is
-cheap enough to run on every workbook indexed rather than saved for a special
-occasion.
+It takes 2.7s, against 7.0s to build the graph in the first place, so `eg index`
+runs it — along with the structural invariants — on every workbook before
+storing it, rather than leaving it for whoever remembers the example:
+
+```
+  25 sheets, 43561729 cells read in 9.5s → 2007 nodes, 3271 edges in 12.8s
+  212 lifted edges agree with the cells they came from (2.6s)
+```
+
+A workbook that fails is still stored, loudly. The finding is about this code,
+not about the spreadsheet, and a corpus missing an edge is more use than no
+corpus at all.
 
 What it does *not* check matters more than the number. Reference scanning, range
 geometry and region detection are one implementation each, used by both sides,

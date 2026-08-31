@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use eg_graph::store::Corpus;
-use eg_graph::{build_with, GraphOptions, NodeKind, MAX_STORED_FORMULA_GROUPS};
+use eg_graph::{build_with, AuditOptions, GraphOptions, NodeKind, MAX_STORED_FORMULA_GROUPS};
 use eg_index::vector::{embeddable, VectorIndex};
 use eg_index::{fuse, Embedder, Hit, SearchOptions, TextIndex};
 use eg_ingest::{load_with, LoadOptions};
@@ -60,6 +60,17 @@ pub fn index(
             );
             stored_groups = false;
         }
+        // Checked before it is stored, not when someone remembers to run the
+        // example. The structural invariants are free; the audit re-derives
+        // every dependency edge from the cells, which is a pass over the
+        // workbook's formulas — 2.7s against the 17s already spent getting
+        // here, and the only thing that catches an edge lifted to the wrong
+        // region. A workbook is still stored when it fails: the finding is
+        // about this code, and a corpus missing an edge is more use than no
+        // corpus at all. It is said loudly instead.
+        let violations = eg_graph::check(&built);
+        let audit = eg_graph::audit(&loaded.workbook, &built.graph, &AuditOptions::default());
+
         corpus
             .put(
                 &loaded.workbook.content_hash,
@@ -84,6 +95,25 @@ pub fn index(
             println!(
                 "  {groups} formula groups is past the {MAX_STORED_FORMULA_GROUPS} the store keeps; \
                  they will be rebuilt on demand"
+            );
+        }
+        if violations.is_empty() && audit.agrees() {
+            println!(
+                "  {} lifted edges agree with the cells they came from ({:.1}s)",
+                audit.edges_agreed,
+                audit.audit_time.as_secs_f64()
+            );
+        }
+        for violation in &violations {
+            println!("  BROKEN: {} — {}", violation.invariant, violation.detail);
+        }
+        for finding in &audit.findings {
+            println!("  BROKEN: {} — {}", finding.kind.as_str(), finding.detail);
+        }
+        if audit.findings_total as usize > audit.findings.len() {
+            println!(
+                "  ... and {} more findings not shown",
+                audit.findings_total as usize - audit.findings.len()
             );
         }
         for warning in &loaded.warnings {
