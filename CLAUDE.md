@@ -146,10 +146,12 @@ Three independent checks, because they fail differently:
 2. **A second reader** — `eg-ingest --example dump_cells` writes the schema
    `sheet-oracle` (SheetJS, at `../sheet-oracle`) writes, and the two dumps are
    diffed. Diff both readers before committing a change to the XLSB/ingest path.
-3. **The lifted edges against the cells** (`eg-graph --example lifting`) — every
-   dependency edge re-derived from the formulas and compared with the graph's,
-   both ways round. `cargo test -p eg-graph --test audit` breaks a correct graph
-   five ways and asserts `check` stays silent about each.
+3. **The lifted edges against the cells** — every dependency edge re-derived
+   from the formulas and compared with the graph's, both ways round. `eg index`
+   runs this on every workbook before storing it (2.7s against a 7s build) and
+   stores it anyway if it fails, loudly; `eg-graph --example lifting` is the
+   same thing on its own. `cargo test -p eg-graph --test audit` breaks a correct
+   graph five ways and asserts `check` stays silent about each.
 
 The sharpest check on the whole stack is `eg check <workbook>`: recompute every
 formula and compare with what Excel cached. That sweep found four reader defects
