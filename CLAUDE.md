@@ -40,6 +40,21 @@ cargo run --release -p eg-cli -- what-if book.xlsb 'RATES!B4=0.15'
 cargo run --release -p eg-cli -- serve corpus/             # MCP over stdio
 ```
 
+`eg-fixtures` generates the demo workbook every one of those can be run
+against — a fictional municipality's debtor impairment, invented data in the
+shape of the real thing, deterministic from a fixed seed:
+
+```sh
+cargo run --release -p eg-fixtures -- --rows 2000 --out tests/fixtures/demo
+cargo run --release -p eg-fixtures -- --rows 400000 --out demo --formats xlsx
+```
+
+It writes flat ODS with formulas and **no cached values**, and LibreOffice
+computes them on conversion, so `eg check` against it compares this evaluator
+with one that shares no code. Never fill those values in from `eg-eval` — the
+fixture would then agree with us by construction and test nothing. LibreOffice
+cannot write XLSB, so that format still rests on the vendor fixtures.
+
 Each crate also has `examples/` that exercise its layer directly and print
 measurements; those are the development surface (`cargo run --release -p
 eg-graph --example graph -- private/book.xlsb`). The CLI deliberately wraps
@@ -193,7 +208,14 @@ Four independent checks, because they fail differently:
    lifting` is the same thing on its own. `cargo test -p eg-graph --test audit`
    breaks a correct graph five ways and asserts `check` stays silent about each.
 
-4. **Whether the answers are any good** (`cargo test -p eg-retrieve --test
+4. **The demo workbook, against a second engine** (`cargo test -p eg-eval
+   --test demo`, `cargo test -p eg-ingest --test parity`) — thousands of
+   formulas whose values LibreOffice computed, asserting no disagreements and
+   that the only refusals are the two the fixture plants. It caught three
+   reader/schema defects in its first hour; two are calamine's and are recorded
+   in `docs/upstream-issues.md` as issues 9 and 10.
+
+5. **Whether the answers are any good** (`cargo test -p eg-retrieve --test
    answers`, and `eg-retrieve --example answers` against a real corpus) —
    questions with known answers, scored by rank and by whether the rendered
    passage cites the answer. The suite asserts the unanswered set is *exactly*
@@ -211,6 +233,11 @@ personal data. **A corpus's `profiles/` directory holds cell values** — distin
 values, sums, minima — unlike `graphs/`, which holds only structure. Index with
 `--redact-values` for a corpus that must not carry the workbook's contents, or
 `--no-profiles` for none at all.
+
+The demo workbook is the way out of this: it is synthetic and committed, so its
+figures, sheet names and cell values may be quoted freely — in the README, in a
+commit message, anywhere. Prefer measuring it when a number needs to be written
+down.
 
 Never commit a real spreadsheet, and never put anything derived from it into
 git. That means its contents — sheet names, cell values, labels — and also its

@@ -10,9 +10,16 @@ not surface formulas.
 
 Every decision below was measured, against a real workbook of that kind. It is
 confidential, so the figures are not repeated here: each example prints its own
-on the terminal, which is where the numbers belong and where anyone with a
-workbook of their own can reproduce them. Sheet names appear as pseudonyms —
-consistently, so a name that recurs is the same sheet.
+on the terminal, which is where the numbers belong. Sheet names appear as
+pseudonyms — consistently, so a name that recurs is the same sheet.
+
+You do not need a workbook of your own to follow along. `eg-fixtures` generates
+one — invented data in the same shape, and everything below runs against it:
+
+```sh
+cargo run --release -p eg-fixtures -- --rows 2000 --out tests/fixtures/demo
+cargo run --release -p eg-cli -- check tests/fixtures/demo/impairment.xlsx
+```
 
 ## Status
 
@@ -1013,6 +1020,44 @@ recall falling back to where word-only search had it.
 ```sh
 cargo run --release -p eg-retrieve --example answers -- corpus/ questions.json --sweep
 ```
+
+### A workbook of our own
+
+Everything above was developed against a workbook that cannot be shared, and
+for a long time the fixtures were calamine's rather than ours. `eg-fixtures`
+writes a fictional municipality's debtor impairment workbook: a long working
+table of filled-down formulas, the small lookup tables it keys into, month
+sheets a 3-D reference spans, and a summary sheet that reads across all of it.
+Same shape, invented data, deterministic from a fixed seed.
+
+The interesting part is where its numbers come from. The generator writes flat
+ODS with formulas and **no values at all**, and LibreOffice computes them on
+conversion — so `eg check` against the fixture compares this evaluator with an
+implementation that shares no code with it. A fixture whose values we supplied
+would agree with us by construction and prove nothing. Two tests hold it:
+every formula agrees, and the *only* refusals are the two the workbook plants
+deliberately — a 3-D reference and an unmodelled function, both refused by name
+rather than guessed.
+
+It found three things in its first hour, which is the argument for having it:
+
+- The schema reader missed every foreign key in any workbook LibreOffice had
+  saved, because ODF spells the exact-match flag `FALSE()` and the reader
+  wanted the bare literal. Fixed here.
+- Read as `.xls`, every cross-sheet reference resolves to the formula's own
+  sheet — `Rates!$A$4:$B$7` arrives as `Debtors!$A$4:$B$7`. SheetJS reads the
+  same bytes correctly, so the file is not at fault.
+- Read as `.ods`, an error cell reads as an empty one, because ODF marks errors
+  with an extension attribute and leaves the string value blank.
+
+The last two are calamine's, are recorded in `docs/upstream-issues.md`, and the
+parity test asserts the ODS gap is still exactly as large as it was — so it
+fails when the defect is fixed, rather than outliving it.
+
+LibreOffice has no XLSB export filter, so the format this project exists for
+cannot be generated. Parity for XLSB still rests on the vendor fixtures, which
+real Excel wrote; anyone with Excel can save the generated `.xlsx` as `.xlsb`
+beside it and the parity test will pick it up.
 
 The most important test is format parity: the same logical workbook read as
 `.xlsx` and as `.xlsb` must produce identical values *and* formulas. It has

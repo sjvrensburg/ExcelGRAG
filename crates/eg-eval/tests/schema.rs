@@ -220,3 +220,40 @@ fn a_workbook_that_looks_nothing_up_has_no_schema_and_no_complaint() {
     assert_eq!(schema.unrecognised, 0);
     assert!(schema.groups > 0, "it did look");
 }
+
+#[test]
+fn the_exact_flag_written_as_a_call_is_still_exact() {
+    // ODF's formula syntax spells the boolean literals as zero-argument calls,
+    // so a workbook LibreOffice saved writes `FALSE()` where Excel writes
+    // `FALSE` — and a great many .xlsx files in the wild were saved by
+    // LibreOffice. `calc.rs` has always evaluated the call; reading the schema
+    // more strictly than the evaluator dropped every declared key in such a
+    // workbook, silently, as a shape it could not read.
+    let wb = book(&[
+        "VLOOKUP(C2,Rates!$A$1:$B$2,2,FALSE())",
+        "VLOOKUP(C3,Rates!$A$1:$B$2,2,FALSE())",
+    ]);
+    let schema = infer_schema(&wb);
+    assert_eq!(schema.lookups.len(), 1, "read, not left unrecognised");
+    assert!(!schema.lookups[0].approximate, "FALSE() is exact");
+    assert_eq!(schema.unrecognised, 0);
+
+    // And `TRUE()` is the banding the bare word would have been.
+    let wb = book(&[
+        "VLOOKUP(C2,Rates!$A$1:$B$2,2,TRUE())",
+        "VLOOKUP(C3,Rates!$A$1:$B$2,2,TRUE())",
+    ]);
+    let schema = infer_schema(&wb);
+    assert_eq!(schema.lookups.len(), 1);
+    assert!(schema.lookups[0].approximate, "TRUE() is a banding");
+
+    // A call that is not a boolean literal is still refused rather than
+    // guessed at: an exactness this cannot read is not an exactness to assume.
+    let wb = book(&[
+        "VLOOKUP(C2,Rates!$A$1:$B$2,2,ISNUMBER(C2))",
+        "VLOOKUP(C3,Rates!$A$1:$B$2,2,ISNUMBER(C3))",
+    ]);
+    let schema = infer_schema(&wb);
+    assert_eq!(schema.lookups.len(), 0, "refused, not guessed");
+    assert_eq!(schema.unrecognised, 1, "and counted as a shape not read");
+}

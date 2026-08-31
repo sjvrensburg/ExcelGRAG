@@ -336,6 +336,19 @@ fn read(
                 // declared key it names was dropped from schema inference
                 // entirely.
                 Some(Expr::Literal(eg_model::CellValue::Empty)) => false,
+                // `FALSE()` rather than `FALSE`. ODF's formula syntax spells
+                // the boolean literals as zero-argument calls, so every
+                // workbook LibreOffice has ever saved writes the exact-match
+                // flag this way — and reading the schema more strictly than
+                // `calc.rs` evaluates it meant such a workbook lost every
+                // declared key it had, silently, to `Unrecognised`.
+                Some(Expr::Call { name, args }) if args.is_empty() => {
+                    match name.to_uppercase().as_str() {
+                        "FALSE" => false,
+                        "TRUE" => true,
+                        _ => return Outcome::Unrecognised,
+                    }
+                }
                 Some(_) => return Outcome::Unrecognised,
             };
             let vertical = call.name == "VLOOKUP";

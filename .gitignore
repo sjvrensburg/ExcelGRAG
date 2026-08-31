@@ -12,3 +12,14 @@
 
 # fastembed's default model cache, if anything ever falls back to it
 .fastembed_cache/
+
+# The demo workbook's flat-ODS source. Regenerable from `eg-fixtures`, which is
+# the actual source of truth, and large enough that committing it beside the
+# converted files would double the fixture for nothing.
+tests/fixtures/demo/*.fods
+
+# A large demo workbook, generated on demand to show what the scale claims rest
+# on. Not committed: it is minutes of LibreOffice and tens of megabytes, and
+# one command reproduces it.
+#   cargo run --release -p eg-fixtures -- --rows 400000 --out demo --formats xlsx
+/demo/

@@ -1,6 +1,6 @@
 # Upstream issues in calamine
 
-Eight defects found in [calamine](https://github.com/tafia/calamine) 0.36.1
+Ten defects found in [calamine](https://github.com/tafia/calamine) 0.36.1
 while building ExcelGRAG.
 
 **Status:** issues 2 and 3 are fixed in a fork at `../calamine`, branch
@@ -16,7 +16,9 @@ recomputing formulas rather than reading them, and sit on their own branches
 `xlsb-external-supbooks`; all three are pushed to the fork but not yet opened
 upstream. Issue 8 was found by a six-way audit of ExcelGRAG's own code rather
 than by parity or recompute, and is committed directly to `excelgrag` (it has
-no independent topic branch) but not yet opened upstream.
+no independent topic branch) but not yet opened upstream. Issues 9 and 10 were found by
+reading the generated demo workbook in more than one format, are in the `.xls`
+and `.ods` readers respectively, and are not yet fixed anywhere.
 
 The workspace patches in an `excelgrag` branch carrying both fixes, since
 `[patch.crates-io]` takes a single source.
@@ -674,3 +676,109 @@ fixture: a headerless, three-row table with a totals row, asserting
 three data rows — reverting the `dims.end` line back to
 `header_row_count` reproduces the original bug and fails it (`data.height()`
 comes back `4`, the totals row counted as data).
+
+
+---
+
+## 9. Every cross-sheet reference in `.xls` resolves to the formula's own sheet
+
+Found by recomputing `tests/fixtures/demo/impairment.xls`, which the generator
+in `crates/eg-fixtures` writes and LibreOffice converts. The same logical
+workbook read as `.xlsx` recomputes with no disagreements at all; read as
+`.xls`, more than a quarter of its formulas disagree.
+
+Every one of them is a lookup into another sheet, and the sheet qualifier has
+been replaced by the sheet the formula is *written on*:
+
+```
+read as .xlsx     =VLOOKUP(D2,Rates!$A$4:$B$7,2,FALSE)
+read as .xls      =VLOOKUP(D2,Debtors!$A$4:$B$7,2,FALSE)
+                               ^^^^^^^ the formula's own sheet
+```
+
+`Debtors!A4:B7` is a real range holding account rows, so the lookup does not
+fail loudly. It returns `#N/A` where the sheet has a rate cached, which is how
+the recompute sweep noticed.
+
+### Verification
+
+The file is not at fault, and neither is LibreOffice's export. SheetJS, read
+through `sheet-oracle`, returns the correct qualifier from the same bytes:
+
+```sh
+node ../sheet-oracle/bin/sheet-oracle.js tests/fixtures/demo/impairment.xls \
+  --sheet Debtors --range H2:I3 --out theirs.json
+# "formula": "VLOOKUP(D2,Rates!$A$4:$B$7,2,FALSE)"
+```
+
+Two independent readers, one file, two different answers — which is the whole
+reason a second reader is part of this project's testing.
+
+### Reproducing
+
+```sh
+cargo run --release -p eg-fixtures -- --rows 40 --out /tmp/demo --formats xlsx,xls
+cargo run --release -p eg-cli -- check /tmp/demo/impairment.xlsx   # agrees
+cargo run --release -p eg-cli -- check /tmp/demo/impairment.xls    # disagrees
+```
+
+### Not yet diagnosed
+
+This resembles issue 7 — external references carrying two indices, only one of
+which was used — closely enough to be worth reading that fix first. It has been
+observed against calamine as this workspace pins it, which is the `excelgrag`
+fork; whether stock 0.36.1 behaves the same has not been checked, and it must be
+before anything is filed. The `.xls` path also loses the 3-D reference
+`SUM(Jan:Mar!B2)`, which arrives unparseable ("sheet qualifier followed by
+nothing nameable") rather than as a 3-D reference the evaluator would refuse by
+name. That may be the same defect or a second one.
+
+Nothing in this repository works around it. `.xls` is the least-used format of
+the five and the demo fixture is committed as `.xlsx` and `.ods`; anyone
+investigating can regenerate the `.xls` with the command above.
+
+
+---
+
+## 10. An ODF error cell reads as an empty cell
+
+Found by the demo workbook's format-parity test: the same cell that holds
+`#DIV/0!` when the workbook is read as `.xlsx` comes back *blank* when it is
+read as `.ods`.
+
+ODF does not have an error value type. LibreOffice writes an error cell as a
+string with nothing in it, and marks it with an attribute from its own
+extension namespace:
+
+```xml
+<table:table-cell table:formula="of:=[.F2]/[.E2]"
+                  office:value-type="string" office:string-value=""
+                  calcext:value-type="error">
+  <text:p>#DIV/0!</text:p>
+</table:table-cell>
+```
+
+calamine reads `office:string-value=""` and yields an empty cell. Both the
+`calcext:value-type="error"` marker and the rendered `#DIV/0!` in `<text:p>` are
+ignored.
+
+### Why it matters here
+
+This is the same silent loss as issue 6, in a different reader. An error is a
+*fact about the workbook* — a formula that cannot be computed, and often the
+most interesting cell on the sheet. Read as a blank it becomes indistinguishable
+from a cell nobody filled in, which is how a column of failures profiles as a
+column of gaps, and how a recompute reports a disagreement against a value the
+sheet never had.
+
+`calcext` is an extension namespace, so a reader can defensibly ignore it — but
+the alternative to reading it is not "no information", it is *wrong*
+information. Yielding the text of `<text:p>` when the string value is empty and
+the extension marker says error would be enough.
+
+### Recorded, not worked around
+
+`crates/eg-ingest/tests/parity.rs` counts the cells lost this way, asserts
+nothing else differs between the two formats, and asserts the count is **not**
+zero — so the day calamine reads these cells, the test fails and this note gets
+deleted rather than outliving the defect it describes.

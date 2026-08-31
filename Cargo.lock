@@ -737,6 +737,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "eg-fixtures"
+version = "0.1.0"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "eg-graph"
 version = "0.1.0"
 dependencies = [
