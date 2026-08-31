@@ -10,6 +10,7 @@ members = [
     "crates/eg-eval",
     "crates/eg-mcp",
     "crates/eg-cli",
+    "crates/eg-fixtures",
 ]
 
 [workspace.package]

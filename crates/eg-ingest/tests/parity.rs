@@ -202,3 +202,93 @@ fn citations_resolve_against_loaded_sheet_names() {
     let parsed = eg_model::parse_a1(&citation).expect("citation must be parseable");
     assert_eq!(parsed.sheet_name.as_deref(), Some(sheet.name.as_str()));
 }
+
+#[test]
+fn the_demo_workbook_reads_the_same_as_xlsx_and_as_ods() {
+    // The vendored fixtures above are calamine's, and they pair xlsx with the
+    // binary formats. This is ours: one logical workbook written by
+    // `eg-fixtures` and converted by LibreOffice, so the two files are the same
+    // spreadsheet by construction rather than by someone remembering to save it
+    // twice. Regenerate both with:
+    //
+    //   cargo run --release -p eg-fixtures -- --rows 2000 --out tests/fixtures/demo
+    //
+    // Formula *text* is not compared. ODS is the one format where it cannot
+    // be: calamine hands back the ODF source verbatim — `of:=VLOOKUP([.D2];…)`,
+    // its own reference syntax and its own argument separator — rather than the
+    // A1 text every other format yields. Whether a cell has a formula at all is
+    // still compared, because a format silently dropping one is the failure
+    // this file exists for.
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/demo");
+    let xlsx = load(dir.join("impairment.xlsx")).expect("load demo xlsx");
+    let ods = load(dir.join("impairment.ods")).expect("load demo ods");
+
+    let mut mismatches = Vec::new();
+    let mut errors_lost = 0usize;
+    let mut compared = 0usize;
+
+    for sheet_a in &xlsx.workbook.sheets {
+        let sheet_b = ods
+            .workbook
+            .sheet_by_name(&sheet_a.name)
+            .expect("the same workbook, so the same sheets");
+        compared += 1;
+
+        let mut coords: Vec<(u32, u16)> = sheet_a
+            .iter()
+            .chain(sheet_b.iter())
+            .map(|(r, _)| (r.row, r.col))
+            .collect();
+        coords.sort_unstable();
+        coords.dedup();
+
+        for (row, col) in coords {
+            let a1 = eg_model::CellRef::new(sheet_a.id, row, col).to_a1();
+            let va = sheet_a.value(row, col);
+            let vb = sheet_b.value(row, col);
+
+            // A known gap, recorded rather than tolerated: ODF marks an error
+            // cell with `calcext:value-type="error"` and leaves
+            // `office:string-value` empty, and calamine reads the empty string.
+            // The `#DIV/0!` this fixture plants therefore arrives as a blank
+            // cell — the same silent loss as issue 6, in the ODS reader. See
+            // `docs/upstream-issues.md`.
+            if matches!(va, eg_model::CellValue::Error(_))
+                && matches!(vb, eg_model::CellValue::Empty)
+            {
+                errors_lost += 1;
+                continue;
+            }
+            if !values_agree(&va, &vb) {
+                mismatches.push(format!("{}!{a1} value: {va:?} vs {vb:?}", sheet_a.name));
+            }
+
+            let fa = sheet_a.get(row, col).and_then(|c| c.formula.as_deref());
+            let fb = sheet_b.get(row, col).and_then(|c| c.formula.as_deref());
+            if fa.is_some() != fb.is_some() {
+                mismatches.push(format!(
+                    "{}!{a1} formula present: {} vs {}",
+                    sheet_a.name,
+                    fa.is_some(),
+                    fb.is_some()
+                ));
+            }
+        }
+    }
+
+    assert_eq!(compared, 7, "every sheet of the demo workbook");
+    assert!(
+        mismatches.is_empty(),
+        "demo: xlsx vs ods: {} mismatches:\n  {}",
+        mismatches.len(),
+        mismatches.join("\n  ")
+    );
+    // Asserted, not merely allowed: the day calamine reads ODF error cells,
+    // this fails and the note above gets deleted rather than quietly outliving
+    // the defect it describes.
+    assert!(
+        errors_lost > 0,
+        "the ODS error-cell gap has closed — delete this allowance and the \
+         upstream note with it"
+    );
+}
