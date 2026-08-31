@@ -142,13 +142,12 @@ const QUESTIONS: &[Question] = &[
     Question {
         ask: "customer",
         want: &["Customer"],
-        // Region detection reads the leftmost column as row labels, so it heads
-        // nothing and gets no column node — see the test at the bottom of this
-        // file. Nothing in the graph is called "Customer", so no amount of
-        // ranking will return it. Asking about the thing a table is *keyed by*
-        // is an ordinary question, and this is the honest record that it does
-        // not work.
-        known_gap: Some("the row-label column gets no node"),
+        // This was a recorded gap for most of the project's life: region
+        // detection reads the leftmost column as row labels, and a row-label
+        // column used to get no node, so nothing in the graph was called
+        // "Customer" and no amount of ranking could return it. It is now
+        // named by its own header — see the test at the bottom of this file.
+        known_gap: None,
     },
     Question {
         ask: "summary",
@@ -297,11 +296,15 @@ fn the_right_node_is_at_or_near_the_top_of_the_ranking() {
 }
 
 #[test]
-fn what_the_graph_has_no_node_for_cannot_be_found() {
-    // The diagnosis behind the known gap above, asserted rather than assumed:
-    // region detection treats the leftmost column as row labels, so it heads
-    // nothing and gets no column node. There is no node named "Customer" for
-    // any amount of ranking work to return.
+fn the_column_a_table_is_keyed_by_has_a_node_of_its_own() {
+    // What a search can return is exactly what the graph has a node for, so
+    // this is the whole of why "customer" above is answerable. It was not, for
+    // most of this project's life: region detection reads the leftmost column
+    // as row labels — correctly, it is not body data — and the header naming
+    // it was then dropped rather than kept, so the column a table is *keyed
+    // by* had no node and could not be found by any ranking. Asking a table
+    // which customer, which account, which region is about as ordinary as
+    // questions get.
     let wb = workbook();
     let built = build(&wb);
     let headers: Vec<String> = built
@@ -315,8 +318,21 @@ fn what_the_graph_has_no_node_for_cannot_be_found() {
         "the body columns are there: {headers:?}"
     );
     assert!(
-        !headers.iter().any(|h| h == "Customer"),
-        "the row-label column is not: {headers:?}"
+        headers.iter().any(|h| h == "Customer"),
+        "and so is the row-label column, named by its own header: {headers:?}"
+    );
+
+    // Still not *data*, which is the distinction the header_cols split exists
+    // to make: `read_table` keeps it out of the body columns.
+    let sheet = wb.sheet(eg_model::SheetId(0)).unwrap();
+    let region = eg_structure::detect_regions(sheet)
+        .into_iter()
+        .find(|r| r.header_cols > 0)
+        .expect("the working sheet has a row-label column");
+    assert_eq!(region.label_headers, vec!["Customer".to_string()]);
+    assert!(
+        !region.headers.iter().any(|h| h == "Customer"),
+        "and it is still not one of the body columns"
     );
 }
 

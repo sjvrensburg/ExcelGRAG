@@ -79,7 +79,10 @@ above it.
   cell styling for any format**, so structural analysis may never depend on
   presentation — only value kinds, blank runs, and formula-shape homogeneity.
 - `eg-structure` — regions (tables/blocks recovered from blank runs and value-kind
-  contrast), formula grouping (formulas normalised to an R1C1 *shape*, so a
+  contrast; a region's leading **row-label columns are named** by
+  `label_headers` and kept out of `headers`, so the column a table is keyed by
+  gets a node without becoming something a caller might total), formula grouping
+  (formulas normalised to an R1C1 *shape*, so a
   filled-down column of hundreds of thousands of cells collapses to one node),
   `read_table` (a region as typed columns, kind by strict majority, rows lazy
   and gap-filled) and

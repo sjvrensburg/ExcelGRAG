@@ -337,6 +337,7 @@ mod tests {
             header_rows: 1,
             header_cols: 1,
             headers: headers.iter().map(|h| h.to_string()).collect(),
+            label_headers: Vec::new(),
             cell_count: 0,
             totals_rows: 0,
         }

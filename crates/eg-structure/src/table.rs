@@ -104,10 +104,17 @@ pub struct Table {
     pub columns: Vec<TableColumn>,
     /// The row-label columns to the left of the body, if the region has any.
     ///
-    /// Kept separate because they are not data: they name the rows. Region
-    /// detection excludes them from `headers`, which is why nothing in the
-    /// graph stands for them — see the retrieval suite's recorded gap.
+    /// Kept separate because they are not data: they name the rows, and a
+    /// caller totalling `columns` must not be handed a column of account
+    /// numbers to add up. They are still *named*, by `label_headers` below —
+    /// the graph gives each one a node under that name, so the column a table
+    /// is keyed by can be searched for like any other.
     pub labels: Option<RangeRef>,
+    /// The headers of those label columns, left to right.
+    ///
+    /// Empty when there are none, and an entry may be empty when a label
+    /// column is unheaded.
+    pub label_headers: Vec<String>,
 }
 
 impl Table {
@@ -231,6 +238,7 @@ pub fn read_table(sheet: &Sheet, region: &Region) -> Option<Table> {
         title: region.title.clone(),
         columns,
         labels,
+        label_headers: region.label_headers.clone(),
     })
 }
 
@@ -346,6 +354,7 @@ mod tests {
             header_rows: 1,
             header_cols: 1,
             headers: vec!["Rate".to_string()],
+            label_headers: Vec::new(),
             cell_count: 9,
             totals_rows: 0,
         };
@@ -370,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn the_row_labels_are_kept_apart_from_the_data() {
+    fn the_row_labels_are_named_but_kept_apart_from_the_data() {
         let sheet = grid(&["Customer Debt", "North 1200", "South 3400"]);
         let table = only_table(&sheet);
         let labels = table.labels.expect("column A labels the rows");
@@ -383,6 +392,10 @@ mod tests {
             !table.columns.iter().any(|c| c.header == "Customer"),
             "and are not a column of it"
         );
+        // Not a body column, and not nameless either: a caller that wants to
+        // say *which* customer needs the header, and the graph needs it to
+        // give the column a node anyone can search for.
+        assert_eq!(table.label_headers, vec!["Customer".to_string()]);
     }
 
     #[test]

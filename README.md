@@ -187,9 +187,11 @@ cargo run --release -p eg-graph --example lifting -- private/book.xlsb
 ## Reading a region as a table
 
 Region detection already recovers the rectangle, the header rows, the row-label
-columns and one header per body column. That is a table definition in all but
-name, and nothing could turn it back into rows: the graph said *where* a table
-was, and a caller wanting what is in it had a rectangle of cells.
+columns — with their own headers, so the column a table is keyed by is named
+rather than anonymous — and one header per body column. That is a table
+definition in all but name, and nothing could turn it back into rows: the graph
+said *where* a table was, and a caller wanting what is in it had a rectangle of
+cells.
 
 `read_table` closes that. A column is a header, the cells beneath it, and a type
 read off those cells — by majority, because there is no formatting to read it
@@ -929,11 +931,19 @@ standard — and, where retrieval is known not to answer it, a recorded gap.
 The gaps are the point of the file. A question dropped for being inconvenient
 is a gap nobody is measuring, so they stay in, still asked and still scored,
 and the suite asserts the misses are **exactly** the recorded ones. A new miss
-fails; so does a recorded gap that starts working and nobody updated. The demo
-workbook currently records one, and it is the same gap the made-up workbook
-found: a table's key column is read as row labels, so it heads nothing, gets no
-node, and no ranking can return it. Asking a table about the column it is keyed
-by is an ordinary question and it does not work.
+fails; so does a recorded gap that starts working and nobody updated.
+
+That second half is not hypothetical. The demo workbook recorded one gap on the
+day it was written — a table's key column had no node, so "account number"
+returned everything except the account column — and fixing it failed both
+suites, which is exactly what they are for. The record is now empty:
+
+| | before | after |
+|---|---|---|
+| hit@1 | 71.4% | 78.6% |
+| hit@5 | 92.9% | 100% |
+| MRR | 0.804 | 0.863 |
+| passage cites the answer | 13 of 14 | 14 of 14 |
 
 The example also takes a question file of your own, against your own corpus,
 which is where the interesting answers are.
@@ -947,13 +957,17 @@ number:
   answers and rescued exactly one the lexical half missed entirely. Context
   recall favoured the fusion, so it was a trade — but it was being made blind.
   See below for what it turned out to be.
-- **A question about the column a table is keyed by cannot be answered.** Region
-  detection reads the leftmost column as row labels, so it heads nothing and
-  gets no node: asking a debtors table about "customer" returns everything
-  except the customer column. The committed suite keeps that question and
-  asserts that the set of unanswered questions is *exactly* the set recorded as
-  known gaps — so it fails if a new one appears, and also if this one starts
-  working and nobody updated the record.
+- **A question about the column a table is keyed by could not be answered.**
+  Region detection reads the leftmost column as row labels — correctly, it is
+  not body data — and then dropped the header naming it, so the column a table
+  is *keyed by* got no node and asking a debtors table about "customer"
+  returned everything except the customer column. It was recorded as a known
+  gap for most of the project's life, on the reasoning that a question dropped
+  for being inconvenient is a gap nobody is measuring. It is fixed: a row-label
+  column is named by its own header and gets a node like any other, while
+  staying out of the body columns, so nothing totals a column of account
+  numbers. Both suites failed on the fix, which is what the "exactly the
+  recorded gaps" assertion is for.
 
 A dozen questions is a baseline, not a verdict.
 

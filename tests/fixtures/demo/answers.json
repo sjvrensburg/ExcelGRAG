@@ -103,7 +103,6 @@
     "want": [
       "Account"
     ],
-    "why": "the column the table is keyed by, which is the ordinary question about any table",
-    "known_gap": "region detection reads the leftmost column as row labels, so it heads nothing and gets no node — there is nothing in the graph called 'Account' for any ranking to return. Asking a table about the column it is keyed by is an ordinary question, and this is the honest record that it does not work."
+    "why": "the column the table is keyed by, which is the ordinary question about any table — and which was a recorded gap until row-label columns were given nodes of their own"
   }
 ]
