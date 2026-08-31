@@ -96,6 +96,10 @@ pub fn index(
     // The model is loaded only if something needs embedding, because loading it
     // is seconds and a re-run with nothing to do should cost nothing.
     let mut embedder: Option<(Embedder, VectorIndex)> = None;
+    // Once, not once per workbook: loading the model is seconds even when it
+    // fails, and a machine that cannot reach it will not reach it on the
+    // second workbook either.
+    let mut no_embedder = lexical_only;
     let hashes: Vec<String> = corpus.entries().map(|(hash, _)| hash.to_string()).collect();
     let (mut lexical_docs, mut embedded) = (0usize, 0usize);
 
@@ -104,7 +108,7 @@ pub fn index(
         // empty on a schema change, so inferring its contents from the vector
         // index would mean silently searching nothing.
         let want_text = reindex || !text.contains(hash).unwrap_or(false);
-        let want_vectors = !lexical_only
+        let want_vectors = !no_embedder
             && (reindex
                 || match &embedder {
                     Some((_, vectors)) => !vectors.contains(hash),
@@ -132,6 +136,7 @@ pub fn index(
                     Ok(pair) => embedder = Some(pair),
                     Err(e) => {
                         println!("  no semantic half ({e}); indexing by word only");
+                        no_embedder = true;
                         continue;
                     }
                 }

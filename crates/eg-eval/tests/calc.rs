@@ -609,3 +609,33 @@ fn operands_that_cancel_at_fifteen_digits_subtract_to_zero() {
     assert_eq!(number("1-0.9"), 0.09999999999999998);
     assert_eq!(number("0.1+0.2"), 0.30000000000000004);
 }
+
+// ---- substitution into a range ----
+
+#[test]
+fn a_substituted_cell_is_read_in_its_place_in_the_range_not_after_it() {
+    // `Main!B3` is empty, so it is absent from the sheet and there is nothing
+    // in the grid walk to swap. Appending it to the end is invisible to SUM and
+    // wrong for CONCAT, which is the whole of what a range's order decides.
+    let wb = book();
+    let mut overrides = eg_eval::Overrides::new();
+    overrides.set(CellRef::new(SheetId(0), 2, 1), CellValue::Text("X".into()));
+
+    let at = CellRef::new(SheetId(0), 0, 5);
+    assert_eq!(
+        eg_eval::evaluate_over(&wb, at, "CONCAT(B1:B3)", &overrides),
+        Ok(CellValue::Text("25X".into())),
+        "B1, B2, then the substituted B3"
+    );
+    assert_eq!(
+        eg_eval::evaluate_over(&wb, at, "CONCAT(A3:C3)", &overrides),
+        Ok(CellValue::Text("textX7".into())),
+        "the substitution sits between the two cells the sheet does have"
+    );
+    // The order-blind aggregate is unmoved either way, which is why this went
+    // unnoticed.
+    assert_eq!(
+        eg_eval::evaluate_over(&wb, at, "SUM(A1:C3)", &overrides),
+        Ok(CellValue::Number(28.0))
+    );
+}

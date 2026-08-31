@@ -842,3 +842,55 @@ fn the_edge_kind_that_reached_a_node_is_recorded() {
         labels(&found)
     );
 }
+
+#[test]
+fn a_regions_children_are_its_columns_before_its_formula_groups() {
+    // A region contains both, and their sizes are not the same quantity: a
+    // column's is its rows, a formula group's is its area. Ranked against each
+    // other, one four-column group outranks every column in the table on a
+    // number that does not mean the same thing — which is what happened when
+    // the corpus started storing the group layer.
+    let wb = Workbook {
+        path: "mixed.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash-mixed".into(),
+        sheets: vec![grid(
+            0,
+            "Mixed",
+            &[
+                // Each formula reads the cell to its left, so all twelve
+                // share one R1C1 shape and merge into a single 4x3 group.
+                "Region Base W X Y Z",
+                "North 10 =B2*2 =C2*2 =D2*2 =E2*2",
+                "South 20 =B3*2 =C3*2 =D3*2 =E3*2",
+                "East 30 =B4*2 =C4*2 =D4*2 =E4*2",
+            ],
+        )],
+        defined_names: Vec::new(),
+        external_links: Vec::new(),
+    };
+    let (_root, corpus) = corpus_of("mixed", &[wb]);
+    let seed = hit_for(&corpus, "hash-mixed", "Base", NodeKind::Column);
+    let found = expand(
+        &corpus,
+        &[seed],
+        &ExpandOptions {
+            children: 2,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let kinds: Vec<NodeKind> = found.workbooks[0]
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.role, Role::Child { .. }))
+        .map(|n| n.kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![NodeKind::Column, NodeKind::Column],
+        "got {:?}",
+        labels(&found)
+    );
+}

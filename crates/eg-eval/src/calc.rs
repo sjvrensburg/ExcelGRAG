@@ -761,20 +761,49 @@ impl<'a> Eval<'a> {
             .and_then(|s| s.used_range())
             .and_then(|used| intersect(range, used));
         let overrides = self.overrides;
-        let stored = clipped
+
+        // A substitution into a cell the sheet leaves empty is not in the grid
+        // to be walked over, and a range that addresses it still reads it. They
+        // are gathered and sorted rather than appended, because they have to
+        // arrive in address order among the stored cells: `SUM` does not care
+        // what order it adds in, `CONCAT` cares entirely.
+        //
+        // Skipped outright when there is nothing substituted, which is every
+        // read outside a what-if — `in_range` walks the whole overlay, and
+        // during a walk that overlay holds every cell that has moved so far.
+        let mut extra: Vec<(CellRef, &CellValue)> = Vec::new();
+        if !overrides.is_empty() {
+            extra.extend(
+                overrides
+                    .in_range(range)
+                    .filter(|(at, _)| sheet.map(|s| s.get_ref(*at).is_none()).unwrap_or(true)),
+            );
+            extra.sort_unstable_by_key(|(at, _)| (at.row, at.col));
+        }
+
+        let mut stored = clipped
             .into_iter()
             .flat_map(move |r| sheet.expect("clipped implies a sheet").iter_range(r))
-            .map(move |(at, cell)| match overrides.get(at) {
+            .peekable();
+        let mut next = 0usize;
+        std::iter::from_fn(move || {
+            let ahead = extra.get(next).map(|(at, _)| (at.row, at.col));
+            let take_extra = match (stored.peek(), ahead) {
+                (Some((at, _)), Some(pos)) => (at.row, at.col) > pos,
+                (None, Some(_)) => true,
+                (_, None) => false,
+            };
+            if take_extra {
+                let value = extra[next].1;
+                next += 1;
+                return Some(Cow::Borrowed(value));
+            }
+            let (at, cell) = stored.next()?;
+            Some(match overrides.get(at) {
                 Some(value) => Cow::Borrowed(value),
                 None => Cow::Borrowed(&cell.value),
-            });
-        // A substitution into a cell the sheet leaves empty is not in the grid
-        // to be walked over, and a range that addresses it still reads it.
-        let substituted = overrides
-            .in_range(range)
-            .filter(move |(at, _)| sheet.map(|s| s.get_ref(*at).is_none()).unwrap_or(true))
-            .map(|(_, value)| Cow::Borrowed(value));
-        stored.chain(substituted)
+            })
+        })
     }
 
     /// Every value an argument list contributes, flagged with whether it came

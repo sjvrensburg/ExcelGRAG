@@ -13,9 +13,12 @@
 //!   the chain. Two levels on the reference workbook is two passes over 6.79
 //!   million formulas.
 //! - **Order.** A cell must not be computed before the cells it reads, so the
-//!   affected set is sorted by its own dependencies. What cannot be ordered is
-//!   a cycle, and a cycle is reported rather than iterated to a fixed point —
-//!   Excel's iterative calculation is a setting this cannot see.
+//!   affected set is sorted by its own dependencies. A level is a *shortest*
+//!   distance from the change, not a topological rank, so a cell reached early
+//!   can read one that only moves later: that cell is judged again when its
+//!   input moves, and holds whatever the last visit said. What cannot be
+//!   ordered is a cycle, and a cycle is reported rather than iterated to a
+//!   fixed point — Excel's iterative calculation is a setting this cannot see.
 //! - **Honesty about what it could not do.** A cell whose formula this crate
 //!   does not model has no new value, and neither does anything downstream of
 //!   it. Those are [`Blocked`], not "unchanged": quietly leaving the stored
@@ -253,12 +256,22 @@ pub fn what_if(workbook: &Workbook, changes: &[Change], opts: &WhatIfOptions) ->
         }
     }
     frontier.seal();
-    // Cells already spoken for: the changed ones, and everything given a
-    // verdict in an earlier level.
-    let mut seen: FxHashSet<CellRef> = FxHashSet::default();
+    // A substituted cell is never recomputed: the value typed into it stands,
+    // whatever reads it.
+    let mut substituted: FxHashSet<CellRef> = FxHashSet::default();
     for change in changes {
-        seen.insert(change.cell);
+        substituted.insert(change.cell);
     }
+    // The verdict each cell currently holds. A cell is *not* retired once it
+    // has one: the level a cell is first reached at is its shortest distance
+    // from the change, and a cell can read something further down a longer
+    // path — `D=A+C` where `C=B` and `B=A` is reached at level 1 and reads a
+    // cell that only moves at level 2. So a cell is revisited whenever an input
+    // of its moves, and its verdict is whatever the last visit said.
+    let mut status: FxHashMap<CellRef, Status> = FxHashMap::default();
+    // Where a moved cell sits in the returned list, so a later visit corrects
+    // the entry rather than adding a second one for the same cell.
+    let mut listed: FxHashMap<CellRef, usize> = FxHashMap::default();
     // Cells with no answer, so a dependent of one can be told it has none
     // either rather than being handed a stale value.
     let mut blocked: FxHashMap<CellRef, String> = FxHashMap::default();
@@ -268,7 +281,7 @@ pub fn what_if(workbook: &Workbook, changes: &[Change], opts: &WhatIfOptions) ->
         if frontier.is_empty() {
             break;
         }
-        let found = readers_of(workbook, &sheets, &frontier, &seen, &mut report);
+        let found = readers_of(workbook, &sheets, &frontier, &substituted, &mut report);
         report.scans += 1;
         if found.is_empty() {
             break;
@@ -279,25 +292,28 @@ pub fn what_if(workbook: &Workbook, changes: &[Change], opts: &WhatIfOptions) ->
         // one also reads the other. Ordering by dependency inside the level is
         // what keeps a cell from being computed before its input.
         let ordered = order_within(workbook, &sheets, &found);
+        // What the next scan looks for: cells whose value moved here, and cells
+        // that lost their answer here. Both change what reads them.
         let mut moved_here = CellSet::default();
-        let mut moved_cells: FxHashSet<CellRef> = FxHashSet::default();
-        for at in &found {
-            seen.insert(*at);
-        }
 
         for step in ordered {
             let (at, cyclic) = step;
+            // A cell with no answer keeps none: nothing a later level can do
+            // gives it one, and re-reporting it would count it twice.
+            if matches!(status.get(&at), Some(Status::Blocked)) {
+                continue;
+            }
             let cell = match workbook.sheet(at.sheet).and_then(|s| s.get_ref(at)) {
                 Some(c) => c,
                 None => continue,
             };
             let formula = cell.formula.clone().unwrap_or_default();
-            report.affected += 1;
 
             if cyclic {
+                status.insert(at, Status::Blocked);
+                moved_here.insert(at);
                 record_blocked(
                     &mut impact,
-                    &mut report,
                     &mut reasons,
                     &mut blocked,
                     opts,
@@ -310,9 +326,10 @@ pub fn what_if(workbook: &Workbook, changes: &[Change], opts: &WhatIfOptions) ->
             }
             // A cell reading one this could not answer has no answer either.
             if let Some(cause) = blocking_input(&sheets, at, &formula, &blocked) {
+                status.insert(at, Status::Blocked);
+                moved_here.insert(at);
                 record_blocked(
                     &mut impact,
-                    &mut report,
                     &mut reasons,
                     &mut blocked,
                     opts,
@@ -328,37 +345,53 @@ pub fn what_if(workbook: &Workbook, changes: &[Change], opts: &WhatIfOptions) ->
                 continue;
             };
             match after.outcome {
-                Outcome::Agrees(_) => report.unchanged += 1,
+                Outcome::Agrees(value) => {
+                    // A cell that had moved and now recomputes to what the
+                    // workbook stores has stopped moving; the override goes
+                    // back to the stored value so nothing downstream reads the
+                    // one it had in between.
+                    overrides.set(at, value);
+                    status.insert(at, Status::Unchanged);
+                }
                 Outcome::Differs { computed, stored } => {
-                    report.moved += 1;
                     overrides.set(at, computed.clone());
                     moved_here.insert(at);
-                    moved_cells.insert(at);
-                    if impact.moved.len() < opts.limit {
-                        // Whether this cell's own arithmetic already disagreed
-                        // with the workbook is a different fact from whether
-                        // the change moved it, and mixing the two would report
-                        // a movement that was there before the question.
-                        let was_stale = crate::calc::recompute(workbook, at)
-                            .map(|r| !r.outcome.agrees())
-                            .unwrap_or(false);
-                        impact.moved.push(Moved {
-                            cell: at,
-                            a1: after.a1,
-                            formula: after.formula,
-                            before: stored,
-                            after: computed,
-                            level,
-                            was_stale,
-                        });
-                    } else {
-                        report.moved_not_listed += 1;
+                    status.insert(at, Status::Moved);
+                    match listed.get(&at) {
+                        // Reached again down a longer path: the same cell, a
+                        // later value.
+                        Some(&i) => {
+                            impact.moved[i].after = computed;
+                            impact.moved[i].level = level;
+                        }
+                        None if impact.moved.len() < opts.limit => {
+                            // Whether this cell's own arithmetic already
+                            // disagreed with the workbook is a different fact
+                            // from whether the change moved it, and mixing the
+                            // two would report a movement that was there before
+                            // the question.
+                            let was_stale = crate::calc::recompute(workbook, at)
+                                .map(|r| !r.outcome.agrees())
+                                .unwrap_or(false);
+                            listed.insert(at, impact.moved.len());
+                            impact.moved.push(Moved {
+                                cell: at,
+                                a1: after.a1,
+                                formula: after.formula,
+                                before: stored,
+                                after: computed,
+                                level,
+                                was_stale,
+                            });
+                        }
+                        None => {}
                     }
                 }
                 Outcome::Unsupported(reason) => {
+                    status.insert(at, Status::Blocked);
+                    moved_here.insert(at);
                     record_blocked(
                         &mut impact,
-                        &mut report,
                         &mut reasons,
                         &mut blocked,
                         opts,
@@ -371,17 +404,9 @@ pub fn what_if(workbook: &Workbook, changes: &[Change], opts: &WhatIfOptions) ->
             }
         }
 
-        if seen.len() >= opts.max_cells {
+        if status.len() >= opts.max_cells {
             report.stopped = Some(Stopped::Cells);
             break;
-        }
-        // A blocked cell has no value, so its dependents cannot be recomputed —
-        // but they must still be visited to be told so, which is why the
-        // blocked cells travel in the frontier alongside the moved ones.
-        for at in blocked.keys() {
-            if !moved_cells.contains(at) && found.contains(at) {
-                moved_here.insert(*at);
-            }
         }
         moved_here.seal();
         frontier = moved_here;
@@ -394,6 +419,22 @@ pub fn what_if(workbook: &Workbook, changes: &[Change], opts: &WhatIfOptions) ->
         report.stopped = Some(Stopped::Levels);
     }
 
+    // The counts are per cell and not per visit: a cell reached twice is one
+    // affected cell holding whatever verdict its last visit gave it.
+    report.affected = status.len() as u64;
+    for verdict in status.values() {
+        match verdict {
+            Status::Moved => report.moved += 1,
+            Status::Unchanged => report.unchanged += 1,
+            Status::Blocked => report.blocked += 1,
+        }
+    }
+    // A cell listed as moved that a later visit settled is no longer one.
+    impact
+        .moved
+        .retain(|m| matches!(status.get(&m.cell), Some(Status::Moved)));
+    report.moved_not_listed = report.moved - impact.moved.len() as u64;
+
     let mut blocked_reasons: Vec<(String, u64)> = reasons.into_iter().collect();
     blocked_reasons.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     report.blocked_reasons = blocked_reasons;
@@ -401,10 +442,18 @@ pub fn what_if(workbook: &Workbook, changes: &[Change], opts: &WhatIfOptions) ->
     impact
 }
 
+/// The verdict a cell currently holds. Not final until the walk ends: a cell
+/// reached again down a longer path is judged again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Status {
+    Moved,
+    Unchanged,
+    Blocked,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn record_blocked(
     impact: &mut Impact,
-    report: &mut ImpactReport,
     reasons: &mut FxHashMap<String, u64>,
     blocked: &mut FxHashMap<CellRef, String>,
     opts: &WhatIfOptions,
@@ -413,7 +462,6 @@ fn record_blocked(
     formula: String,
     reason: Blocked,
 ) {
-    report.blocked += 1;
     *reasons.entry(reason.key()).or_default() += 1;
     blocked.insert(at, a1.clone());
     if impact.unanswered.len() < opts.limit {
@@ -440,6 +488,15 @@ fn blocking_input(
     scan_references_into(formula, &mut spans);
     for span in &spans {
         if let crate::trace::Target::Cells(range) = resolve(at, span, formula, sheets).target {
+            // The overwhelmingly common reference is one cell, and answering
+            // that by hash keeps a workbook with many blocked cells from
+            // costing every one of them per reference of every formula.
+            if range.cell_count() == 1 {
+                if let Some(a1) = blocked.get(&range.top_left()) {
+                    return Some(a1.clone());
+                }
+                continue;
+            }
             for (cell, a1) in blocked {
                 if overlaps(RangeRef::single(*cell), range) {
                     return Some(a1.clone());
@@ -450,13 +507,16 @@ fn blocking_input(
     None
 }
 
-/// The formula cells reading anything in `frontier`, excluding those already
-/// given a verdict. One pass over every formula in the workbook.
+/// The formula cells reading anything in `frontier`, excluding the substituted
+/// ones, whose typed value stands. One pass over every formula in the workbook.
+///
+/// A cell already given a verdict is *not* excluded: it is here because an
+/// input of its has just moved, which is exactly the reason to judge it again.
 fn readers_of(
     workbook: &Workbook,
     sheets: &FxHashMap<String, SheetId>,
     frontier: &CellSet,
-    seen: &FxHashSet<CellRef>,
+    substituted: &FxHashSet<CellRef>,
     report: &mut ImpactReport,
 ) -> Vec<CellRef> {
     let mut out = Vec::new();
@@ -467,7 +527,7 @@ fn readers_of(
                 continue;
             };
             report.formulas_scanned += 1;
-            if seen.contains(&at) {
+            if substituted.contains(&at) {
                 continue;
             }
             scan_references_into(formula, &mut spans);
@@ -489,9 +549,10 @@ fn readers_of(
 /// Order one level's cells so that none is computed before a cell it reads,
 /// and flag the ones that cannot be ordered at all.
 ///
-/// Only edges *within the level* matter: everything from an earlier level
-/// already has its value, and everything from a later one does not read this
-/// cell or it would be in this level.
+/// Only edges *within the level* are ordered here. Everything from an earlier
+/// level already has a value; a cell that reads one which moves at a *later*
+/// level is not ordered but revisited, because a level is a shortest distance
+/// from the change and not a topological rank.
 fn order_within(
     workbook: &Workbook,
     sheets: &FxHashMap<String, SheetId>,
