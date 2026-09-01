@@ -1069,16 +1069,25 @@ The interesting part is where its numbers come from. The generator writes flat
 ODS with formulas and **no values at all**, and LibreOffice computes them on
 conversion — so `eg check` against the fixture compares this evaluator with an
 implementation that shares no code with it. A fixture whose values we supplied
-would agree with us by construction and prove nothing. Two tests hold it:
-every formula agrees, and the *only* refusals are the two the workbook plants
+would agree with us by construction and prove nothing. Three tests hold it:
+every formula agrees, the *only* refusals are the two the workbook plants
 deliberately — a 3-D reference and an unmodelled function, both refused by name
-rather than guessed.
+rather than guessed — and the same sweep over the `.ods` refuses the same two.
 
-It found three things in its first hour, which is the argument for having it:
+It found three things in its first hour, and a fourth once the graph was
+measured against it, which is the argument for having it:
 
 - The schema reader missed every foreign key in any workbook LibreOffice had
   saved, because ODF spells the exact-match flag `FALSE()` and the reader
   wanted the bare literal. Fixed here.
+- Read as `.ods`, the workbook had no dependency graph at all. calamine hands
+  back OpenFormula rather than A1 — `of:=VLOOKUP([.D2];[Rates.$A$4:.$B$7];2)`
+  — and nothing past the reader speaks that. It did not fail loudly: the
+  reference scanner simply found nothing, so the graph had zero dependency
+  edges where the `.xlsx` had nineteen, every filled-down column became two
+  thousand formula groups instead of one, and the evaluator refused all
+  fourteen thousand cells with a parse error. Fixed here, by translating at
+  the reader, so that past `eg-ingest` one formula syntax exists and it is A1.
 - Read as `.xls`, every cross-sheet reference names the *wrong* sheet — on one
   sheet, two of them come back swapped — and a 3-D reference decodes to a
   column past Excel's last. SheetJS reads the same bytes correctly, so the file
@@ -1101,7 +1110,12 @@ The most important test is format parity: the same logical workbook read as
 already caught three real bugs — see `docs/upstream-issues.md`.
 
 Fixtures live in `tests/fixtures/vendor` and were authored by real Excel, because
-no open-source tool can write XLSB.
+no open-source tool can write XLSB. The demo workbook adds a pair the project
+owns: `.xlsx` and `.ods` from a single generator run, so they are the same
+spreadsheet by construction rather than by someone remembering to save it
+twice. That pair is what holds the ODF translation honest — the A1 it must
+produce is exactly the A1 LibreOffice wrote into the other file, compared cell
+for cell across every formula.
 
 Two further checks stand behind the layers above the reader: the graph's lifted
 edges are re-derived from the cells and compared, in [Checking the lifted edges

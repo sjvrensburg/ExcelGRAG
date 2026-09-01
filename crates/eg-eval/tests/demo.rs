@@ -21,10 +21,17 @@
 
 use std::path::PathBuf;
 
-use eg_eval::check;
+use eg_eval::{check, Outcome};
+use eg_model::CellValue;
 
 fn demo() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/demo/impairment.xlsx")
+    fixture("xlsx")
+}
+
+fn fixture(extension: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/demo")
+        .join(format!("impairment.{extension}"))
 }
 
 #[test]
@@ -73,4 +80,65 @@ fn the_only_refusals_are_the_two_the_fixture_plants() {
         "the fixture's refusals have changed"
     );
     assert_eq!(report.unsupported, 2);
+}
+
+#[test]
+fn the_same_workbook_as_ods_recomputes_to_the_same_answers() {
+    // The same spreadsheet, written by the same generator and converted by the
+    // same LibreOffice run, so any difference here is the *reader's*, not the
+    // workbook's. It is worth sweeping separately because ODS is the one format
+    // whose formulas do not arrive in A1: calamine hands back OpenFormula, and
+    // `eg_ingest::odf` translates it. Before that translation this sweep
+    // refused all 14,010 formulas — a total failure that looked, from the
+    // outside, like a workbook nothing could be said about.
+    let ods = eg_ingest::load(fixture("ods")).expect("the demo fixture is committed");
+    let xlsx = eg_ingest::load(demo()).expect("the demo fixture is committed");
+    // A limit high enough to collect every disagreement, since the assertion
+    // below is about all of them and not a sample.
+    let (disagreements, report) = check(&ods.workbook, None, 1000);
+    let (_, from_xlsx) = check(&xlsx.workbook, None, 0);
+
+    assert_eq!(report.formulas, from_xlsx.formulas);
+    let mut reasons = report.reasons.clone();
+    let mut expected = from_xlsx.reasons.clone();
+    reasons.sort();
+    expected.sort();
+    assert_eq!(
+        reasons, expected,
+        "ODS refuses different formulas from xlsx"
+    );
+
+    // Every remaining disagreement is one defect, recorded rather than
+    // tolerated: ODF marks an error cell with `calcext:value-type="error"` and
+    // an empty `office:string-value`, and calamine reads the empty string, so
+    // the `#DIV/0!` this fixture plants arrives as a blank. The evaluator is
+    // right and the stored value is missing — which is exactly the shape a
+    // reader defect takes, and why `eg check` finds them.
+    let unexplained: Vec<&str> = disagreements
+        .iter()
+        .filter(|d| {
+            !matches!(
+                &d.outcome,
+                Outcome::Differs {
+                    computed: CellValue::Error(_),
+                    stored: CellValue::Empty | CellValue::Text(_),
+                }
+            )
+        })
+        .map(|d| d.a1.as_str())
+        .collect();
+    assert!(
+        unexplained.is_empty(),
+        "ODS disagrees for a reason other than the error-cell gap: {unexplained:?}"
+    );
+    assert_eq!(
+        disagreements.len() as u64,
+        report.differed,
+        "the limit was too low to see every disagreement"
+    );
+    assert!(
+        report.differed > 0,
+        "the ODS error-cell gap has closed — this workbook plants a #DIV/0! and \
+         calamine now reads it, so delete the allowance and issue 10 with it"
+    );
 }
