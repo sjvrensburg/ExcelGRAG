@@ -235,6 +235,16 @@ above it.
   take `--redact-values`). The asymmetry is deliberate: example output ends up in
   commit messages and READMEs.
 
+## Licensing
+
+`MIT OR Apache-2.0`, declared in `[workspace.package]` and carried by
+`LICENSE-MIT` and `LICENSE-APACHE`. `THIRD-PARTY.md` is generated —
+`cargo about generate about.hbs -o THIRD-PARTY.md` — and `about.toml`'s
+`accepted` list is a policy: a dependency whose licence is not on it fails the
+run. Every licence on that list is permissive; adding a copyleft one to get a
+green build would be the wrong fix. Regenerate the notice when dependencies
+move.
+
 ## The calamine fork
 
 `[patch.crates-io]` in the workspace `Cargo.toml` points calamine at
