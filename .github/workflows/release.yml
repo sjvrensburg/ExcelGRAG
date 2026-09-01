@@ -1,0 +1,169 @@
+# Builds the `eg` and `eg-mcp` binaries for Linux and Windows and attaches them
+# to a GitHub Release.
+#
+# Push a tag to publish:
+#
+#     git tag -a v0.1.0 -m 'v0.1.0' && git push origin v0.1.0
+#
+# Or run it from the Actions tab to build both platforms without publishing
+# anything, which is how to find out whether a change still builds on Windows
+# without spending a version number to do it.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Needed only by the publish job, which creates the release and uploads to it.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # A failed build is more useful than a fast one here.
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Both platforms report, so one failing does not hide the other's result.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            archive: tar.gz
+          - name: windows-x86_64
+            os: windows-latest
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Stable, not the workspace's `rust-version` — that field is the floor a
+      # consumer must clear (1.85), not the compiler a release should be built
+      # with.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          # `Cargo.lock` pins the calamine fork by commit, so the key follows it.
+          key: ${{ matrix.name }}
+
+      # `Embedder::new` downloads bge-small-en-v1.5 (~130 MB) on first use, and
+      # one test exercises it. Cached so a release is not at the mercy of a
+      # model host, and keyed by the model so a change to it misses the cache
+      # rather than testing against the old one.
+      - name: Cache the embedding model
+        uses: actions/cache@v4
+        with:
+          path: model-cache
+          key: eg-model-bge-small-en-v1.5-${{ matrix.name }}
+
+      # In release mode, so this compiles the artifacts the build step then
+      # reuses rather than paying for a second, debug-profile build of
+      # everything.
+      - name: Test
+        env:
+          EG_MODEL_CACHE: model-cache
+        run: cargo test --workspace --release
+
+      - name: Build
+        run: cargo build --release -p eg-cli -p eg-mcp
+
+      # Licences ship *in* the archive: Apache-2.0 §4(a) asks that recipients
+      # get a copy, and someone who downloads a binary is a recipient who will
+      # never see the repository.
+      - name: Stage the archive
+        shell: bash
+        run: |
+          staging="excelgrag-${{ matrix.name }}"
+          mkdir -p "$staging"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp target/release/eg.exe target/release/eg-mcp.exe "$staging/"
+            # `ort` copies the ONNX Runtime DLLs beside the binary when it does
+            # not link them statically. Whether it does is a build-time
+            # decision, so take them if they are there and do not fail if not.
+            cp target/release/*.dll "$staging/" 2>/dev/null || true
+          else
+            cp target/release/eg target/release/eg-mcp "$staging/"
+          fi
+          cp README.md LICENSE-MIT LICENSE-APACHE THIRD-PARTY.md "$staging/"
+
+      - name: Archive (tar.gz)
+        if: runner.os != 'Windows'
+        run: tar czf "excelgrag-${{ matrix.name }}.tar.gz" "excelgrag-${{ matrix.name }}"
+
+      - name: Archive (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "excelgrag-${{ matrix.name }}" -DestinationPath "excelgrag-${{ matrix.name }}.zip"
+
+      - name: Checksum
+        shell: bash
+        run: |
+          f="excelgrag-${{ matrix.name }}.${{ matrix.archive }}"
+          if command -v sha256sum >/dev/null; then sha256sum "$f" > "$f.sha256"
+          else shasum -a 256 "$f" > "$f.sha256"; fi
+          cat "$f.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: excelgrag-${{ matrix.name }}
+          path: |
+            excelgrag-${{ matrix.name }}.${{ matrix.archive }}
+            excelgrag-${{ matrix.name }}.${{ matrix.archive }}.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    # Only a tag publishes. A manual run builds both platforms and stops, which
+    # is the point of being able to trigger it by hand.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # Written to a file rather than passed inline: a heredoc inside a YAML
+      # block scalar depends on two levels of indentation agreeing, and it is
+      # not worth finding out that they did not while cutting a release.
+      - name: Write the release notes
+        run: |
+          cat > notes.md <<'NOTES'
+          Binaries for Linux (x86_64, glibc 2.35 and newer) and Windows
+          (x86_64). Each archive holds `eg`, `eg-mcp`, the README and the
+          licences.
+
+          `eg` carries no runtime dependencies: ONNX Runtime is linked in, and
+          the embedding model is downloaded on first use to
+          `~/.cache/excelgrag/models` (`EG_MODEL_CACHE` overrides the location,
+          and `--lexical-only` skips it entirely).
+
+          Verify a download against the `.sha256` file beside it.
+          NOTES
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --notes-file notes.md \
+            --generate-notes \
+            artifacts/*
