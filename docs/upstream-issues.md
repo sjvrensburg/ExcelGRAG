@@ -13,13 +13,21 @@ building the graph, and is submitted separately as
 not belong on a branch already under review. Issues 5, 6 and 7 were found later still, by
 recomputing formulas rather than reading them, and sit on their own branches
 `xlsb-relative-columns`, `xlsb-formula-error-cells` and
-`xlsb-external-supbooks`; all three are pushed to the fork but not yet opened
-upstream. Issue 8 was found by a six-way audit of ExcelGRAG's own code rather
-than by parity or recompute, and is committed directly to `excelgrag` (it has
-no independent topic branch) but not yet opened upstream. Issues 9 and 10 were found by
-reading the generated demo workbook in more than one format, are in the `.xls`
-and `.ods` readers respectively, and are confirmed present in stock 0.36.1 —
-neither is the fork's doing. Neither is fixed anywhere yet.
+`xlsb-external-supbooks`, submitted as
+[#715](https://github.com/tafia/calamine/pull/715),
+[#716](https://github.com/tafia/calamine/pull/716) and
+[#717](https://github.com/tafia/calamine/pull/717). Issue 8 was found by a
+six-way audit of ExcelGRAG's own code rather than by parity or recompute, and
+is on `xlsx-table-totals-row`, submitted as
+[#718](https://github.com/tafia/calamine/pull/718). Issues 9 and 10 were found
+by reading the generated demo workbook in more than one format, are in the
+`.xls` and `.ods` readers respectively, and are confirmed present in stock
+0.36.1 — neither is the fork's doing. Neither is fixed anywhere yet; they are
+reported as [#719](https://github.com/tafia/calamine/issues/719) and
+[#720](https://github.com/tafia/calamine/issues/720), each with a reproduction
+against the committed demo fixture.
+
+Every submission discloses that it was written by AI.
 
 The workspace patches in an `excelgrag` branch carrying both fixes, since
 `[patch.crates-io]` takes a single source.
@@ -379,7 +387,8 @@ about the output looked wrong.
 **Affects:** `.xlsb`. Pre-existing upstream, in code untouched by #712.
 
 **Fixed** in the fork on branch `xlsb-relative-columns`, branched from `master`
-and independent of #712 and #713. Not yet opened upstream.
+and independent of #712 and #713. Submitted as
+[#715](https://github.com/tafia/calamine/pull/715).
 
 An `RgceLoc` column field is 14 bits of column and two of relativity. **Both
 halves of that sentence were being read wrongly**, and the branch fixes them in
@@ -494,7 +503,8 @@ next defect.
 **Affects:** `.xlsb`. Pre-existing upstream.
 
 **Fixed** in the fork on branch `xlsb-formula-error-cells`, branched from
-`master` and independent of every other branch. Not yet opened upstream.
+`master` and independent of every other branch. Submitted as
+[#716](https://github.com/tafia/calamine/pull/716).
 
 `next_cell` pairs each literal record with its formula counterpart:
 `BrtCellBool` with `BrtFmlaBool`, `BrtCellReal` with `BrtFmlaNum`, `BrtCellSt`
@@ -541,7 +551,8 @@ operands are equal to 15 significant digits to zero, and `eg-eval` returned the
 **Affects:** `.xlsb`. Pre-existing upstream.
 
 **Fixed** in the fork on branch `xlsb-external-supbooks`, branched from `master`
-and independent of every other branch. Not yet opened upstream.
+and independent of every other branch. Submitted as
+[#717](https://github.com/tafia/calamine/pull/717).
 
 An `Xti` carries two indices: a supporting book, and a tab within *that* book.
 `BrtExternSheet` used only the second:
@@ -619,8 +630,9 @@ open — three honest gaps, no decoding failures.
 
 **Affects:** `.xlsx`. Pre-existing upstream, and a missing feature alongside it.
 
-**Fixed** in the fork, committed directly to `excelgrag`. Not yet opened
-upstream.
+**Fixed** in the fork on branch `xlsx-table-totals-row`, cherry-picked out of
+`excelgrag`. Submitted as
+[#718](https://github.com/tafia/calamine/pull/718).
 
 Two related problems in the same code path, `Xlsx::read_tables()`
 (`src/xlsx/mod.rs`):
@@ -682,6 +694,9 @@ comes back `4`, the totals row counted as data).
 ---
 
 ## 9. `.xls` cross-sheet references name the wrong sheet
+
+**Reported as [#719](https://github.com/tafia/calamine/issues/719)**, with a
+reproduction anyone can run against the committed demo fixture.
 
 Found by recomputing the generated demo workbook (`crates/eg-fixtures`). Read as
 `.xlsx` it recomputes with no disagreements at all; read as `.xls`, more than a
@@ -782,6 +797,9 @@ of passing vacuously and outliving the defect.
 Nothing in this repository works around it.
 
 ## 10. An ODF error cell reads as an empty cell
+
+**Reported as [#720](https://github.com/tafia/calamine/issues/720)**, with a
+reproduction anyone can run against the committed demo fixture.
 
 Found by the demo workbook's format-parity test: the same cell that holds
 `#DIV/0!` when the workbook is read as `.xlsx` comes back *blank* when it is
