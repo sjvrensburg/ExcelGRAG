@@ -267,6 +267,7 @@ fn the_walk_can_be_stopped_short_and_says_so() {
         },
     );
     assert_eq!(tight.report.stopped, Some(Stopped::Cells));
+    assert_eq!(tight.report.affected, 1, "the ceiling is never overshot");
 }
 
 #[test]

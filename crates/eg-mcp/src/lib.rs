@@ -64,8 +64,20 @@ fn dispatch_line(server: &mut Server, line: &str) -> Option<rpc::Response> {
     // is what marks the message as a notification, which a client sends
     // expecting no reply even when it turns out malformed.
     let id = value.get("id").cloned();
+    if let Err(message) = validate_envelope(&value) {
+        return Some(match id {
+            Some(id) => rpc::Response::err(id, rpc::code::INVALID_REQUEST, message),
+            None => rpc::Response::anonymous_err(rpc::code::INVALID_REQUEST, message),
+        });
+    }
     match serde_json::from_value::<rpc::Request>(value) {
-        Ok(request) => server.handle(request),
+        Ok(mut request) => {
+            // `Option<Value>` normally collapses an explicit JSON null into
+            // `None`. JSON-RPC distinguishes that request id from an absent
+            // id (a notification), so restore presence after deserialisation.
+            request.id = id;
+            server.handle(request)
+        }
         Err(e) => id.map(|id| {
             rpc::Response::err(
                 id,
@@ -74,6 +86,29 @@ fn dispatch_line(server: &mut Server, line: &str) -> Option<rpc::Response> {
             )
         }),
     }
+}
+
+fn validate_envelope(value: &serde_json::Value) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "a JSON-RPC request must be an object".to_string())?;
+    if object.get("jsonrpc").and_then(serde_json::Value::as_str) != Some("2.0") {
+        return Err("jsonrpc must be exactly \"2.0\"".to_string());
+    }
+    if let Some(id) = object.get("id") {
+        if !matches!(
+            id,
+            serde_json::Value::Null | serde_json::Value::String(_) | serde_json::Value::Number(_)
+        ) {
+            return Err("id must be a string, number, or null".to_string());
+        }
+    }
+    if let Some(params) = object.get("params") {
+        if !params.is_object() && !params.is_array() {
+            return Err("params must be an object or array".to_string());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -132,5 +167,34 @@ mod tests {
             .expect("answered");
         assert_eq!(response.id, serde_json::json!(1));
         assert!(response.result.is_some());
+    }
+
+    #[test]
+    fn an_explicit_null_id_is_answered_but_an_absent_id_is_not() {
+        let (mut server, _dir) = server();
+        let response = dispatch_line(
+            &mut server,
+            r#"{"jsonrpc":"2.0","id":null,"method":"ping"}"#,
+        )
+        .expect("null is an id, not an absent id");
+        assert_eq!(response.id, Value::Null);
+        assert!(dispatch_line(&mut server, r#"{"jsonrpc":"2.0","method":"ping"}"#).is_none());
+    }
+
+    #[test]
+    fn invalid_json_rpc_envelopes_are_refused() {
+        let (mut server, _dir) = server();
+        for line in [
+            r#"{"id":1,"method":"ping"}"#,
+            r#"{"jsonrpc":"1.0","id":1,"method":"ping"}"#,
+            r#"{"jsonrpc":"2.0","id":{},"method":"ping"}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":3}"#,
+        ] {
+            let response = dispatch_line(&mut server, line).expect("a request is answered");
+            assert_eq!(
+                response.error.expect("invalid request").code,
+                rpc::code::INVALID_REQUEST
+            );
+        }
     }
 }

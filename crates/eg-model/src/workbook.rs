@@ -130,7 +130,13 @@ impl Sheet {
     /// Insert a cell, growing the cached used-range. Vacant cells are dropped.
     pub fn set(&mut self, row: u32, col: u16, cell: Cell) {
         if cell.is_vacant() && cell.format == Default::default() {
-            self.cells.remove(&(row, col));
+            if self.cells.remove(&(row, col)).is_some()
+                && self.used.is_some_and(|used| {
+                    row == used.top || row == used.bottom || col == used.left || col == used.right
+                })
+            {
+                self.recompute_used_range();
+            }
             return;
         }
         let r = RangeRef::new(self.id, row, col, row, col);
@@ -146,8 +152,9 @@ impl Sheet {
     }
 
     pub fn get_ref(&self, cell: CellRef) -> Option<&Cell> {
-        debug_assert_eq!(cell.sheet, self.id);
-        self.get(cell.row, cell.col)
+        (cell.sheet == self.id)
+            .then(|| self.get(cell.row, cell.col))
+            .flatten()
     }
 
     pub fn value(&self, row: u32, col: u16) -> CellValue {
@@ -198,11 +205,16 @@ impl Sheet {
 
     /// Iterate populated cells within a range, row-major.
     pub fn iter_range(&self, range: RangeRef) -> impl Iterator<Item = (CellRef, &Cell)> + '_ {
-        (range.top..=range.bottom).flat_map(move |r| {
-            self.cells
-                .range((r, range.left)..=(r, range.right))
-                .map(move |(&(_, c), cell)| (CellRef::new(self.id, r, c), cell))
-        })
+        (range.sheet == self.id)
+            .then_some(range)
+            .into_iter()
+            .flat_map(move |range| {
+                (range.top..=range.bottom).flat_map(move |r| {
+                    self.cells
+                        .range((r, range.left)..=(r, range.right))
+                        .map(move |(&(_, c), cell)| (CellRef::new(self.id, r, c), cell))
+                })
+            })
     }
 
     /// The merged range covering this cell, if any.
@@ -211,6 +223,23 @@ impl Sheet {
             .iter()
             .find(|m| m.contains(CellRef::new(self.id, row, col)))
             .copied()
+    }
+
+    /// Rebuild cached bounds after removing a cell on one of their edges.
+    /// Interior removals cannot change the bounds and never pay this scan.
+    fn recompute_used_range(&mut self) {
+        let mut cells = self.cells.keys();
+        let Some(&(first_row, first_col)) = cells.next() else {
+            self.used = None;
+            return;
+        };
+        let (mut bottom, mut left, mut right) = (first_row, first_col, first_col);
+        for &(row, col) in cells {
+            bottom = row;
+            left = left.min(col);
+            right = right.max(col);
+        }
+        self.used = Some(RangeRef::new(self.id, first_row, left, bottom, right));
     }
 }
 
@@ -239,9 +268,7 @@ impl Workbook {
 
     /// Look up a sheet by name, case-insensitively as Excel does.
     pub fn sheet_by_name(&self, name: &str) -> Option<&Sheet> {
-        self.sheets
-            .iter()
-            .find(|s| s.name.eq_ignore_ascii_case(name))
+        self.sheets.iter().find(|s| names_equal(&s.name, name))
     }
 
     pub fn sheet_id_by_name(&self, name: &str) -> Option<SheetId> {
@@ -276,6 +303,13 @@ impl Workbook {
     pub fn is_writable(&self) -> bool {
         self.format.is_some_and(|f| f.is_writable())
     }
+}
+
+/// Excel identifiers are case-insensitive beyond ASCII. Keep the common path
+/// allocation-free, and use Unicode lowercase folding for international names.
+fn names_equal(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+        || (!(left.is_ascii() && right.is_ascii()) && left.to_lowercase() == right.to_lowercase())
 }
 
 #[cfg(test)]
@@ -350,6 +384,15 @@ mod tests {
         assert_eq!(s.len(), 1);
         s.set(0, 0, Cell::literal(CellValue::Empty));
         assert_eq!(s.len(), 0);
+        assert!(s.used_range().is_none());
+    }
+
+    #[test]
+    fn removing_a_boundary_cell_shrinks_the_used_range() {
+        let mut s = sheet_with(&[(0, 4, "top"), (2, 1, "left"), (3, 3, "bottom")]);
+        assert_eq!(s.used_range().unwrap().to_a1(), "B1:E4");
+        s.set(0, 4, Cell::literal(CellValue::Empty));
+        assert_eq!(s.used_range().unwrap().to_a1(), "B3:D4");
     }
 
     #[test]
@@ -376,6 +419,14 @@ mod tests {
     }
 
     #[test]
+    fn cell_and_range_access_refuse_a_different_sheet() {
+        let s = sheet_with(&[(0, 0, "a")]);
+        assert!(s.get_ref(CellRef::new(SheetId(1), 0, 0)).is_none());
+        let other = RangeRef::new(SheetId(1), 0, 0, 0, 0);
+        assert_eq!(s.iter_range(other).count(), 0);
+    }
+
+    #[test]
     fn merges_are_looked_up_by_cell() {
         let mut s = Sheet::new(SheetId(0), "Sheet1");
         s.merges
@@ -387,12 +438,23 @@ mod tests {
     #[test]
     fn sheet_lookup_is_case_insensitive() {
         let wb = Workbook {
-            sheets: vec![Sheet::new(SheetId(0), "Q3 Sales")],
+            sheets: vec![
+                Sheet::new(SheetId(0), "Q3 Sales"),
+                Sheet::new(SheetId(1), "État"),
+            ],
             ..Default::default()
         };
         assert!(wb.sheet_by_name("q3 sales").is_some());
         assert_eq!(wb.sheet_id_by_name("Q3 SALES"), Some(SheetId(0)));
         assert!(wb.sheet_by_name("Missing").is_none());
+        assert_eq!(wb.sheet_id_by_name("état"), Some(SheetId(1)));
+        assert_eq!(wb.sheet_id_by_name("KELVIN \u{212a}"), None);
+
+        let kelvin = Workbook {
+            sheets: vec![Sheet::new(SheetId(0), "kelvin k")],
+            ..Default::default()
+        };
+        assert_eq!(kelvin.sheet_id_by_name("KELVIN \u{212a}"), Some(SheetId(0)));
     }
 
     #[test]

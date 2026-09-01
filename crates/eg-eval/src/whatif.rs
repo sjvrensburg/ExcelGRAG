@@ -297,7 +297,7 @@ pub fn what_if(workbook: &Workbook, changes: &[Change], opts: &WhatIfOptions) ->
     let mut depends_on: FxHashMap<CellRef, FxHashSet<CellRef>> = FxHashMap::default();
     let mut depended_on_by: FxHashMap<CellRef, FxHashSet<CellRef>> = FxHashMap::default();
 
-    for level in 1..=opts.max_levels {
+    'levels: for level in 1..=opts.max_levels {
         if frontier.is_empty() {
             break;
         }
@@ -329,6 +329,14 @@ pub fn what_if(workbook: &Workbook, changes: &[Change], opts: &WhatIfOptions) ->
             // gives it one, and re-reporting it would count it twice.
             if matches!(status.get(&at), Some(Status::Blocked)) {
                 continue;
+            }
+            // `max_cells` is a ceiling, not a threshold checked after a whole
+            // fan-out level. Known cells may still be revisited to settle their
+            // verdict, but admitting one more cell would break the caller's
+            // resource bound.
+            if !status.contains_key(&at) && status.len() >= opts.max_cells {
+                report.stopped = Some(Stopped::Cells);
+                break 'levels;
             }
             let cell = match workbook.sheet(at.sheet).and_then(|s| s.get_ref(at)) {
                 Some(c) => c,

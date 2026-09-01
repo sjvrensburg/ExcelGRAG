@@ -42,6 +42,29 @@ use serde::{Deserialize, Serialize};
 
 use crate::calc::shown;
 
+/// A cell value as spreadsheet grouping/equality sees it, with its type kept.
+/// Display text alone is not an identity: numeric `1` and text `"1"` are
+/// distinct cells, as are the two columns of tuples that happen to contain our
+/// old separator character.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ValueKey {
+    Empty,
+    Number(String),
+    Text(String),
+    Bool(bool),
+    Error(String),
+}
+
+fn value_key(value: &CellValue) -> ValueKey {
+    match value {
+        CellValue::Empty => ValueKey::Empty,
+        CellValue::Number(n) => ValueKey::Number(format!("{}", shown(*n))),
+        CellValue::Text(t) => ValueKey::Text(t.to_lowercase()),
+        CellValue::Bool(b) => ValueKey::Bool(*b),
+        CellValue::Error(e) => ValueKey::Error(e.as_str().to_string()),
+    }
+}
+
 /// Why a query could not be answered.
 ///
 /// Every one of these is a case where an answer *could* have been produced and
@@ -250,10 +273,12 @@ pub fn query(workbook: &Workbook, table: &Table, query: &Query) -> Result<Answer
         rows_with_errors: 0,
         errors_in_aggregates: 0,
     };
-    // Grouped by the rendered key so two spellings of one number are one group,
-    // with the first key seen kept for reporting.
-    let mut buckets: FxHashMap<String, (Vec<CellValue>, Accumulators)> = FxHashMap::default();
-    let mut order: Vec<String> = Vec::new();
+    // Grouped by typed canonical values, with the first key seen kept for
+    // reporting. Number spellings and text case are canonicalised, but a
+    // number never aliases text that happens to render the same way.
+    let mut buckets: FxHashMap<Vec<ValueKey>, (Vec<CellValue>, Accumulators)> =
+        FxHashMap::default();
+    let mut order: Vec<Vec<ValueKey>> = Vec::new();
 
     for row in table.read(sheet) {
         answer.rows_scanned += 1;
@@ -276,7 +301,7 @@ pub fn query(workbook: &Workbook, table: &Table, query: &Query) -> Result<Answer
         answer.rows_matched += 1;
 
         let key: Vec<CellValue> = groups.iter().map(|&i| row[i].clone()).collect();
-        let id = key.iter().map(render).collect::<Vec<_>>().join("\u{1f}");
+        let id: Vec<ValueKey> = key.iter().map(value_key).collect();
         let slot = match buckets.get_mut(&id) {
             Some(slot) => slot,
             None => {
@@ -365,16 +390,6 @@ fn number(value: &CellValue) -> Option<f64> {
     }
 }
 
-fn render(value: &CellValue) -> String {
-    match value {
-        CellValue::Empty => String::new(),
-        CellValue::Number(n) => format!("{}", shown(*n)),
-        CellValue::Text(t) => t.to_lowercase(),
-        CellValue::Bool(b) => b.to_string(),
-        CellValue::Error(e) => e.as_str().to_string(),
-    }
-}
-
 /// One group's running totals.
 struct Accumulators {
     rows: u64,
@@ -382,7 +397,7 @@ struct Accumulators {
     counts: Vec<u64>,
     mins: Vec<Option<f64>>,
     maxes: Vec<Option<f64>>,
-    distinct: Vec<Option<std::collections::HashSet<String>>>,
+    distinct: Vec<Option<std::collections::HashSet<ValueKey>>>,
 }
 
 impl Accumulators {
@@ -408,7 +423,7 @@ impl Accumulators {
                 if !value.is_empty() {
                     self.distinct[n]
                         .get_or_insert_with(Default::default)
-                        .insert(render(value));
+                        .insert(value_key(value));
                 }
             }
             _ => {

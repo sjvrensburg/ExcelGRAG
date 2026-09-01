@@ -21,7 +21,7 @@
 
 use std::path::PathBuf;
 
-use eg_eval::{check, Outcome};
+use eg_eval::check;
 use eg_model::CellValue;
 
 fn demo() -> PathBuf {
@@ -108,39 +108,15 @@ fn the_same_workbook_as_ods_recomputes_to_the_same_answers() {
         "ODS refuses different formulas from xlsx"
     );
 
-    // Every remaining disagreement is one defect, recorded rather than
-    // tolerated: ODF marks an error cell with `calcext:value-type="error"` and
-    // an empty `office:string-value`, and calamine reads the empty string, so
-    // the `#DIV/0!` this fixture plants arrives as a blank. The evaluator is
-    // right and the stored value is missing — which is exactly the shape a
-    // reader defect takes, and why `eg check` finds them.
-    let unexplained: Vec<&str> = disagreements
-        .iter()
-        .filter(|d| {
-            !matches!(
-                &d.outcome,
-                Outcome::Differs {
-                    computed: CellValue::Error(_),
-                    stored: CellValue::Empty | CellValue::Text(_),
-                }
-            )
-        })
-        .map(|d| d.a1.as_str())
-        .collect();
-    assert!(
-        unexplained.is_empty(),
-        "ODS disagrees for a reason other than the error-cell gap: {unexplained:?}"
-    );
+    // ODS error cells carry LibreOffice's `calcext:value-type="error"`; the
+    // vendored reader reads their rendered error code from the element body.
+    // They must now agree exactly rather than being tolerated as blanks.
     assert_eq!(
         disagreements.len() as u64,
         report.differed,
         "the limit was too low to see every disagreement"
     );
-    assert!(
-        report.differed > 0,
-        "the ODS error-cell gap has closed — this workbook plants a #DIV/0! and \
-         calamine now reads it, so delete the allowance and issue 10 with it"
-    );
+    assert_eq!(report.differed, 0, "ODS must agree cell-for-cell with XLSX");
 }
 
 #[test]
