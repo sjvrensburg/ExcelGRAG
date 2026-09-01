@@ -25,6 +25,7 @@ use eg_graph::build;
 use eg_graph::store::Corpus;
 use eg_index::{SearchOptions, TextIndex};
 use eg_retrieve::{expand, find, render, ExpandOptions, Fusion, RenderOptions};
+use eg_structure::{detect_regions, profile_table, read_table, ProfileOptions, Profiles};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -64,6 +65,11 @@ fn corpus_dir(tag: &str) -> PathBuf {
 
 /// A corpus and a lexical index over the demo workbook, the way `eg index`
 /// builds one.
+///
+/// With profiles, because `eg index` builds them by default and they are now
+/// part of what the index holds: a corpus without them cannot be asked about
+/// a workbook in the vocabulary of its values, and a floor measured over one
+/// would be a floor under a pipeline nobody runs.
 fn indexed(tag: &str) -> PathBuf {
     let root = corpus_dir(tag);
     let loaded =
@@ -83,9 +89,31 @@ fn indexed(tag: &str) -> PathBuf {
         )
         .unwrap();
     let mut text = TextIndex::open(&root).unwrap();
-    text.index_built(&built, &wb.content_hash, &wb.path)
-        .unwrap();
+    text.index_graph_with(
+        &built.graph,
+        &wb.content_hash,
+        &wb.path,
+        Some(&profiled(wb)),
+    )
+    .unwrap();
     root
+}
+
+/// Every column of the workbook, profiled the way `eg index` profiles them.
+fn profiled(workbook: &eg_model::Workbook) -> Profiles {
+    let opts = ProfileOptions::default();
+    let mut columns = Vec::new();
+    for sheet in &workbook.sheets {
+        for region in detect_regions(sheet) {
+            if let Some(table) = read_table(sheet, &region) {
+                columns.extend(profile_table(sheet, &table, &opts));
+            }
+        }
+    }
+    Profiles {
+        columns,
+        values: opts.values,
+    }
 }
 
 /// Where the first acceptable answer lands, and whether the passage cites it.
@@ -190,16 +218,28 @@ fn the_right_node_is_at_or_near_the_top_of_the_ranking() {
     );
 }
 
-/// Measured at 0.863 over all fourteen questions, and set below that so that
-/// ordinary movement does not fail the suite and a real regression does.
+/// Measured at 0.833 over the sixteen answerable questions, and set below that
+/// so that ordinary movement does not fail the suite and a real regression
+/// does.
 ///
-/// It was 0.804 over the same questions when one of them — the column a table
-/// is keyed by — could not be answered at all. Giving row-label columns nodes
-/// of their own took hit@5 to 100% and the passage to citing every answer, and
-/// the floor was raised to match: retrieval that got better should raise it,
-/// and moving it the other way needs a reason written down.
+/// It was 0.804 when one question — the column a table is keyed by — could not
+/// be answered at all. Giving row-label columns nodes of their own took hit@5
+/// to 100% and the passage to citing every answer, and took it to 0.863 over
+/// the fourteen questions there were then.
+///
+/// The move to 0.833 is a **larger set, not a worse ranking**: indexing what a
+/// column was profiled to hold added two answerable questions asked in the
+/// vocabulary of the workbook's values, and left all fourteen of the others at
+/// exactly the ranks they had. One of the two — "which accounts are in
+/// Ironwood" — comes fourth, because `accounts` is a word two column headers
+/// carry and `Ironwood` is only ever a cell, so the headers win the first
+/// three places on a stronger field. That is the ranking working: a value is
+/// weaker evidence than a name, and the search says so in its evidence line.
+///
+/// Retrieval that got better should raise this, and moving it the other way
+/// needs a reason written down.
 ///
 /// This is comparable with what `--example answers` prints only while nothing
 /// in the file is a recorded gap — the example divides by every question, this
 /// by the ones without one.
-const MRR_FLOOR: f64 = 0.82;
+const MRR_FLOOR: f64 = 0.80;

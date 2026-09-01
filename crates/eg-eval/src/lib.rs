@@ -15,6 +15,11 @@
 //! disagreement is about one formula. What [`calc`] does not model it refuses
 //! by name rather than guessing.
 //!
+//! [`cells_holding`] is the same trade made for values rather than references:
+//! the corpus indexes what a workbook *is* and a bounded sample of what its
+//! columns hold, so "which cells hold 1612" is answered by scanning the cells,
+//! not by asking the index a question it cannot know the answer to.
+//!
 //! ```no_run
 //! # use eg_eval::precedents_of;
 //! # use eg_model::{CellRef, SheetId};
@@ -45,7 +50,8 @@ pub use parse::{parse, BinOp, Expr, ParseError, UnaryOp};
 pub use query::{query, Aggregate, Answer, Filter, Group, Query, QueryError, Test};
 pub use schema::{infer_schema, Lookup, LookupKind, Schema};
 pub use trace::{
-    cell, cells_in, dependents_of, precedents_of, CellFact, Reference, ScanReport, Target,
+    cell, cells_holding, cells_in, dependents_of, holds, precedents_of, CellFact, Reference,
+    ScanReport, Target, ValueScan,
 };
 pub use whatif::{
     what_if, Applied, Blocked, Change, Impact, ImpactReport, Moved, Stopped, WhatIfOptions,

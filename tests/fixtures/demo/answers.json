@@ -104,5 +104,27 @@
       "Account"
     ],
     "why": "the column the table is keyed by, which is the ordinary question about any table — and which was a recorded gap until row-label columns were given nodes of their own"
+  },
+  {
+    "ask": "which accounts are in Ironwood",
+    "want": [
+      "Territory"
+    ],
+    "why": "Ironwood is a value in the Territory column and appears in no header, sheet name or formula — the question is asked in the vocabulary of the data"
+  },
+  {
+    "ask": "45033.43",
+    "want": [
+      "Balance"
+    ],
+    "why": "the largest balance on the sheet; a column's bounds are cells, so spot-checking a figure against the column it came out of works for the ends of one"
+  },
+  {
+    "ask": "1612",
+    "want": [
+      "Impairment"
+    ],
+    "why": "Debtors!L632 holds 1612, and no search will ever find it: the column has too many distinct values for a profile to keep, so only its bounds are indexed",
+    "known_gap": "a value in the middle of a large numeric column is in no index by construction. `eg where impairment.xlsx 1612` scans the cells for it, and the search's own evidence line says so rather than reporting the number absent from the workbook"
   }
 ]

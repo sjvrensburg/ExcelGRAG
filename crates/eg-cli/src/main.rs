@@ -2,13 +2,14 @@
 //!
 //! Everything this workspace can do is reachable through the examples in each
 //! crate, which is fine for developing a library and poor for using one. This
-//! is the same capabilities behind one binary and nine verbs, in the order a
+//! is the same capabilities behind one binary and ten verbs, in the order a
 //! question actually travels:
 //!
 //! ```sh
 //! eg index corpus/ book.xlsb     # read the workbook, store its graph, index it
 //! eg ask corpus/ bad debt        # a question, answered as a cited passage
 //! eg cells book.xlsb 'LOOKUP!AE53:AG89'   # the cells behind a citation
+//! eg where book.xlsb 1612        # which cells hold a value, by scanning them
 //! eg check book.xlsb             # do the formulas still agree with their values
 //! eg what-if book.xlsb 'RATES!B4=0.15'    # and what moves if one changes
 //! eg serve corpus/               # the same, to an agent over MCP
@@ -126,6 +127,26 @@ enum Command {
         workbook: String,
         /// A citation, sheet and all, e.g. "'Q3 Sales'!B2:D40".
         citation: String,
+        #[arg(long, default_value_t = 40)]
+        limit: usize,
+        #[command(flatten)]
+        privacy: Privacy,
+    },
+
+    /// Find the cells holding a value, by scanning them.
+    ///
+    /// The corpus cannot answer this. It indexes what a workbook is, and the
+    /// values of a column only where the profile kept them, so a figure from a
+    /// large numeric column is in no index. This reads every cell.
+    #[command(name = "where")]
+    Where {
+        /// A workbook, or a corpus directory — then every workbook it holds.
+        target: String,
+        /// The value, read the way a spreadsheet reads what you type: a number
+        /// if it parses as one, TRUE or FALSE as a boolean, anything else as
+        /// text. Quotes force text, so `"12"` finds the string and `12` the
+        /// number.
+        value: String,
         #[arg(long, default_value_t = 40)]
         limit: usize,
         #[command(flatten)]
@@ -260,6 +281,12 @@ fn main() {
             limit,
             privacy,
         } => workbook::cells(&workbook, &citation, limit, privacy.redact_values),
+        Command::Where {
+            target,
+            value,
+            limit,
+            privacy,
+        } => workbook::holding(&target, &value, limit, privacy.redact_values),
         Command::Trace {
             workbook,
             citation,
@@ -325,6 +352,7 @@ mod tests {
             "search",
             "workbooks",
             "cells",
+            "where",
             "trace",
             "check",
             "what-if",
