@@ -11,6 +11,7 @@ eg-model.workspace = true
 fastembed.workspace = true
 petgraph.workspace = true
 eg-graph.workspace = true
+eg-structure.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true

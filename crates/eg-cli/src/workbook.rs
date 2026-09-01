@@ -1,15 +1,19 @@
 //! The verbs that work on a workbook directly, below the graph: cells,
-//! provenance, whether the arithmetic still holds, and what moves if a number
-//! changes.
+//! provenance, whether the arithmetic still holds, where a value is, and what
+//! moves if a number changes.
 //!
-//! All three open the file, which on a large workbook is seconds and gigabytes.
-//! That is the price of asking about cells rather than about structure, and it
-//! is why the server holds a workbook open while these commands do not.
+//! All of them open the file, which on a large workbook is seconds and
+//! gigabytes. That is the price of asking about cells rather than about
+//! structure, and it is why the server holds a workbook open while these
+//! commands do not.
 
 use std::time::Instant;
 
 use eg_eval::whatif::{what_if, Blocked, Change, WhatIfOptions};
-use eg_eval::{cells_in, check as check_formulas, dependents_of, precedents_of, Outcome};
+use eg_eval::{
+    cells_holding, cells_in, check as check_formulas, dependents_of, precedents_of, Outcome,
+};
+use eg_graph::store::Corpus;
 use eg_ingest::{load_with, LoadOptions};
 use eg_model::{parse_a1, redact_formula_literals, CellValue, RangeRef, Workbook};
 
@@ -399,6 +403,120 @@ pub fn whatif(
         println!("\nnothing in this workbook reads it.");
     }
     Ok(())
+}
+
+/// Where a value is, in one workbook or across a corpus.
+///
+/// The verb that exists because search cannot answer this. A corpus indexes
+/// what a workbook *is* and, since profiles reached the index, the values of
+/// the columns whose distinct list was small enough to keep. A number in a
+/// column of two hundred thousand measurements is in neither, so asking the
+/// index for it returns a blind match — correctly, and unhelpfully. This reads
+/// the cells.
+///
+/// The target is a workbook, or a corpus directory, in which case every
+/// workbook the corpus holds is opened in turn. That is the expensive
+/// direction and it is the one the question needs: nothing records where a
+/// value lives.
+pub fn holding(target: &str, value: &str, limit: usize, redact: bool) -> Result<(), String> {
+    let probe = parse_literal(value);
+    if probe == CellValue::Empty {
+        return Err(format!(
+            "{value:?} names no value to look for. Write a number as `1612`, text as \
+             `Retail` or `\"12\"`, a boolean as `TRUE`."
+        ));
+    }
+    let paths = targets(target)?;
+    let mut total = 0u64;
+    let mut scanned = 0u64;
+
+    for path in &paths {
+        let workbook = open(path)?;
+        let at = Instant::now();
+        let (cells, report) = cells_holding(&workbook, &probe, limit);
+        total += report.matches;
+        scanned += report.cells_scanned;
+
+        println!(
+            "{path} — {} cell(s) hold {}, of {} scanned in {:.1}s",
+            report.matches,
+            show(&probe, redact),
+            report.cells_scanned,
+            at.elapsed().as_secs_f64()
+        );
+        for fact in &cells {
+            print!("  {:<28}", fact.a1);
+            if let Some(formula) = &fact.formula {
+                print!(" ={}", show_formula(formula, redact));
+            }
+            println!("  {}", show(&fact.value, redact));
+        }
+        if report.capped {
+            println!(
+                "  ... and {} more, capped by --limit",
+                report.matches - cells.len() as u64
+            );
+        }
+        // The usual reason a value that is plainly on the screen scans as
+        // absent, and saying nothing about it would report "nowhere in this
+        // workbook" about a workbook that shows it. The value is not echoed
+        // again here: under `--redact-values` it would be the one unredacted
+        // copy in the output.
+        if report.other_kind > 0 {
+            println!(
+                "  {} more cell(s) show the same characters while holding another type. \
+                 A number and the string of its digits are different values here: \
+                 `1612` finds one, `\"1612\"` the other.",
+                report.other_kind,
+            );
+        }
+    }
+
+    if paths.len() > 1 {
+        println!(
+            "\n---\n{total} cell(s) across {} workbook(s), {scanned} cells scanned",
+            paths.len()
+        );
+    }
+    if total == 0 {
+        println!(
+            "\nNot found. This is a scan of every populated cell, so it is exhaustive \
+             for the workbook(s) read — {} is not in them.",
+            show(&probe, redact)
+        );
+    }
+    Ok(())
+}
+
+/// The workbooks to scan: a corpus's, or the one named.
+///
+/// A corpus is recognised the way every other verb recognises one, by its
+/// `manifest.json`, so `eg where corpus/ 1612` and `eg where book.xlsb 1612`
+/// are the same verb rather than two. A directory that is not a corpus is an
+/// error rather than an empty scan, which would read as "not found".
+fn targets(target: &str) -> Result<Vec<String>, String> {
+    let path = std::path::Path::new(target);
+    if !path.is_dir() {
+        return Ok(vec![target.to_string()]);
+    }
+    if !path.join("manifest.json").exists() {
+        return Err(format!(
+            "{target} is a directory but not a corpus (no manifest.json) — name a workbook, \
+             or run `eg index {target} <workbook>` first"
+        ));
+    }
+    let corpus =
+        Corpus::open(target).map_err(|e| format!("could not open the corpus at {target}: {e}"))?;
+    let paths: Vec<String> = corpus
+        .entries()
+        .map(|(_, entry)| entry.path.clone())
+        .collect();
+    if paths.is_empty() {
+        return Err(format!(
+            "the corpus at {target} is empty — add a workbook with `eg index`"
+        ));
+    }
+    Ok(paths)
 }
 
 #[cfg(test)]

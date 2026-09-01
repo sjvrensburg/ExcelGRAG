@@ -15,6 +15,13 @@
 //! its hash first, so a workbook indexed twice appears once, and a workbook
 //! that has changed can never match under its old hash.
 //!
+//! **It holds cell values**, where the corpus was built with profiles: the
+//! distinct values of a column that has few enough of them, and the bounds of
+//! one that does not. That is the workbook's data rather than its structure,
+//! and it is here on the same terms `profiles/` is — a corpus indexed with
+//! `--redact-values` or `--no-profiles` has none of it, because the values
+//! reach this index only through a profile that kept them.
+//!
 //! ```no_run
 //! # use eg_index::{SearchOptions, TextIndex};
 //! let index = TextIndex::open("index")?;
@@ -30,6 +37,7 @@ use std::path::{Path, PathBuf};
 
 use eg_graph::store::StoredGraph;
 use eg_graph::{BuiltGraph, Graph, NodeKind};
+use eg_structure::Profiles;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
 use tantivy::schema::{
@@ -39,7 +47,7 @@ use tantivy::schema::{
 use tantivy::tokenizer::{LowerCaser, Stemmer, TextAnalyzer};
 use tantivy::{Index, IndexWriter, ReloadPolicy, Score, TantivyError, Term};
 
-use crate::doc::{docs_for, NodeDoc};
+use crate::doc::{docs_for_with, NodeDoc};
 use crate::tokenize::{SpreadsheetTokenizer, TOKENIZER};
 
 /// How much heap the writer may use before it flushes. Tantivy's floor is 15
@@ -58,6 +66,20 @@ const WRITER_HEAP: usize = 64 << 20;
 const LABEL_BOOST: f32 = 4.0;
 const CONTEXT_BOOST: f32 = 1.5;
 const BODY_BOOST: f32 = 1.0;
+/// What a column was profiled to hold, weighed below what it is called.
+///
+/// A column *named* Retail is a better answer to "retail" than one that merely
+/// contains the word in a cell, and a table found by its own headers is a
+/// better answer than one found by a value inside it. Below `BODY_BOOST` for
+/// that reason and above `PATH_BOOST`, which matches every node of a workbook
+/// at once and can only break ties.
+///
+/// Unlike `LEXICAL_WEIGHT` in `eg-retrieve`, this was not swept to a plateau:
+/// the questions that would measure it are questions asked in the vocabulary
+/// of a workbook's values, and the scored set does not have enough of them to
+/// tell 0.6 from 1.0. It is an ordering argument, and it is written down as
+/// one.
+const VALUES_BOOST: f32 = 0.8;
 const PATH_BOOST: f32 = 0.3;
 
 /// How much a node's size may move it.
@@ -126,6 +148,7 @@ struct Fields {
     label: Field,
     context: Field,
     body: Field,
+    values: Field,
     cells: Field,
 }
 
@@ -170,7 +193,11 @@ impl Fields {
             a1: b.add_text_field("a1", STORED),
             label: b.add_text_field("label", stored_text),
             context: b.add_text_field("context", text.clone()),
-            body: b.add_text_field("body", text),
+            body: b.add_text_field("body", text.clone()),
+            // Not stored: a hit hands back where to look, and handing back a
+            // column's values would make a search result a copy of the cells
+            // it is pointing at.
+            values: b.add_text_field("values", text),
             // Fast, not stored: it is read once per candidate document while
             // scoring, and never handed back.
             cells: b.add_u64_field(CELLS, FAST),
@@ -178,11 +205,12 @@ impl Fields {
         (b.build(), fields)
     }
 
-    fn search_fields(&self) -> [(Field, f32); 4] {
+    fn search_fields(&self) -> [(Field, f32); 5] {
         [
             (self.label, LABEL_BOOST),
             (self.context, CONTEXT_BOOST),
             (self.body, BODY_BOOST),
+            (self.values, VALUES_BOOST),
             (self.path, PATH_BOOST),
         ]
     }
@@ -368,9 +396,23 @@ impl TextIndex {
         Ok(found > 0)
     }
 
-    /// Index a graph loaded from the corpus.
+    /// Index a graph loaded from the corpus, structure only.
     pub fn index_stored(&mut self, stored: &StoredGraph) -> Result<usize, IndexError> {
-        self.index_graph(&stored.graph, &stored.content_hash, &stored.path)
+        self.index_stored_with(stored, None)
+    }
+
+    /// Index a graph loaded from the corpus, with the values its columns were
+    /// profiled to hold.
+    ///
+    /// `profiles` is that workbook's entry from `profiles/`. `None` indexes
+    /// structure alone, which is what a corpus built with `--no-profiles` has
+    /// and what every corpus had before values were indexed at all.
+    pub fn index_stored_with(
+        &mut self,
+        stored: &StoredGraph,
+        profiles: Option<&Profiles>,
+    ) -> Result<usize, IndexError> {
+        self.index_graph_with(&stored.graph, &stored.content_hash, &stored.path, profiles)
     }
 
     /// Index a graph that has just been built.
@@ -391,10 +433,21 @@ impl TextIndex {
         content_hash: &str,
         path: &str,
     ) -> Result<usize, IndexError> {
+        self.index_graph_with(graph, content_hash, path, None)
+    }
+
+    /// As [`TextIndex::index_graph`], with the workbook's column profiles.
+    pub fn index_graph_with(
+        &mut self,
+        graph: &Graph,
+        content_hash: &str,
+        path: &str,
+        profiles: Option<&Profiles>,
+    ) -> Result<usize, IndexError> {
         // `Fields` is `Copy`, so the field handles are taken before the writer
         // borrow rather than reached for through `&self` inside it.
         let fields = self.fields;
-        let docs = docs_for(graph);
+        let docs = docs_for_with(graph, profiles);
         let writer = self.writer()?;
         // Delete first, in the same commit as the insert: a workbook rebuilt
         // with formula groups has more nodes than one without, and adding over
@@ -544,6 +597,9 @@ fn to_tantivy(f: Fields, doc: &NodeDoc, content_hash: &str, path: &str) -> Tanti
     out.add_text(f.label, &doc.label);
     out.add_text(f.context, &doc.context);
     out.add_text(f.body, &doc.body);
+    if !doc.values.is_empty() {
+        out.add_text(f.values, doc.values.join(" "));
+    }
     out.add_u64(f.cells, doc.cells);
     out
 }

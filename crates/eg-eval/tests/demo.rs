@@ -142,3 +142,28 @@ fn the_same_workbook_as_ods_recomputes_to_the_same_answers() {
          calamine now reads it, so delete the allowance and issue 10 with it"
     );
 }
+
+#[test]
+fn the_value_no_index_can_hold_is_still_findable_in_the_cells() {
+    // The other half of the gap `tests/fixtures/demo/answers.json` records for
+    // "1612". `Impairment` has too many distinct values for a profile to keep,
+    // so only its bounds reach the index and no search will ever return this
+    // number — which is a fact about indexing and not about the workbook. A
+    // scan of the cells says where it actually is, and this asserts the two
+    // stories are about the same cell.
+    let loaded = eg_ingest::load(demo()).expect("the demo fixture is committed");
+    let (cells, report) = eg_eval::cells_holding(&loaded.workbook, &CellValue::Number(1612.0), 40);
+
+    let cited: Vec<&str> = cells.iter().map(|c| c.a1.as_str()).collect();
+    assert_eq!(cited, ["Debtors!L632"]);
+    assert_eq!(report.matches, 1);
+    // The cell is a formula: what it *holds* is what was asked for, which is
+    // the cell someone quoting the figure means.
+    assert!(cells[0].formula.is_some());
+    // Exhaustive, which is what makes a nil answer worth anything.
+    assert!(
+        report.cells_scanned > 10_000,
+        "scanned {}",
+        report.cells_scanned
+    );
+}

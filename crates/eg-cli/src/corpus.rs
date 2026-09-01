@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use eg_graph::store::Corpus;
 use eg_graph::{build_with, AuditOptions, GraphOptions, NodeKind, MAX_STORED_FORMULA_GROUPS};
-use eg_index::vector::{embeddable, VectorIndex};
+use eg_index::vector::{embeddable_with, VectorIndex};
 use eg_index::{Embedder, SearchOptions, TextIndex};
 use eg_ingest::{load_with, LoadOptions};
 use eg_retrieve::{expand, find, render, ExpandOptions, Fusion, RenderOptions};
@@ -32,6 +32,13 @@ pub fn index(
     // happens: a rerun of the same command is harmless (storage is keyed by
     // content hash) and finishes the job.
     let mut completed: Vec<&str> = Vec::new();
+    // Workbooks this run re-read, whose documents must be rewritten even
+    // though the index already holds them under this hash. The hash is of the
+    // *file*, and the file has not changed — but a document now carries the
+    // workbook's profiled values, and `--redact-values` on a corpus indexed
+    // without it would otherwise leave the earlier run's values sitting in
+    // `text/` while `profiles/` was faithfully rewritten without them.
+    let mut refreshed: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for path in workbooks {
         let stored: Result<(), String> = (|| {
@@ -186,6 +193,7 @@ pub fn index(
             for warning in &loaded.warnings {
                 println!("  warning: {warning}");
             }
+            refreshed.insert(loaded.workbook.content_hash.clone());
             Ok(())
         })();
         if let Err(e) = stored {
@@ -222,9 +230,11 @@ pub fn index(
         // The two indexes are asked separately: the lexical one rebuilds itself
         // empty on a schema change, so inferring its contents from the vector
         // index would mean silently searching nothing.
-        let want_text = reindex || !text.contains(hash).unwrap_or(false);
+        let refreshed = refreshed.contains(hash);
+        let want_text = reindex || refreshed || !text.contains(hash).unwrap_or(false);
         let want_vectors = !no_embedder
             && (reindex
+                || refreshed
                 || match &embedder {
                     Some((_, vectors)) => !vectors.contains(hash),
                     None => true,
@@ -238,10 +248,19 @@ pub fn index(
         else {
             continue;
         };
+        // Read from the store rather than carried over from the loop above:
+        // this loop runs over every workbook in the corpus, including the ones
+        // that were already there, and their profiles are on disk and not in
+        // hand. A workbook with none — `--no-profiles`, or one stored before
+        // profiles existed — indexes its structure and says nothing about its
+        // values, which is the truth about it.
+        let profiles = corpus
+            .profiles(hash)
+            .map_err(|e| format!("could not read the profiles for {}: {e}", short(hash)))?;
 
         if want_text {
             lexical_docs += text
-                .index_stored(&stored)
+                .index_stored_with(&stored, profiles.as_ref())
                 .map_err(|e| format!("could not index {}: {e}", short(hash)))?;
         }
 
@@ -259,10 +278,10 @@ pub fn index(
             let Some((embedder, vectors)) = embedder.as_mut() else {
                 continue;
             };
-            if !reindex && vectors.contains(hash) {
+            if !reindex && !refreshed && vectors.contains(hash) {
                 continue;
             }
-            let docs = embeddable(&stored.graph);
+            let docs = embeddable_with(&stored.graph, profiles.as_ref());
             let made = embedder
                 .embed_documents(&docs)
                 .map_err(|e| format!("could not embed {}: {e}", short(hash)))?;

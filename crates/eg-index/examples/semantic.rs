@@ -26,7 +26,7 @@ use std::time::Instant;
 
 use eg_graph::store::Corpus;
 use eg_graph::NodeKind;
-use eg_index::vector::{embeddable, VectorIndex};
+use eg_index::vector::{embeddable_with, VectorIndex};
 use eg_index::{fuse, Embedder, Hit, SearchOptions, TextIndex};
 
 fn main() {
@@ -140,9 +140,15 @@ fn main() {
             }
         };
 
+        // The same profiles `eg index` indexes, so this measures the index
+        // that verb builds rather than a smaller one — and so that running
+        // this over a corpus does not quietly strip the values out of an
+        // index that had them.
+        let profiles = corpus.profiles(hash).unwrap_or_default();
+
         if want_text {
             let at = Instant::now();
-            match text.index_stored(&stored) {
+            match text.index_stored_with(&stored, profiles.as_ref()) {
                 Ok(n) => lexical_docs += n,
                 Err(e) => eprintln!("{}: {e}", short(hash)),
             }
@@ -150,7 +156,7 @@ fn main() {
         }
 
         if want_vectors {
-            let docs = embeddable(&stored.graph);
+            let docs = embeddable_with(&stored.graph, profiles.as_ref());
             let at = Instant::now();
             let made = match embedder.embed_documents(&docs) {
                 Ok(v) => v,

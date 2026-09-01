@@ -35,22 +35,42 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use eg_graph::{Graph, NodeKind};
+use eg_structure::Profiles;
 use serde::{Deserialize, Serialize};
 
-use crate::doc::{docs_for, NodeDoc};
+use crate::doc::{docs_for_with, NodeDoc};
 use crate::embed::{normalize, similarity};
 use crate::text::{Hit, IndexError, SearchOptions};
 
-/// Bumped when the stored shape changes. A set from another version is dropped
-/// rather than read, the same trade the graph store makes.
-pub const FORMAT_VERSION: u32 = 1;
+/// Bumped when the stored shape changes, *or* when the text behind a vector
+/// does: a set from another version is dropped rather than read, the same
+/// trade the graph store makes.
+///
+/// 2 because [`crate::doc::NodeDoc::embedding_text`] now names what a
+/// categorical column holds. The bytes on disk are unchanged, and a vector
+/// written from the old sentence is a number of the right shape and the wrong
+/// meaning — the one failure the version exists to catch, since nothing about
+/// the file would otherwise say the ranking had gone stale.
+pub const FORMAT_VERSION: u32 = 2;
 
-/// The nodes worth embedding.
+/// The nodes worth embedding, structure only.
 ///
 /// Everything but formula groups. See the module note: a formula is exact
 /// tokens, and there are half a million of them.
 pub fn embeddable(graph: &Graph) -> Vec<NodeDoc> {
-    docs_for(graph)
+    embeddable_with(graph, None)
+}
+
+/// As [`embeddable`], carrying what each column was profiled to hold.
+///
+/// Only a *categorical* column's values reach the embedded sentence, and only
+/// the first few of them — see [`NodeDoc::embedding_text`]. `Retail, Business,
+/// Wholesale` is what the column means and is worth embedding; a thousand
+/// account numbers mean nothing to a sentence embedder and would push the
+/// column's own name out of the window. The lexical half indexes every kept
+/// value regardless, which is where an exact one is meant to be found.
+pub fn embeddable_with(graph: &Graph, profiles: Option<&Profiles>) -> Vec<NodeDoc> {
+    docs_for_with(graph, profiles)
         .into_iter()
         .filter(|d| d.kind != NodeKind::FormulaGroup)
         .collect()
