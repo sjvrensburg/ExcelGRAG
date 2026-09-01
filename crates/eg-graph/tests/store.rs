@@ -397,6 +397,71 @@ fn profiles_are_stored_beside_the_graph_and_not_inside_it() {
 }
 
 #[test]
+fn two_open_corpus_handles_merge_manifest_updates() {
+    let root = dir();
+    let a = workbook("hash-concurrent-a");
+    let b = workbook("hash-concurrent-b");
+    let mut first = Corpus::open(&root).unwrap();
+    let mut second = Corpus::open(&root).unwrap();
+
+    first
+        .put(&a.content_hash, &a.path, 1, 3, true, &build(&a))
+        .unwrap();
+    second
+        .put(&b.content_hash, &b.path, 1, 3, true, &build(&b))
+        .unwrap();
+
+    let reopened = Corpus::open(&root).unwrap();
+    let hashes: Vec<&str> = reopened.entries().map(|(hash, _)| hash).collect();
+    assert_eq!(hashes, ["hash-concurrent-a", "hash-concurrent-b"]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_profile_manifest_writes_roll_back_files_and_handle_state() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = dir();
+    let wb = workbook("hash-profile-rollback");
+    let mut corpus = Corpus::open(&root).unwrap();
+    corpus
+        .put(&wb.content_hash, &wb.path, 1, 3, true, &build(&wb))
+        .unwrap();
+    let original = eg_structure::Profiles {
+        columns: Vec::new(),
+        values: true,
+    };
+    corpus
+        .put_profiles(&wb.content_hash, &wb.path, &original)
+        .unwrap();
+
+    let writable = std::fs::metadata(&root).unwrap().permissions();
+    let mut readonly = writable.clone();
+    readonly.set_mode(0o555);
+    std::fs::set_permissions(&root, readonly.clone()).unwrap();
+    let replacement = eg_structure::Profiles {
+        columns: Vec::new(),
+        values: false,
+    };
+    assert!(corpus
+        .put_profiles(&wb.content_hash, &wb.path, &replacement)
+        .is_err());
+    std::fs::set_permissions(&root, writable.clone()).unwrap();
+    assert_eq!(
+        corpus.profiles(&wb.content_hash).unwrap(),
+        Some(original.clone())
+    );
+
+    std::fs::set_permissions(&root, readonly).unwrap();
+    assert!(corpus.forget_profiles(&wb.content_hash).is_err());
+    std::fs::set_permissions(&root, writable).unwrap();
+    assert_eq!(corpus.profiles(&wb.content_hash).unwrap(), Some(original));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn forgetting_a_workbook_removes_its_profiles_too() {
     // A "forgotten" workbook's cell values must not go on being served: the
     // manifest is what `profiles()` now consults first, but the file itself

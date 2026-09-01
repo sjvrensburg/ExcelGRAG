@@ -8,11 +8,11 @@
 //! The `.xlsb`/`.xlsx` pairs under `tests/fixtures/vendor` were authored by real
 //! Excel, because nothing open-source can write XLSB.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use eg_ingest::{load, Capabilities};
-use eg_model::{scan_references, CellValue, WorkbookFormat};
+use eg_model::{CellValue, WorkbookFormat};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -30,6 +30,16 @@ fn values_agree(a: &CellValue, b: &CellValue) -> bool {
     match (a, b) {
         (CellValue::Number(x), CellValue::Number(y)) => {
             (x - y).abs() <= 1e-9 * x.abs().max(y.abs()).max(1.0)
+        }
+        _ => a == b,
+    }
+}
+
+fn formulas_agree(a: Option<&str>, b: Option<&str>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            let normalize = |text: &str| text.replace("FALSE()", "FALSE").replace("TRUE()", "TRUE");
+            normalize(a) == normalize(b)
         }
         _ => a == b,
     }
@@ -74,7 +84,7 @@ fn assert_agree(label: &str, a: &eg_ingest::Loaded, b: &eg_ingest::Loaded) {
             // cached values looking perfectly correct.
             let fa = sheet_a.get(row, col).and_then(|c| c.formula.as_deref());
             let fb = sheet_b.get(row, col).and_then(|c| c.formula.as_deref());
-            if fa != fb {
+            if !formulas_agree(fa, fb) {
                 mismatches.push(format!("{}!{a1} formula: {fa:?} vs {fb:?}", sheet_a.name));
             }
         }
@@ -89,17 +99,32 @@ fn assert_agree(label: &str, a: &eg_ingest::Loaded, b: &eg_ingest::Loaded) {
     );
 }
 
+fn sheet_names(loaded: &eg_ingest::Loaded) -> BTreeSet<&str> {
+    loaded
+        .workbook
+        .sheets
+        .iter()
+        .map(|sheet| sheet.name.as_str())
+        .collect()
+}
+
 #[test]
 fn all_formats_agree_on_values_and_formulas() {
     // issues.* exists in all three formats; the other two pair xlsx with xlsb.
     for base in ["issues", "any_sheets", "issue_419"] {
         let xlsx = load(vendor(&format!("{base}.xlsx"))).expect("load xlsx");
         let xlsb = load(vendor(&format!("{base}.xlsb"))).expect("load xlsb");
+        assert_eq!(sheet_names(&xlsx), sheet_names(&xlsb), "{base} sheet set");
         assert_agree(&format!("{base}: xlsx vs xlsb"), &xlsx, &xlsb);
 
         let xls_path = vendor(&format!("{base}.xls"));
         if xls_path.exists() {
             let xls = load(&xls_path).expect("load xls");
+            let mut expected = sheet_names(&xlsx);
+            // The upstream issues.xls fixture predates the spc_chrs sheet in
+            // its twins; pin that one deliberate fixture difference exactly.
+            expected.remove("spc_chrs");
+            assert_eq!(expected, sheet_names(&xls), "{base} xls sheet set");
             assert_agree(&format!("{base}: xlsx vs xls"), &xlsx, &xls);
         }
     }
@@ -144,7 +169,7 @@ fn xlsb_actually_yields_formulas() {
 }
 
 #[test]
-fn both_formats_load_without_warnings_that_matter() {
+fn both_formats_load_without_warnings() {
     for base in ["issues", "any_sheets"] {
         for ext in ["xlsx", "xlsb"] {
             let loaded = load(vendor(&format!("{base}.{ext}"))).expect("load");
@@ -156,6 +181,22 @@ fn both_formats_load_without_warnings_that_matter() {
                 loaded.workbook.total_cells() > 0,
                 "{base}.{ext}: no cells loaded"
             );
+            let expected_warning = base == "any_sheets" && ext == "xlsb";
+            if expected_warning {
+                assert_eq!(
+                    loaded.warnings.len(),
+                    1,
+                    "unexpected warnings: {:?}",
+                    loaded.warnings
+                );
+                assert!(loaded.warnings[0].contains("Chart"));
+            } else {
+                assert!(
+                    loaded.warnings.is_empty(),
+                    "{base}.{ext}: unexpected warnings: {:?}",
+                    loaded.warnings
+                );
+            }
         }
     }
 }
@@ -168,6 +209,34 @@ fn content_hash_is_stable_and_distinguishes_files() {
     assert_eq!(a.workbook.content_hash, b.workbook.content_hash);
     assert_ne!(a.workbook.content_hash, c.workbook.content_hash);
     assert!(!a.workbook.content_hash.is_empty());
+}
+
+#[test]
+fn xlsx_defined_names_keep_their_sheet_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scoped-names.xlsx");
+    let mut source = rust_xlsxwriter::Workbook::new();
+    source.add_worksheet().set_name("First").unwrap();
+    source.add_worksheet().set_name("Second").unwrap();
+    source.define_name("Rate", "=First!$A$1").unwrap();
+    source.define_name("Second!Rate", "=Second!$A$1").unwrap();
+    source.save(&path).unwrap();
+
+    let loaded = load(&path).unwrap();
+    let global = loaded
+        .workbook
+        .defined_names
+        .iter()
+        .find(|name| name.name == "Rate" && name.scope.is_none())
+        .expect("workbook-scoped name");
+    assert_eq!(global.refers_to, "First!$A$1");
+    let local = loaded
+        .workbook
+        .defined_names
+        .iter()
+        .find(|name| name.name == "Rate" && name.scope == Some(eg_model::SheetId(1)))
+        .expect("sheet-scoped name");
+    assert_eq!(local.refers_to, "Second!$A$1");
 }
 
 #[test]
@@ -226,7 +295,7 @@ fn the_demo_workbook_reads_the_same_as_xlsx_and_as_ods() {
     let ods = load(dir.join("impairment.ods")).expect("load demo ods");
 
     let mut mismatches = Vec::new();
-    let mut errors_lost = 0usize;
+    let mut errors_preserved = 0usize;
     let mut compared = 0usize;
 
     for sheet_a in &xlsx.workbook.sheets {
@@ -249,17 +318,13 @@ fn the_demo_workbook_reads_the_same_as_xlsx_and_as_ods() {
             let va = sheet_a.value(row, col);
             let vb = sheet_b.value(row, col);
 
-            // A known gap, recorded rather than tolerated: ODF marks an error
-            // cell with `calcext:value-type="error"` and leaves
-            // `office:string-value` empty, and calamine reads the empty string.
-            // The `#DIV/0!` this fixture plants therefore arrives as a blank
-            // cell — the same silent loss as issue 6, in the ODS reader. See
-            // `docs/upstream-issues.md`.
+            // LibreOffice's calcext marker preserves only that this is an
+            // error, not its precise code. It must nevertheless remain an
+            // error rather than silently becoming an empty string.
             if matches!(va, eg_model::CellValue::Error(_))
-                && matches!(vb, eg_model::CellValue::Empty)
+                && matches!(vb, eg_model::CellValue::Error(_))
             {
-                errors_lost += 1;
-                continue;
+                errors_preserved += 1;
             }
             if !values_agree(&va, &vb) {
                 mismatches.push(format!("{}!{a1} value: {va:?} vs {vb:?}", sheet_a.name));
@@ -280,13 +345,9 @@ fn the_demo_workbook_reads_the_same_as_xlsx_and_as_ods() {
         mismatches.len(),
         mismatches.join("\n  ")
     );
-    // Asserted, not merely allowed: the day calamine reads ODF error cells,
-    // this fails and the note above gets deleted rather than quietly outliving
-    // the defect it describes.
     assert!(
-        errors_lost > 0,
-        "the ODS error-cell gap has closed — delete this allowance and the \
-         upstream note with it"
+        errors_preserved > 0,
+        "the fixture's ODS error cells were not preserved as errors"
     );
 
     // A defined name's target is an address, not formula text, and arrives in
@@ -304,130 +365,11 @@ fn the_demo_workbook_reads_the_same_as_xlsx_and_as_ods() {
     assert_eq!(names(&xlsx.workbook), names(&ods.workbook));
 }
 
-/// The same demo workbook as `.xls`, where the reader is known to be wrong.
-///
-/// This is here to make an upstream bug report reproducible by someone who does
-/// not have the workbook it was found on. calamine reads a BIFF cross-sheet
-/// reference through the wrong table — the `EXTERNSHEET`/`XTI` index used as if
-/// it were a tab index — and the qualifiers come back *swapped*: what is on
-/// `Rates` is attributed to `Debtors` and the other way round. It is recorded
-/// as issue 9 in `docs/upstream-issues.md`, and reproduced against stock
-/// calamine 0.36.1, so it is not the fork's doing.
-///
-/// The defect is invisible to every other check in this file. The values are
-/// right, the formula count is right, the formulas *parse*, and each one names
-/// a real range on a real sheet — just not the one that was written. Only
-/// having the same spreadsheet in a second format shows it.
 #[test]
-fn the_demo_workbook_as_xls_names_the_wrong_sheets_and_nothing_else() {
+fn the_demo_workbook_reads_the_same_as_xlsx_and_as_xls() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/demo");
     let xlsx = load(dir.join("impairment.xlsx")).expect("load demo xlsx");
     let xls = load(dir.join("impairment.xls")).expect("load demo xls");
-
-    // Which sheet a reference was attributed to, counted over every formula
-    // whose text differs: `("Rates", "Debtors")` means the xlsx said `Rates`
-    // where the xls said `Debtors`.
-    let mut substitutions: BTreeMap<(String, String), usize> = BTreeMap::new();
-    let mut unexplained: Vec<String> = Vec::new();
-    let mut values = Vec::new();
-    let (mut agreeing, mut differing) = (0usize, 0usize);
-
-    for sheet_a in &xlsx.workbook.sheets {
-        let sheet_b = xls
-            .workbook
-            .sheet_by_name(&sheet_a.name)
-            .expect("the same workbook, so the same sheets");
-
-        let mut coords: Vec<(u32, u16)> = sheet_a
-            .iter()
-            .chain(sheet_b.iter())
-            .map(|(r, _)| (r.row, r.col))
-            .collect();
-        coords.sort_unstable();
-        coords.dedup();
-
-        for (row, col) in coords {
-            let a1 = eg_model::CellRef::new(sheet_a.id, row, col).to_a1();
-            let (va, vb) = (sheet_a.value(row, col), sheet_b.value(row, col));
-            if !values_agree(&va, &vb) {
-                values.push(format!("{}!{a1}: {va:?} vs {vb:?}", sheet_a.name));
-            }
-
-            let fa = sheet_a.get(row, col).and_then(|c| c.formula.as_deref());
-            let fb = sheet_b.get(row, col).and_then(|c| c.formula.as_deref());
-            let (Some(fa), Some(fb)) = (fa, fb) else {
-                if fa.is_some() != fb.is_some() {
-                    unexplained.push(format!("{}!{a1}: {fa:?} vs {fb:?}", sheet_a.name));
-                }
-                continue;
-            };
-            if fa == fb {
-                agreeing += 1;
-                continue;
-            }
-            differing += 1;
-
-            // A qualifier defect and only a qualifier defect: the two formulas
-            // must refer to the same things in the same order and at the same
-            // local addresses, differing only in the sheet each is attributed
-            // to. Anything else is a different bug and must not be absorbed
-            // into this one.
-            let (refs_a, refs_b) = (scan_references(fa), scan_references(fb));
-            let mut qualifier_only = refs_a.len() == refs_b.len();
-            for (x, y) in refs_a.iter().zip(refs_b.iter()) {
-                let local_matches = fa[x.local.clone()] == fb[y.local.clone()];
-                match (local_matches, &x.parsed.sheet_name, &y.parsed.sheet_name) {
-                    (true, Some(from), Some(to)) if from != to => {
-                        *substitutions.entry((from.clone(), to.clone())).or_default() += 1;
-                    }
-                    (true, from, to) if from == to => {}
-                    _ => qualifier_only = false,
-                }
-            }
-            if !qualifier_only {
-                unexplained.push(format!("{}!{a1}: {fa:?} vs {fb:?}", sheet_a.name));
-            }
-        }
-    }
-
-    // Values are untouched. The defect is in how a formula's *references* are
-    // decoded, not in what the file cached, which is exactly why a sweep like
-    // `eg check` cannot see it either.
-    assert!(values.is_empty(), "xls values differ: {values:?}");
-
-    // The one difference that is not a swapped qualifier: a 3-D reference,
-    // whose sheet span decodes to a single sheet and a column past Excel's
-    // last (`XFD`). Recorded here rather than tolerated — a second unexplained
-    // difference, or this one going away, fails the test.
-    assert_eq!(
-        unexplained.len(),
-        1,
-        "xls differs in ways issue 9 does not explain: {unexplained:?}"
-    );
-    assert!(
-        unexplained[0].contains("Jan:Mar!B2") && unexplained[0].contains("BTRN"),
-        "the 3-D reference decodes differently than recorded: {}",
-        unexplained[0]
-    );
-
-    // And the shape of the defect itself: a *swap*, not a shift or a default to
-    // the formula's own sheet. Both directions occurring is what points at an
-    // index into the wrong table rather than an off-by-one.
-    let pairs: Vec<(&str, &str)> = substitutions
-        .keys()
-        .map(|(a, b)| (a.as_str(), b.as_str()))
-        .collect();
-    assert_eq!(
-        pairs,
-        vec![("Debtors", "Rates"), ("Rates", "Debtors")],
-        "the substitutions are not the recorded swap: {substitutions:?}"
-    );
-
-    // Asserted so the test fails when calamine is fixed, rather than passing
-    // vacuously and outliving the defect it documents.
-    assert!(
-        differing > 0 && agreeing > 0,
-        "{agreeing} formulas agreed and {differing} differed — if none differ, \
-         issue 9 is fixed: delete this test and the upstream note with it"
-    );
+    assert_eq!(xlsx.workbook.sheets.len(), xls.workbook.sheets.len());
+    assert_agree("demo: xlsx vs xls", &xlsx, &xls);
 }
