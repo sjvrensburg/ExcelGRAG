@@ -10,10 +10,15 @@ specific cells. Rust, because the target is XLSB: a binary workbook of hundreds
 of megabytes and tens of millions of populated cells, which no Python library
 reads with formulas.
 
-`README.md` is the design document — it carries the reasoning behind nearly
-every decision below, and is worth reading before changing anything structural.
-The measurements that reasoning rests on are deliberately not in it (see
-**Confidential workbooks**); re-run the examples to see them.
+`docs/design.md` is the design document — it carries the reasoning behind
+nearly every decision below, and is worth reading before changing anything
+structural. The measurements that reasoning rests on are deliberately not in it
+(see **Confidential workbooks**); re-run the examples to see them.
+
+`README.md` is a README: what the project is, how to install and run it, and
+where the design document is. Keep it that way — the reasoning, the discarded
+approaches and the measurements that settled a constant go in `docs/design.md`,
+and the working rules go here.
 
 ## Commands
 
@@ -120,9 +125,9 @@ above it.
   keyed by the blake3 of the source file, plus `profiles/<blake3>.json`, holding
   the region layer *and* the formula groups, up to `MAX_STORED_FORMULA_GROUPS`;
   past that the group layer is dropped in place
-  (`BuiltGraph::drop_formula_groups`) and rebuilt on demand. The README explains
-  why the old "never store them" measurement was an artifact of the pre-fork
-  reader.
+  (`BuiltGraph::drop_formula_groups`) and rebuilt on demand. `docs/design.md`
+  explains why the old "never store them" measurement was an artifact of the
+  pre-fork reader.
 - `eg-index` — `TextIndex` (tantivy) and `VectorIndex` (fastembed,
   `bge-small-en-v1.5` via ONNX, full scan, no ANN) over the same node flattening,
   keyed by the same blake3. A column also carries **what it was profiled to
@@ -148,8 +153,8 @@ above it.
   talk to. Every answer carries `Search::evidence()`, which words of the
   question the corpus knows and which the top result accounts for; that is
   printed above every passage, and a `Verdict::Blind` raises a banner. It is
-  deliberately not a confidence score — see the README for the two that were
-  tried and discarded. A miss is reported against **what the corpus indexes**,
+  deliberately not a confidence score — see `docs/design.md` for the two that
+  were tried and discarded. A miss is reported against **what the corpus indexes**,
   never against the workbook: an unmatched word that parses as a number earns a
   sentence saying a column's values are indexed only where its profile kept
   them, and naming the scan (`find_value`, `eg where`) that can settle it —
@@ -319,11 +324,12 @@ committed text or anywhere public; that constraint is why the paragraph above
 exists, and the vocabulary gives it away as readily as the word would.
 Otherwise the line is drawn at what identifies: no personal or entity names, no
 monetary amounts, and none of its **measurements** in a commit message or in
-`README.md` — cell and formula counts, node and edge totals, timings, index
-sizes, agreement percentages. Report those on the terminal, where the person who
-asked for them is; a commit message says the check passed, and the README
-describes the shape of a result rather than quoting one. Sheet names appear in
-the README only as consistent pseudonyms.
+any committed document — cell and formula counts, node and edge totals,
+timings, index sizes, agreement percentages. That covers `README.md` and
+`docs/design.md` alike: the design document names *which* measurement settled a
+decision, never the number it came out at. Report those on the terminal, where
+the person who asked for them is; a commit message says the check passed.
+Sheet names appear in committed prose only as consistent pseudonyms.
 
 `docs/upstream-issues.md` and the calamine reports it links are the deliberate
 exception, reviewed and kept on those terms: their measurements and cell values
