@@ -61,9 +61,9 @@ fn workbook() -> Workbook {
                 "Work Doc",
                 &[
                     "Customer | Debt Type | Total Debt | Discount Rate | PV of expected receipts | Impairment provision",
-                    "North | Residential | 1200 | =VLOOKUP(B2,Rates!A:B,2,FALSE) | =C2/(1+D2) | =C2-E2",
+                    "North | Retail | 1200 | =VLOOKUP(B2,Rates!A:B,2,FALSE) | =C2/(1+D2) | =C2-E2",
                     "South | Business | 3400 | =VLOOKUP(B3,Rates!A:B,2,FALSE) | =C3/(1+D3) | =C3-E3",
-                    "East | Residential | 900 | =VLOOKUP(B4,Rates!A:B,2,FALSE) | =C4/(1+D4) | =C4-E4",
+                    "East | Retail | 900 | =VLOOKUP(B4,Rates!A:B,2,FALSE) | =C4/(1+D4) | =C4-E4",
                 ],
             ),
             grid(
@@ -71,9 +71,9 @@ fn workbook() -> Workbook {
                 "Rates",
                 &[
                     "Debt Type | Discount Rate",
-                    "Residential | 0.08",
+                    "Retail | 0.08",
                     "Business | 0.11",
-                    "Indigent | 0.15",
+                    "Wholesale | 0.15",
                 ],
             ),
             grid(

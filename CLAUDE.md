@@ -41,8 +41,9 @@ cargo run --release -p eg-cli -- serve corpus/             # MCP over stdio
 ```
 
 `eg-fixtures` generates the demo workbook every one of those can be run
-against — a fictional municipality's debtor impairment, invented data in the
-shape of the real thing, deterministic from a fixed seed:
+against — a fictional distributor's trade debtor impairment, deterministic
+from a fixed seed. Its *structure* mirrors the workbook this project was built
+against, which is the point of it; its subject matter deliberately does not:
 
 ```sh
 cargo run --release -p eg-fixtures -- --rows 2000 --out tests/fixtures/demo

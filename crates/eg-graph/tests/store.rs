@@ -329,7 +329,7 @@ fn profiles_are_stored_beside_the_graph_and_not_inside_it() {
             empty: 0,
             errors: 0,
             distinct: Some(vec![eg_structure::ValueCount {
-                value: "Residential".into(),
+                value: "Retail".into(),
                 count: 2,
                 truncated: false,
             }]),
@@ -358,7 +358,7 @@ fn profiles_are_stored_beside_the_graph_and_not_inside_it() {
     // Two files, and the graph's is untouched by any of it.
     let graph_bytes = std::fs::read(corpus.graph_path(&wb.content_hash)).unwrap();
     assert!(
-        !String::from_utf8_lossy(&graph_bytes).contains("Residential"),
+        !String::from_utf8_lossy(&graph_bytes).contains("Retail"),
         "no value reached the graph file"
     );
     assert!(corpus.profiles_path(&wb.content_hash).exists());
@@ -391,7 +391,7 @@ fn forgetting_a_workbook_removes_its_profiles_too() {
             empty: 0,
             errors: 0,
             distinct: Some(vec![eg_structure::ValueCount {
-                value: "Residential".into(),
+                value: "Retail".into(),
                 count: 2,
                 truncated: false,
             }]),

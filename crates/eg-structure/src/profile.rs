@@ -3,7 +3,7 @@
 //! The graph says where a table is and [`crate::table`] says what shape it has.
 //! Neither says what is *in* it, and that is the gap a person's question falls
 //! into: nothing in the index knows that the `Debt Type` column holds
-//! `Residential`, `Business` and `Indigent`, so "which debtors are indigent"
+//! `Retail`, `Business` and `Wholesale`, so "which debtors are wholesale"
 //! cannot match anything. A workbook is asked about in the vocabulary of its
 //! values at least as often as in the vocabulary of its headers.
 //!
@@ -351,13 +351,13 @@ mod tests {
     #[test]
     fn a_categorical_column_keeps_its_values_and_their_counts() {
         // The whole point: nothing in the index knew that this column holds
-        // "Residential" until now, so a question naming it could match nothing.
+        // "Retail" until now, so a question naming it could match nothing.
         let sheet = grid(&[
             "Customer Type Debt",
-            "North Residential 1200",
+            "North Retail 1200",
             "South Business 3400",
-            "East Residential 900",
-            "West Residential 700",
+            "East Retail 900",
+            "West Retail 700",
         ]);
         let found = profiles(
             &sheet,
@@ -370,7 +370,7 @@ mod tests {
         assert_eq!(types.distinct_count, Some(2));
         let values = types.distinct.as_ref().expect("few enough to keep");
         // Most frequent first, so a reader sees the shape of the column.
-        assert_eq!(values[0].value, "Residential");
+        assert_eq!(values[0].value, "Retail");
         assert_eq!(values[0].count, 3);
         assert_eq!(values[1].value, "Business");
         assert!(types.is_categorical(), "three rows over two values");
@@ -423,9 +423,9 @@ mod tests {
     fn a_numeric_column_carries_arithmetic_the_workbook_never_wrote_down() {
         let sheet = grid(&[
             "Customer Type Debt",
-            "North Residential 1200",
+            "North Retail 1200",
             "South Business 3400",
-            "East Residential 900",
+            "East Retail 900",
         ]);
         let found = profiles(
             &sheet,
@@ -447,7 +447,7 @@ mod tests {
         // reader needs to know the column exists.
         let sheet = grid(&[
             "Customer Type Debt",
-            "North Residential 1200",
+            "North Retail 1200",
             "South Business 3400",
         ]);
         let opts = ProfileOptions {

@@ -209,8 +209,8 @@ the gap, for that row only.
 
 The graph says where a table is and the table says what shape it has. Neither
 says what is *in* it, and that is the gap a person's question falls into:
-nothing in the index knew that a `Debt Type` column holds `Residential`,
-`Business` and `Indigent`, so a question naming a value rather than a header
+nothing in the index knew that a `Debt Type` column holds `Retail`,
+`Business` and `Wholesale`, so a question naming a value rather than a header
 matched nothing.
 
 `eg index` now profiles every column: how many rows, how many blank, how many
@@ -1060,10 +1060,14 @@ cargo run --release -p eg-retrieve --example answers -- corpus/ questions.json -
 
 Everything above was developed against a workbook that cannot be shared, and
 for a long time the fixtures were calamine's rather than ours. `eg-fixtures`
-writes a fictional municipality's debtor impairment workbook: a long working
-table of filled-down formulas, the small lookup tables it keys into, month
-sheets a 3-D reference spans, and a summary sheet that reads across all of it.
-Same shape, invented data, deterministic from a fixed seed.
+writes a fictional distributor's trade debtor impairment workbook: a long
+working table of filled-down formulas, the small lookup tables it keys into,
+month sheets a 3-D reference spans, and a summary sheet that reads across all
+of it. Invented data, deterministic from a fixed seed.
+
+The *structure* is deliberately the structure of the workbook this project was
+built against — that is what makes it a fair test. The subject matter is not,
+and is not meant to be read as a clue about it.
 
 The interesting part is where its numbers come from. The generator writes flat
 ODS with formulas and **no values at all**, and LibreOffice computes them on

@@ -302,7 +302,7 @@ mod tests {
         // and a grid that is text throughout gives it none. That is a block,
         // and its columns are real columns with nothing to call them — which a
         // caller must be able to tell from a column whose header is blank.
-        let sheet = grid(&["North Residential 1200", "South Business 3400"]);
+        let sheet = grid(&["North Retail 1200", "South Business 3400"]);
         let regions = detect_regions(&sheet);
         let table = read_table(&sheet, &regions[0]).unwrap();
         assert!(table.columns.iter().all(|c| c.header.is_empty()));

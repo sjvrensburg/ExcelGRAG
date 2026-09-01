@@ -216,7 +216,7 @@ fn a_group_with_no_number_to_add_says_none_rather_than_zero() {
     let answer = ask(Query {
         filters: vec![Filter {
             column: "Type".into(),
-            test: Test::Is(CellValue::Text("Municipal".into())),
+            test: Test::Is(CellValue::Text("Wholesale".into())),
         }],
         aggregates: vec![Aggregate::Sum("Debt".into()), Aggregate::Count],
         limit: 10,
