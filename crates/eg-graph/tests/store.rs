@@ -147,6 +147,28 @@ fn forgetting_a_workbook_removes_its_file() {
 }
 
 #[test]
+fn a_failed_forget_restores_the_in_memory_manifest() {
+    let root = dir();
+    let wb = workbook("hash-forget-failure");
+    let built = build(&wb);
+    let mut corpus = Corpus::open(&root).unwrap();
+    corpus
+        .put(&wb.content_hash, &wb.path, 2, 12, false, &built)
+        .unwrap();
+
+    let manifest = root.join("manifest.json");
+    std::fs::remove_file(&manifest).unwrap();
+    std::fs::create_dir(&manifest).unwrap();
+    assert!(corpus.forget(&wb.content_hash).is_err());
+    assert!(
+        corpus.entries().any(|(hash, _)| hash == wb.content_hash),
+        "an operation returning Err must remain retryable in this handle"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn a_graph_file_from_another_version_is_a_miss() {
     // Rebuilding costs seconds. Deserialising a file whose shape we no longer
     // understand into something plausible costs a wrong answer.

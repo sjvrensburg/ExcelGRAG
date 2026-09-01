@@ -47,6 +47,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use petgraph::graph::NodeIndex;
 use serde::{Deserialize, Serialize};
@@ -343,14 +344,19 @@ impl Corpus {
 
     /// Drop a workbook from the corpus. Returns whether it was there.
     pub fn forget(&mut self, content_hash: &str) -> Result<bool, StoreError> {
-        if self.manifest.workbooks.remove(content_hash).is_none() {
+        let Some(entry) = self.manifest.workbooks.remove(content_hash) else {
             return Ok(false);
-        }
+        };
         // The manifest goes first. It is what `get` consults, so once the entry
         // is gone the workbook is forgotten whatever happens to the file; the
         // other order leaves a manifest on disk that still lists it while this
         // `Corpus` believes it does not.
-        self.write_manifest()?;
+        if let Err(error) = self.write_manifest() {
+            self.manifest
+                .workbooks
+                .insert(content_hash.to_string(), entry);
+            return Err(error);
+        }
         let path = self.graph_path(content_hash);
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -501,12 +507,15 @@ impl Corpus {
 /// V3: the corpus has no inter-process lock, so two `eg index` runs against
 /// the same directory can both reach here for the same path (`manifest.json`,
 /// most likely) at once. The tmp name is uniquified per process so the two
-/// writes cannot interleave into one file before either renames — the last
-/// `rename` still wins the race for the real path, same as any single-writer
+/// writes cannot interleave into one file before either renames. A per-call
+/// sequence also separates two handles in the same process — the last `rename`
+/// still wins the race for the real path, same as any single-writer
 /// assumption broken by two writers, but at least it is a clean last-write,
 /// not a torn one.
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
-    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
+    let sequence = NEXT_TMP.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("{}.{}.tmp", std::process::id(), sequence));
     fs::write(&tmp, bytes).map_err(io_err(format!("writing {}", tmp.display())))?;
     fs::rename(&tmp, path).map_err(io_err(format!("renaming into {}", path.display())))
 }

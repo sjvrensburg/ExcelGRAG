@@ -53,7 +53,7 @@ pub const TOOLS: &[Tool] = &[
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "What to look for, in words." },
-                    "limit": { "type": "integer", "description": "How many hits, default 8." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "How many hits, default 8." },
                     "workbook": { "type": "string", "description": "Restrict to one workbook (content hash, path or file name)." },
                     "sheet": { "type": "string", "description": "Restrict to one sheet, by exact name." },
                     "lexical_only": { "type": "boolean", "description": "Skip the embedding model and match by word alone." }
@@ -76,11 +76,11 @@ pub const TOOLS: &[Tool] = &[
                     "query": { "type": "string", "description": "The question, in words." },
                     "workbook": { "type": "string", "description": "Restrict to one workbook (content hash, path or file name)." },
                     "sheet": { "type": "string", "description": "Restrict to one sheet, by exact name." },
-                    "seeds": { "type": "integer", "description": "How many hits to expand from, default 5." },
+                    "seeds": { "type": "integer", "minimum": 1, "maximum": 50, "description": "How many hits to expand from, default 5." },
                     "hops": { "type": "integer", "description": "Dependency hops from a seed, default 2." },
-                    "budget": { "type": "integer", "description": "Most nodes per workbook, default 40." },
+                    "budget": { "type": "integer", "minimum": 1, "description": "Most nodes per workbook, default 40." },
                     "children": { "type": "integer", "description": "Contained children to show per node, default 0." },
-                    "max_chars": { "type": "integer", "description": "Ceiling on the passage, default 8000." },
+                    "max_chars": { "type": "integer", "minimum": 200, "description": "Ceiling on the passage, default 8000." },
                     "lexical_only": { "type": "boolean" }
                 },
                 "required": ["query"],
@@ -123,7 +123,7 @@ pub const TOOLS: &[Tool] = &[
                 "properties": {
                     "value": { "description": "The value to find, as a JSON number, string or boolean. A number and the string of its digits are different values; the answer says how many cells hold the other one." },
                     "workbook": { "type": "string", "description": "Which workbook (content hash, path or file name). Optional when the corpus holds one." },
-                    "limit": { "type": "integer", "description": "Most cells to return, default 40." }
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Most cells to return, default 40." }
                 },
                 "required": ["value"],
                 "additionalProperties": false
@@ -147,7 +147,7 @@ pub const TOOLS: &[Tool] = &[
                 "properties": {
                     "workbook": {"type": "string", "description": "Path or hash. Optional when the corpus holds one."},
                     "sheet": {"type": "string", "description": "Restrict to one sheet, by exact name."},
-                    "limit": {"type": "integer", "description": "Tables to list. Default 40."}
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 500, "description": "Tables to list. Default 40."}
                 },
                 "additionalProperties": false
             })
@@ -172,7 +172,8 @@ pub const TOOLS: &[Tool] = &[
                                 "test": {"type": "string", "enum": ["is", "is_not", "contains", "one_of", "above", "at_least", "below", "at_most", "blank", "not_blank", "failed"]},
                                 "value": {"description": "The value to test against. A list for `one_of`; omitted for `blank`, `not_blank` and `failed`."}
                             },
-                            "required": ["column", "test"]
+                            "required": ["column", "test"],
+                            "additionalProperties": false
                         }
                     },
                     "group_by": {"type": "array", "items": {"type": "string"}, "description": "Column headers to group by."},
@@ -185,10 +186,11 @@ pub const TOOLS: &[Tool] = &[
                                 "of": {"type": "string", "enum": ["count", "count_values", "count_distinct", "sum", "mean", "min", "max"]},
                                 "column": {"type": "string"}
                             },
-                            "required": ["of"]
+                            "required": ["of"],
+                            "additionalProperties": false
                         }
                     },
-                    "limit": {"type": "integer", "description": "Groups returned. Default 20."}
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Groups returned. Default 20."}
                 },
                 "additionalProperties": false,
                 "required": ["table", "aggregate"]
@@ -204,7 +206,7 @@ pub const TOOLS: &[Tool] = &[
                 "properties": {
                     "workbook": {"type": "string", "description": "Path or hash. Optional when the corpus holds one."},
                     "sheet": {"type": "string", "description": "Only relations whose formulas live on this sheet."},
-                    "limit": {"type": "integer", "description": "Relations returned, heaviest first. Default 25."}
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Relations returned, heaviest first. Default 25."}
                 },
                 "additionalProperties": false
             })
@@ -235,8 +237,8 @@ pub const TOOLS: &[Tool] = &[
                         }
                     },
                     "workbook": { "type": "string", "description": "Which workbook (content hash, path or file name). Optional when the corpus holds one." },
-                    "levels": { "type": "integer", "description": "Levels of the dependency chain to follow, default 8. Each is a full scan." },
-                    "limit": { "type": "integer", "description": "Most moved cells to list, default 40." }
+                    "levels": { "type": "integer", "minimum": 1, "maximum": 32, "description": "Levels of the dependency chain to follow, default 8. Each is a full scan." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Most moved cells to list, default 40." }
                 },
                 "required": ["changes"],
                 "additionalProperties": false
@@ -251,7 +253,7 @@ fn cell_schema(citation: &str) -> Value {
         "properties": {
             "citation": { "type": "string", "description": citation },
             "workbook": { "type": "string", "description": "Which workbook (content hash, path or file name). Optional when the corpus holds one." },
-            "limit": { "type": "integer", "description": "Most rows to return, default 40." }
+            "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Most rows to return, default 40." }
         },
         "required": ["citation"],
         "additionalProperties": false
@@ -322,6 +324,22 @@ fn opt_usize(args: &Value, key: &str, default: usize) -> Result<usize, String> {
             json_kind(other)
         )),
     }
+}
+
+fn opt_bounded(
+    args: &Value,
+    key: &str,
+    default: usize,
+    min: usize,
+    max: usize,
+) -> Result<usize, String> {
+    let value = opt_usize(args, key, default)?;
+    if !(min..=max).contains(&value) {
+        return Err(format!(
+            "{key} must be between {min} and {max}, got {value}"
+        ));
+    }
+    Ok(value)
 }
 
 /// As [`opt_str`], for a list argument. Absent or `null` is the empty list;
@@ -397,7 +415,7 @@ fn search(state: &mut State, args: &Value) -> Result<String, String> {
         None => None,
     };
     let opts = SearchOptions {
-        limit: opt_usize(args, "limit", 8)?.clamp(1, 100),
+        limit: opt_bounded(args, "limit", 8, 1, 100)?,
         workbook,
         sheet: opt_str(args, "sheet")?,
         ..Default::default()
@@ -438,7 +456,7 @@ fn search(state: &mut State, args: &Value) -> Result<String, String> {
 
 fn context(state: &mut State, args: &Value) -> Result<String, String> {
     let query = want_str(args, "query")?;
-    let seeds = opt_usize(args, "seeds", 5)?.clamp(1, 50);
+    let seeds = opt_bounded(args, "seeds", 5, 1, 50)?;
     let workbook = match opt_str(args, "workbook")? {
         Some(want) => Some(state.resolve(Some(&want))?.0),
         None => None,
@@ -459,7 +477,7 @@ fn context(state: &mut State, args: &Value) -> Result<String, String> {
 
     let expand_opts = ExpandOptions {
         hops: opt_usize(args, "hops", 2)?,
-        budget: opt_usize(args, "budget", 40)?.max(1),
+        budget: opt_bounded(args, "budget", 40, 1, usize::MAX)?,
         children: opt_usize(args, "children", 0)?,
         ..Default::default()
     };
@@ -468,7 +486,7 @@ fn context(state: &mut State, args: &Value) -> Result<String, String> {
     let rendered = render(
         &found,
         &RenderOptions {
-            max_chars: opt_usize(args, "max_chars", 8000)?.max(200),
+            max_chars: opt_bounded(args, "max_chars", 8000, 200, usize::MAX)?,
             ..Default::default()
         },
     );
@@ -592,7 +610,7 @@ fn show_formula(formula: &str, redact: bool) -> String {
 }
 
 fn read_cells(state: &mut State, args: &Value) -> Result<String, String> {
-    let limit = opt_usize(args, "limit", 40)?.clamp(1, 500);
+    let limit = opt_bounded(args, "limit", 40, 1, 500)?;
     let redact = state.redact_values;
     let (loaded, range, note) = located(state, args)?;
     let workbook = &loaded.workbook;
@@ -618,7 +636,7 @@ fn read_cells(state: &mut State, args: &Value) -> Result<String, String> {
 }
 
 fn precedents(state: &mut State, args: &Value) -> Result<String, String> {
-    let limit = opt_usize(args, "limit", 40)?.clamp(1, 500);
+    let limit = opt_bounded(args, "limit", 40, 1, 500)?;
     let (loaded, range, note) = located(state, args)?;
     let workbook = &loaded.workbook;
 
@@ -649,7 +667,7 @@ fn precedents(state: &mut State, args: &Value) -> Result<String, String> {
 }
 
 fn dependents(state: &mut State, args: &Value) -> Result<String, String> {
-    let limit = opt_usize(args, "limit", 40)?.clamp(1, 500);
+    let limit = opt_bounded(args, "limit", 40, 1, 500)?;
     let (loaded, range, note) = located(state, args)?;
     let workbook = &loaded.workbook;
 
@@ -683,7 +701,7 @@ fn dependents(state: &mut State, args: &Value) -> Result<String, String> {
 /// question. `eg where corpus/ <value>` on a terminal is where a caller who
 /// wants that goes.
 fn find_value(state: &mut State, args: &Value) -> Result<String, String> {
-    let limit = opt_usize(args, "limit", 40)?.clamp(1, 500);
+    let limit = opt_bounded(args, "limit", 40, 1, 500)?;
     let redact = state.redact_values;
     let probe = cell_value(
         args.get("value")
@@ -737,7 +755,7 @@ fn find_value(state: &mut State, args: &Value) -> Result<String, String> {
 }
 
 fn recompute_tool(state: &mut State, args: &Value) -> Result<String, String> {
-    let limit = opt_usize(args, "limit", 40)?.clamp(1, 500);
+    let limit = opt_bounded(args, "limit", 40, 1, 500)?;
     let redact = state.redact_values;
     let (loaded, range, note) = located(state, args)?;
     let workbook = &loaded.workbook;
@@ -823,8 +841,8 @@ fn cell_value(value: &Value) -> Result<CellValue, String> {
 
 fn what_if_tool(state: &mut State, args: &Value) -> Result<String, String> {
     let redact = state.redact_values;
-    let levels = opt_usize(args, "levels", 8)?.clamp(1, 32);
-    let limit = opt_usize(args, "limit", 40)?.clamp(1, 500);
+    let levels = opt_bounded(args, "levels", 8, 1, 32)?;
+    let limit = opt_bounded(args, "limit", 40, 1, 500)?;
     let requested = args
         .get("changes")
         .and_then(Value::as_array)
@@ -953,7 +971,7 @@ fn tables(state: &mut State, args: &Value) -> Result<String, String> {
     let (_, path) = state.resolve(opt_str(args, "workbook")?.as_deref())?;
     let (loaded, load_seconds) = state.workbook(&path)?;
     let only = opt_str(args, "sheet")?;
-    let limit = opt_usize(args, "limit", 40)?.clamp(1, 500);
+    let limit = opt_bounded(args, "limit", 40, 1, 500)?;
 
     let mut out = String::new();
     if let Some(seconds) = load_seconds {
@@ -1040,7 +1058,7 @@ fn query_table(state: &mut State, args: &Value) -> Result<String, String> {
     let table = table_at(&loaded, &citation)?;
 
     let mut query = Query {
-        limit: opt_usize(args, "limit", 20)?.clamp(1, 200),
+        limit: opt_bounded(args, "limit", 20, 1, 200)?,
         ..Default::default()
     };
     for filter in opt_array(args, "where")? {
@@ -1205,7 +1223,7 @@ fn schema(state: &mut State, args: &Value) -> Result<String, String> {
     let (_, path) = state.resolve(opt_str(args, "workbook")?.as_deref())?;
     let (loaded, load_seconds) = state.workbook(&path)?;
     let only = opt_str(args, "sheet")?;
-    let limit = opt_usize(args, "limit", 25)?.clamp(1, 200);
+    let limit = opt_bounded(args, "limit", 25, 1, 200)?;
 
     let found = infer_schema(&loaded.workbook);
     let wanted: Vec<&Lookup> = found
