@@ -70,12 +70,12 @@ cargo install --path crates/eg-cli
 
 Release builds matter: debug builds are unusably slow on real workbooks.
 
-`eg-ingest` depends on a [forked calamine](https://github.com/sjvrensburg/calamine),
-wired in through `[patch.crates-io]` and pinned by `Cargo.lock`. There is
-nothing extra to clone — `cargo build` fetches it. Without those fixes most of
+`eg-ingest` depends on patched calamine source committed under
+`vendor/calamine` and wired in through `[patch.crates-io]`. There is nothing
+extra to clone or fetch. Without those fixes most of
 a real XLSB workbook's formulas go missing and every comparison is inverted.
 Each is submitted upstream on its own branch; delete the `[patch.crates-io]`
-section once they land in a published release. Every defect found while
+section and vendored directory once they land in a published release. Every defect found while
 building this is recorded in
 [`docs/upstream-issues.md`](docs/upstream-issues.md).
 

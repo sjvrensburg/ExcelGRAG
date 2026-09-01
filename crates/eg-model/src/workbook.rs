@@ -268,9 +268,7 @@ impl Workbook {
 
     /// Look up a sheet by name, case-insensitively as Excel does.
     pub fn sheet_by_name(&self, name: &str) -> Option<&Sheet> {
-        self.sheets
-            .iter()
-            .find(|s| s.name.eq_ignore_ascii_case(name))
+        self.sheets.iter().find(|s| names_equal(&s.name, name))
     }
 
     pub fn sheet_id_by_name(&self, name: &str) -> Option<SheetId> {
@@ -305,6 +303,13 @@ impl Workbook {
     pub fn is_writable(&self) -> bool {
         self.format.is_some_and(|f| f.is_writable())
     }
+}
+
+/// Excel identifiers are case-insensitive beyond ASCII. Keep the common path
+/// allocation-free, and use Unicode lowercase folding for international names.
+fn names_equal(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+        || (!(left.is_ascii() && right.is_ascii()) && left.to_lowercase() == right.to_lowercase())
 }
 
 #[cfg(test)]
@@ -433,12 +438,23 @@ mod tests {
     #[test]
     fn sheet_lookup_is_case_insensitive() {
         let wb = Workbook {
-            sheets: vec![Sheet::new(SheetId(0), "Q3 Sales")],
+            sheets: vec![
+                Sheet::new(SheetId(0), "Q3 Sales"),
+                Sheet::new(SheetId(1), "État"),
+            ],
             ..Default::default()
         };
         assert!(wb.sheet_by_name("q3 sales").is_some());
         assert_eq!(wb.sheet_id_by_name("Q3 SALES"), Some(SheetId(0)));
         assert!(wb.sheet_by_name("Missing").is_none());
+        assert_eq!(wb.sheet_id_by_name("état"), Some(SheetId(1)));
+        assert_eq!(wb.sheet_id_by_name("KELVIN \u{212a}"), None);
+
+        let kelvin = Workbook {
+            sheets: vec![Sheet::new(SheetId(0), "kelvin k")],
+            ..Default::default()
+        };
+        assert_eq!(kelvin.sheet_id_by_name("KELVIN \u{212a}"), Some(SheetId(0)));
     }
 
     #[test]

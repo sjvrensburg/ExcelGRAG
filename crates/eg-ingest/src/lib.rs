@@ -160,9 +160,36 @@ pub fn load_with(path: impl AsRef<Path>, opts: &LoadOptions) -> Result<Loaded, I
         .and_then(WorkbookFormat::from_extension)
         .ok_or_else(|| IngestError::UnsupportedFormat(path.to_path_buf()))?;
 
-    let content_hash = hash_file(path)?;
-
-    let mut sheets = calamine::open_workbook_auto(path).map_err(|e| IngestError::Open {
+    // Hash and parse the same open file. Reopening the path here allowed a
+    // concurrent save/sync rename to put workbook B under workbook A's hash.
+    use std::io::{BufReader, Seek};
+    let mut source = std::fs::File::open(path).map_err(|source| IngestError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let content_hash = hash_reader(&mut source, path)?;
+    source.rewind().map_err(|source| IngestError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let reader = BufReader::new(source);
+    let opened = match format {
+        WorkbookFormat::Xls => calamine::open_workbook_from_rs::<calamine::Xls<_>, _>(reader)
+            .map(calamine::Sheets::Xls)
+            .map_err(calamine::Error::Xls),
+        WorkbookFormat::Xlsx | WorkbookFormat::Xlsm => {
+            calamine::open_workbook_from_rs::<calamine::Xlsx<_>, _>(reader)
+                .map(calamine::Sheets::Xlsx)
+                .map_err(calamine::Error::Xlsx)
+        }
+        WorkbookFormat::Xlsb => calamine::open_workbook_from_rs::<calamine::Xlsb<_>, _>(reader)
+            .map(calamine::Sheets::Xlsb)
+            .map_err(calamine::Error::Xlsb),
+        WorkbookFormat::Ods => calamine::open_workbook_from_rs::<calamine::Ods<_>, _>(reader)
+            .map(calamine::Sheets::Ods)
+            .map_err(calamine::Error::Ods),
+    };
+    let mut sheets = opened.map_err(|e| IngestError::Open {
         path: path.to_path_buf(),
         message: e.to_string(),
     })?;
@@ -180,24 +207,12 @@ pub fn load_with(path: impl AsRef<Path>, opts: &LoadOptions) -> Result<Loaded, I
         return Err(IngestError::TooManySheets(metadata.len()));
     }
 
-    let defined_names: Vec<DefinedName> = sheets
-        .defined_names()
-        .iter()
-        .map(|(name, refers_to)| DefinedName {
-            name: name.clone(),
-            // ODF writes the target in its own address syntax (`$Rates.$B$11`),
-            // and every resolver downstream reads A1. Untranslatable targets
-            // keep what the file said, so the name still exists and simply
-            // fails to resolve, rather than resolving somewhere else.
-            refers_to: match matches!(format, WorkbookFormat::Ods) {
-                true => odf::address_to_a1(refers_to).unwrap_or_else(|| refers_to.clone()),
-                false => refers_to.clone(),
-            },
-            // calamine flattens scope away; names are treated as workbook-scoped
-            // and the sheet qualifier inside `refers_to` carries the location.
-            scope: None,
-        })
-        .collect();
+    let defined_names = convert_defined_names(
+        sheets.defined_names(),
+        sheets.defined_name_scopes(),
+        format,
+        &mut warnings,
+    );
 
     // Merges and tables come from format-specific APIs, so they are gathered up
     // front while we can still match on the concrete reader.
@@ -330,6 +345,38 @@ pub fn load_with(path: impl AsRef<Path>, opts: &LoadOptions) -> Result<Loaded, I
         capabilities,
         warnings,
     })
+}
+
+fn convert_defined_names(
+    raw: &[(String, String)],
+    scopes: &[Option<usize>],
+    format: WorkbookFormat,
+    warnings: &mut Vec<String>,
+) -> Vec<DefinedName> {
+    let mut defined_names = Vec::with_capacity(raw.len());
+    for (index, (name, refers_to)) in raw.iter().enumerate() {
+        let target = if matches!(format, WorkbookFormat::Ods) {
+            match odf::address_to_a1(refers_to) {
+                Some(target) => target,
+                None => {
+                    warnings.push(format!(
+                        "defined name {name:?} has an ODF target that could not be translated: {refers_to}"
+                    ));
+                    refers_to.clone()
+                }
+            }
+        } else {
+            refers_to.clone()
+        };
+        defined_names.push(DefinedName {
+            name: name.clone(),
+            refers_to: target,
+            scope: scopes
+                .get(index)
+                .and_then(|scope| scope.map(|sheet| SheetId(sheet as u16))),
+        });
+    }
+    defined_names
 }
 
 /// Overlay formula text onto cells whose cached value we already read.
@@ -521,12 +568,8 @@ fn index_of(metadata: &[(String, Visibility)], name: &str) -> Option<usize> {
 }
 
 /// Content hash of the source file, used to skip re-ingesting unchanged input.
-fn hash_file(path: &Path) -> Result<String, IngestError> {
+fn hash_reader(file: &mut std::fs::File, path: &Path) -> Result<String, IngestError> {
     use std::io::Read;
-    let mut file = std::fs::File::open(path).map_err(|source| IngestError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0u8; 64 * 1024];
     loop {
@@ -568,6 +611,20 @@ mod tests {
         ] {
             assert!(!Capabilities::for_format(f).cell_styling, "{f}");
         }
+    }
+
+    #[test]
+    fn an_untranslatable_ods_name_target_is_warned_about() {
+        let mut warnings = Vec::new();
+        let names = convert_defined_names(
+            &[("Rate".to_string(), ".B2:$Mar.B2".to_string())],
+            &[None],
+            WorkbookFormat::Ods,
+            &mut warnings,
+        );
+        assert_eq!(names[0].refers_to, ".B2:$Mar.B2");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("Rate") && warnings[0].contains("could not be translated"));
     }
 
     #[test]

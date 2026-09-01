@@ -19,12 +19,12 @@ use eg_model::{parse_a1, redact_formula_literals, CellValue, RangeRef, Workbook}
 
 /// Open a workbook, saying how long it took, because on a real file the wait
 /// wants explaining.
-fn open(path: &str) -> Result<Workbook, String> {
+fn open(path: &str, max_input_cells: Option<u64>) -> Result<Workbook, String> {
     let started = Instant::now();
     let loaded = load_with(
         path,
         &LoadOptions {
-            max_cells: None,
+            max_cells: max_input_cells,
             ..Default::default()
         },
     )
@@ -82,8 +82,14 @@ fn show_formula(formula: &str, redact: bool) -> String {
     }
 }
 
-pub fn cells(path: &str, citation: &str, limit: usize, redact: bool) -> Result<(), String> {
-    let workbook = open(path)?;
+pub fn cells(
+    path: &str,
+    citation: &str,
+    limit: usize,
+    redact: bool,
+    max_input_cells: Option<u64>,
+) -> Result<(), String> {
+    let workbook = open(path, max_input_cells)?;
     let range = locate(&workbook, citation)?;
     let (cells, capped) = cells_in(&workbook, range, limit);
 
@@ -106,8 +112,14 @@ pub fn cells(path: &str, citation: &str, limit: usize, redact: bool) -> Result<(
     Ok(())
 }
 
-pub fn trace(path: &str, citation: &str, dependents: bool, limit: usize) -> Result<(), String> {
-    let workbook = open(path)?;
+pub fn trace(
+    path: &str,
+    citation: &str,
+    dependents: bool,
+    limit: usize,
+    max_input_cells: Option<u64>,
+) -> Result<(), String> {
+    let workbook = open(path, max_input_cells)?;
     let range = locate(&workbook, citation)?;
     let at = Instant::now();
 
@@ -173,8 +185,14 @@ pub fn trace(path: &str, citation: &str, dependents: bool, limit: usize) -> Resu
 /// disagreed — CLAUDE.md calls any disagreement a regression, and a caller
 /// (CI, most of all) cannot gate on that from stdout alone, so `main` turns
 /// this into a non-zero exit rather than the same 0 a clean sweep gets.
-pub fn check(path: &str, scope: Option<&str>, limit: usize, redact: bool) -> Result<bool, String> {
-    let workbook = open(path)?;
+pub fn check(
+    path: &str,
+    scope: Option<&str>,
+    limit: usize,
+    redact: bool,
+    max_input_cells: Option<u64>,
+) -> Result<bool, String> {
+    let workbook = open(path, max_input_cells)?;
     let range = match scope {
         Some(citation) => Some(locate(&workbook, citation)?),
         None => None,
@@ -310,8 +328,9 @@ pub fn whatif(
     max_cells: usize,
     limit: usize,
     redact: bool,
+    max_input_cells: Option<u64>,
 ) -> Result<(), String> {
-    let workbook = open(path)?;
+    let workbook = open(path, max_input_cells)?;
     let changes: Vec<Change> = changes
         .iter()
         .map(|text| assignment(&workbook, text))
@@ -418,7 +437,13 @@ pub fn whatif(
 /// workbook the corpus holds is opened in turn. That is the expensive
 /// direction and it is the one the question needs: nothing records where a
 /// value lives.
-pub fn holding(target: &str, value: &str, limit: usize, redact: bool) -> Result<(), String> {
+pub fn holding(
+    target: &str,
+    value: &str,
+    limit: usize,
+    redact: bool,
+    max_input_cells: Option<u64>,
+) -> Result<(), String> {
     let probe = parse_literal(value);
     if probe == CellValue::Empty {
         return Err(format!(
@@ -431,7 +456,7 @@ pub fn holding(target: &str, value: &str, limit: usize, redact: bool) -> Result<
     let mut scanned = 0u64;
 
     for path in &paths {
-        let workbook = open(path)?;
+        let workbook = open(path, max_input_cells)?;
         let at = Instant::now();
         let (cells, report) = cells_holding(&workbook, &probe, limit);
         total += report.matches;

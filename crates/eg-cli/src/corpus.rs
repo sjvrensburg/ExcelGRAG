@@ -24,6 +24,7 @@ pub fn index(
     lexical_only: bool,
     profile: bool,
     redact_values: bool,
+    max_input_cells: Option<u64>,
 ) -> Result<(), String> {
     let mut corpus = Corpus::open(dir).map_err(|e| format!("could not open the corpus: {e}"))?;
     // Storing is per-workbook and can fail partway through a list — a bad path
@@ -46,7 +47,7 @@ pub fn index(
             let loaded = load_with(
                 path,
                 &LoadOptions {
-                    max_cells: None,
+                    max_cells: max_input_cells,
                     ..Default::default()
                 },
             )

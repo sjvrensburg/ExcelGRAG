@@ -3,9 +3,9 @@
 Ten defects found in [calamine](https://github.com/tafia/calamine) 0.36.1
 while building ExcelGRAG.
 
-**Status:** issues 2 and 3 are fixed in a fork at `../calamine`, branch
-`xlsb-shared-formulas`, wired in through `[patch.crates-io]` in the workspace
-`Cargo.toml`. Both are fixed for `.xlsb` and `.xls`, in two commits — one per
+**Status:** patched calamine source is committed under `vendor/calamine` and
+wired in through `[patch.crates-io]` in the workspace `Cargo.toml`. Issues 2
+and 3 are fixed for `.xlsb` and `.xls`, in two commits — one per
 format — submitted as [tafia/calamine#712](https://github.com/tafia/calamine/pull/712).
 Issue 1 was our own bug and is fixed here. Issue 4 was found later, while
 building the graph, and is submitted separately as
@@ -22,15 +22,16 @@ is on `xlsx-table-totals-row`, submitted as
 [#718](https://github.com/tafia/calamine/pull/718). Issues 9 and 10 were found
 by reading the generated demo workbook in more than one format, are in the
 `.xls` and `.ods` readers respectively, and are confirmed present in stock
-0.36.1 — neither is the fork's doing. Neither is fixed anywhere yet; they are
+0.36.1 — neither was introduced by the earlier fork. Both are fixed in the
+vendored reader; they are
 reported as [#719](https://github.com/tafia/calamine/issues/719) and
 [#720](https://github.com/tafia/calamine/issues/720), each with a reproduction
 against the committed demo fixture.
 
 Every submission discloses that it was written by AI.
 
-The workspace patches in an `excelgrag` branch carrying both fixes, since
-`[patch.crates-io]` takes a single source.
+The workspace patch points at the vendored source so all fixes build from this
+repository alone.
 
 They were found by the format-parity test — reading the same logical workbook as
 `.xlsx` and as `.xlsb` and requiring identical values and formulas — by auditing
@@ -794,7 +795,10 @@ an off-by-one — and the single exception is the 3-D reference above. The test
 asserts that some formulas still differ, so it fails when this is fixed instead
 of passing vacuously and outliving the defect.
 
-Nothing in this repository works around it.
+**Fixed in `vendor/calamine`:** BIFF area references now resolve through the
+`EXTERNSHEET` XTI table, retain both ends of 3-D sheet spans, and mask the
+relative flags out of column fields. The demo `.xls` must now agree completely
+with its XLSX twin.
 
 ## 10. An ODF error cell reads as an empty cell
 
@@ -844,9 +848,9 @@ from the `.ods` and `Some(Error(Div0))` from the `.xlsx`, with and without the
 `eg-ingest` maps it onward to an empty value, but a reader looking at calamine
 directly sees `Data::String("")`.
 
-### Recorded, not worked around
+### Fixed locally
 
-`crates/eg-ingest/tests/parity.rs` counts the cells lost this way, asserts
-nothing else differs between the two formats, and asserts the count is **not**
-zero — so the day calamine reads these cells, the test fails and this note gets
-deleted rather than outliving the defect it describes.
+The vendored reader recognizes `calcext:value-type="error"`, reads the error
+code from the element text, and preserves the cell as that error. The parity
+test requires every planted ODS error to match its XLSX twin and rejects empty
+values.

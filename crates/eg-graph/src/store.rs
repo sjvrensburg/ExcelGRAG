@@ -44,11 +44,12 @@
 //! ```
 
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fs4::fs_std::FileExt;
 use petgraph::graph::NodeIndex;
 use serde::{Deserialize, Serialize};
 
@@ -242,6 +243,26 @@ impl Corpus {
         Ok(Corpus { root, manifest })
     }
 
+    /// Serialize manifest mutations across processes and refresh this handle's
+    /// snapshot after acquiring the lock. Atomic rename prevents torn files;
+    /// this lock plus refresh prevents clean last-writer-wins lost updates.
+    fn lock_and_reload(&mut self) -> Result<File, StoreError> {
+        let lock_path = self.root.join("manifest.lock");
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(io_err(format!("opening {}", lock_path.display())))?;
+        lock.lock_exclusive()
+            .map_err(io_err(format!("locking {}", lock_path.display())))?;
+
+        let fresh = Corpus::open(&self.root)?;
+        self.manifest = fresh.manifest;
+        Ok(lock)
+    }
+
     pub fn entries(&self) -> impl Iterator<Item = (&str, &Entry)> {
         self.manifest
             .workbooks
@@ -316,6 +337,7 @@ impl Corpus {
         };
         let file = self.graph_path(content_hash);
         let bytes = serde_json::to_vec(&stored).expect("a graph of plain data serialises");
+        let _lock = self.lock_and_reload()?;
         write_atomically(&file, &bytes)?;
 
         self.manifest.workbooks.insert(
@@ -344,6 +366,7 @@ impl Corpus {
 
     /// Drop a workbook from the corpus. Returns whether it was there.
     pub fn forget(&mut self, content_hash: &str) -> Result<bool, StoreError> {
+        let _lock = self.lock_and_reload()?;
         let Some(entry) = self.manifest.workbooks.remove(content_hash) else {
             return Ok(false);
         };
@@ -391,6 +414,7 @@ impl Corpus {
         path: &str,
         profiles: &Profiles,
     ) -> Result<(), StoreError> {
+        let _lock = self.lock_and_reload()?;
         if !self.manifest.workbooks.contains_key(content_hash) {
             return Err(StoreError::NotInCorpus {
                 content_hash: content_hash.to_string(),
@@ -402,8 +426,11 @@ impl Corpus {
             path: path.to_string(),
             profiles: profiles.clone(),
         };
+        let path = self.profiles_path(content_hash);
+        let previous_file = fs::read(&path).ok();
+        let previous_entry = self.manifest.workbooks.get(content_hash).cloned();
         let bytes = serde_json::to_vec(&stored).expect("profiles of plain data serialise");
-        write_atomically(&self.profiles_path(content_hash), &bytes)?;
+        write_atomically(&path, &bytes)?;
         let entry = self
             .manifest
             .workbooks
@@ -411,7 +438,23 @@ impl Corpus {
             .expect("checked before the write");
         entry.profiled_columns = profiles.len() as u64;
         entry.profile_values = profiles.values;
-        self.write_manifest()
+        if let Err(error) = self.write_manifest() {
+            if let Some(entry) = previous_entry {
+                self.manifest
+                    .workbooks
+                    .insert(content_hash.to_string(), entry);
+            }
+            match previous_file {
+                Some(bytes) => {
+                    let _ = write_atomically(&path, &bytes);
+                }
+                None => {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// The profiles for a workbook, if any were stored.
@@ -455,11 +498,14 @@ impl Corpus {
 
     /// Forget one workbook's profiles, leaving its graph.
     pub fn forget_profiles(&mut self, content_hash: &str) -> Result<(), StoreError> {
-        match fs::remove_file(self.profiles_path(content_hash)) {
+        let _lock = self.lock_and_reload()?;
+        let path = self.profiles_path(content_hash);
+        let previous_file = fs::read(&path).ok();
+        let previous_entry = self.manifest.workbooks.get(content_hash).cloned();
+        match fs::remove_file(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => {
-                let path = self.profiles_path(content_hash);
                 return Err(io_err(format!("removing {}", path.display()))(e));
             }
         }
@@ -467,7 +513,23 @@ impl Corpus {
             entry.profiled_columns = 0;
             entry.profile_values = false;
         }
-        self.write_manifest()
+        if let Err(error) = self.write_manifest() {
+            match previous_entry {
+                Some(entry) => {
+                    self.manifest
+                        .workbooks
+                        .insert(content_hash.to_string(), entry);
+                }
+                None => {
+                    self.manifest.workbooks.remove(content_hash);
+                }
+            }
+            if let Some(bytes) = previous_file {
+                let _ = write_atomically(&path, &bytes);
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Where a workbook's profiles are written.
@@ -504,14 +566,9 @@ impl Corpus {
 /// Write through a temporary file and rename, so an interrupted write leaves
 /// the previous version rather than a truncated one.
 ///
-/// V3: the corpus has no inter-process lock, so two `eg index` runs against
-/// the same directory can both reach here for the same path (`manifest.json`,
-/// most likely) at once. The tmp name is uniquified per process so the two
-/// writes cannot interleave into one file before either renames. A per-call
-/// sequence also separates two handles in the same process — the last `rename`
-/// still wins the race for the real path, same as any single-writer
-/// assumption broken by two writers, but at least it is a clean last-write,
-/// not a torn one.
+/// Manifest mutations hold `manifest.lock`; other files still use unique
+/// temporary names so independent workbook writes cannot collide. A per-call
+/// sequence also separates two handles in the same process.
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
     let sequence = NEXT_TMP.fetch_add(1, Ordering::Relaxed);
