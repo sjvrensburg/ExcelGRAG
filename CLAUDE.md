@@ -273,15 +273,32 @@ values, sums, minima — unlike `graphs/`, which holds only structure. Index wit
 The demo workbook is the way out of this: it is synthetic and committed, so its
 figures, sheet names and cell values may be quoted freely — in the README, in a
 commit message, anywhere. Prefer measuring it when a number needs to be written
-down.
+down. Its subject matter is deliberately **not** the reference workbook's, and
+must stay that way: the structure is what makes it a fair test, and giving it
+the real one's domain while calling it "the same shape as the real thing" would
+disclose by conjunction what neither sentence says alone. That is not a
+hypothetical — it is why the demo was rethemed in 4eaf780.
 
 Never commit a real spreadsheet, and never put anything derived from it into
-git. That means its contents — sheet names, cell values, labels — and also its
-**measurements**: cell and formula counts, node and edge totals, timings, index
+git. Above all, never state what **sector or industry** it comes from, in
+committed text or anywhere public; that constraint is why the paragraph above
+exists, and the vocabulary gives it away as readily as the word would.
+Otherwise the line is drawn at what identifies: no personal or entity names, no
+monetary amounts, and none of its **measurements** in a commit message or in
+`README.md` — cell and formula counts, node and edge totals, timings, index
 sizes, agreement percentages. Report those on the terminal, where the person who
 asked for them is; a commit message says the check passed, and the README
 describes the shape of a result rather than quoting one. Sheet names appear in
-the README only as consistent pseudonyms. To inspect one safely:
+the README only as consistent pseudonyms.
+
+`docs/upstream-issues.md` and the calamine reports it links are the deliberate
+exception, reviewed and kept on those terms: their measurements and cell values
+are the evidence behind live bug reports, and a report without its evidence is
+one nobody can act on. Sheet names are pseudonymised in what goes upstream,
+which costs nothing — the arithmetic never depended on them. Don't scrub that
+file.
+
+To inspect a confidential workbook safely:
 
 ```sh
 cargo run --release -p eg-ingest --example audit -- private/book.xlsb   # counts and A1 addresses only
