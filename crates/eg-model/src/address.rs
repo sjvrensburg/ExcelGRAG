@@ -66,7 +66,11 @@ impl CellRef {
     /// Render just the local part, e.g. `B7`. Use [`CellRef::to_a1_with_sheet`]
     /// when the address is going into a citation, which must be unambiguous.
     pub fn to_a1(&self) -> String {
-        format!("{}{}", col_to_letters(self.col as u32), self.row + 1)
+        format!(
+            "{}{}",
+            col_to_letters(self.col as u32),
+            u64::from(self.row) + 1
+        )
     }
 
     /// Render a fully-qualified citation, e.g. `'Q3 Sales'!B7`.
@@ -125,16 +129,17 @@ impl RangeRef {
     }
 
     pub fn rows(&self) -> u32 {
-        self.bottom - self.top + 1
+        (self.bottom - self.top).saturating_add(1)
     }
 
     pub fn cols(&self) -> u16 {
-        self.right - self.left + 1
+        (self.right - self.left).saturating_add(1)
     }
 
     /// Cell count, widened to `u64` because a full-sheet range overflows `u32`.
     pub fn cell_count(&self) -> u64 {
-        self.rows() as u64 * self.cols() as u64
+        (u64::from(self.bottom) - u64::from(self.top) + 1)
+            * (u64::from(self.right) - u64::from(self.left) + 1)
     }
 
     pub fn contains(&self, cell: CellRef) -> bool {
@@ -740,7 +745,7 @@ pub enum R1C1Coord {
 impl R1C1Coord {
     fn render(&self, tag: char) -> String {
         match self {
-            R1C1Coord::Absolute(i) => format!("{tag}{}", i + 1),
+            R1C1Coord::Absolute(i) => format!("{tag}{}", u64::from(*i) + 1),
             R1C1Coord::Relative(0) => tag.to_string(),
             R1C1Coord::Relative(d) => format!("{tag}[{d}]"),
         }
@@ -754,6 +759,9 @@ impl R1C1Coord {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct R1C1Ref {
     pub sheet_name: Option<String>,
+    /// Last sheet of a 3-D reference such as `Jan:Dec!A1`.
+    #[serde(default)]
+    pub end_sheet_name: Option<String>,
     pub workbook: Option<String>,
     pub top: R1C1Coord,
     pub left: R1C1Coord,
@@ -782,6 +790,7 @@ impl R1C1Ref {
         };
         Self {
             sheet_name: parsed.sheet_name.clone(),
+            end_sheet_name: parsed.end_sheet_name.clone(),
             workbook: parsed.workbook.clone(),
             top: row_coord(parsed.top, parsed.abs_top),
             left: col_coord(parsed.left, parsed.abs_left),
@@ -802,7 +811,24 @@ impl R1C1Ref {
             out.push(']');
         }
         if let Some(sheet) = &self.sheet_name {
-            out.push_str(&quote_sheet_name(sheet));
+            match &self.end_sheet_name {
+                Some(end_sheet) => {
+                    let start = quote_sheet_name(sheet);
+                    let end = quote_sheet_name(end_sheet);
+                    if start == *sheet && end == *end_sheet {
+                        out.push_str(sheet);
+                        out.push(':');
+                        out.push_str(end_sheet);
+                    } else {
+                        out.push('\'');
+                        out.push_str(&sheet.replace('\'', "''"));
+                        out.push(':');
+                        out.push_str(&end_sheet.replace('\'', "''"));
+                        out.push('\'');
+                    }
+                }
+                None => out.push_str(&quote_sheet_name(sheet)),
+            }
             out.push('!');
         }
         out.push_str(&self.top.render('R'));
@@ -1132,6 +1158,29 @@ mod tests {
             CellRef::new(S0, 1, 1),
         );
         assert_eq!(r.to_r1c1(), "'Q3 Sales'!RC:R[1]C[1]");
+    }
+
+    #[test]
+    fn r1c1_preserves_a_3d_sheet_qualifier() {
+        let r = R1C1Ref::from_parsed(
+            &parse_a1("'Jan:Year End'!B2").unwrap(),
+            CellRef::new(S0, 1, 1),
+        );
+        assert_eq!(r.end_sheet_name.as_deref(), Some("Year End"));
+        assert_eq!(r.to_r1c1(), "'Jan:Year End'!RC");
+        let reparsed = parse_a1(&r.to_r1c1().replace("RC", "A1")).unwrap();
+        assert_eq!(reparsed.sheet_name.as_deref(), Some("Jan"));
+        assert_eq!(reparsed.end_sheet_name.as_deref(), Some("Year End"));
+    }
+
+    #[test]
+    fn public_geometry_rendering_does_not_overflow() {
+        assert_eq!(CellRef::new(S0, u32::MAX, 0).to_a1(), "A4294967296");
+        let range = RangeRef::new(S0, 0, 0, u32::MAX, u16::MAX);
+        assert_eq!(range.rows(), u32::MAX);
+        assert_eq!(range.cols(), u16::MAX);
+        assert_eq!(range.cell_count(), (u32::MAX as u64 + 1) * 65_536);
+        assert_eq!(R1C1Coord::Absolute(u32::MAX).render('R'), "R4294967296");
     }
 
     #[test]

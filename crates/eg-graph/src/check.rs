@@ -61,6 +61,16 @@ pub fn check(built: &BuiltGraph) -> Vec<Violation> {
         });
     }
 
+    // An invariant checker must be able to describe a corrupt root. Passing
+    // an out-of-range NodeIndex to petgraph traversal panics instead.
+    if graph.node_weight(built.root).is_none() {
+        out.push(Violation {
+            invariant: "root belongs to the graph",
+            detail: format!("root index {} is outside the graph", built.root.index()),
+        });
+        return out;
+    }
+
     // Nothing is orphaned: an unreachable node can never be returned by a
     // traversal, so it is invisible however good retrieval gets.
     let reachable: FxHashSet<_> = reachable_from(graph, built.root);
