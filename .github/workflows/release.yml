@@ -79,7 +79,10 @@ jobs:
       # everything.
       - name: Test
         env:
-          EG_MODEL_CACHE: model-cache
+          # Keep the override absolute. The application otherwise deliberately
+          # refuses to put a downloaded model relative to an arbitrary working
+          # directory, and the unit test enforces that invariant.
+          EG_MODEL_CACHE: ${{ github.workspace }}/model-cache
         run: cargo test --workspace --release
 
       - name: Build
