@@ -36,7 +36,14 @@ jobs:
       matrix:
         include:
           - name: linux-x86_64
-            os: ubuntu-22.04
+            # 24.04, not 22.04 and not `ubuntu-latest`. The prebuilt ONNX
+            # Runtime that `ort` links needs glibc 2.38 (`__isoc23_strtol` and
+            # friends) and a GCC 13 libstdc++ (`_M_replace_cold`), so 22.04
+            # fails at link time — an older runner does not buy a more
+            # portable binary here, it buys no binary at all. Pinned rather
+            # than floating so the glibc floor of a release only ever moves on
+            # purpose.
+            os: ubuntu-24.04
             archive: tar.gz
           - name: windows-x86_64
             os: windows-latest
@@ -77,6 +84,15 @@ jobs:
 
       - name: Build
         run: cargo build --release -p eg-cli -p eg-mcp
+
+      # Printed rather than assumed: the release notes claim a glibc floor, and
+      # this is where that claim can be checked against the binary that is
+      # actually going out. It is set by ONNX Runtime, not by this code.
+      - name: Report the glibc floor
+        if: runner.os == 'Linux'
+        run: |
+          objdump -T target/release/eg \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -1
 
       # Licences ship *in* the archive: Apache-2.0 §4(a) asks that recipients
       # get a copy, and someone who downloads a binary is a recipient who will
@@ -146,9 +162,14 @@ jobs:
       - name: Write the release notes
         run: |
           cat > notes.md <<'NOTES'
-          Binaries for Linux (x86_64, glibc 2.35 and newer) and Windows
-          (x86_64). Each archive holds `eg`, `eg-mcp`, the README and the
-          licences.
+          Binaries for Linux (x86_64) and Windows (x86_64). Each archive holds
+          `eg`, `eg-mcp`, the README and the licences.
+
+          The Linux binary needs **glibc 2.39 or newer** — Ubuntu 24.04, Debian
+          13, Fedora 39+, RHEL 10. That floor comes from the prebuilt ONNX
+          Runtime this links, not from ExcelGRAG: it requires glibc 2.38 and a
+          GCC 13 libstdc++, so an older build host produces no binary rather
+          than a more portable one.
 
           `eg` carries no runtime dependencies: ONNX Runtime is linked in, and
           the embedding model is downloaded on first use to
