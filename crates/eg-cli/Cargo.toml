@@ -20,3 +20,6 @@ eg-retrieve.workspace = true
 eg-eval.workspace = true
 eg-mcp = { path = "../eg-mcp" }
 clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+serde_json.workspace = true
