@@ -722,6 +722,7 @@ dependencies = [
  "eg-model",
  "eg-retrieve",
  "eg-structure",
+ "serde_json",
 ]
 
 [[package]]
