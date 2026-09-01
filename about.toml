@@ -1,0 +1,41 @@
+# Configuration for `cargo about`, which generates THIRD-PARTY.md — the
+# attribution notices Apache-2.0 §4(d) and the BSD/MIT-style licences ask a
+# binary distribution to carry.
+#
+# Regenerate after changing dependencies:
+#
+#     cargo about generate about.hbs -o THIRD-PARTY.md
+#
+# `accepted` is a policy as much as a list: a dependency whose licence is not
+# on it fails the run rather than being quietly written into the notice. Every
+# entry here is permissive; adding a copyleft licence to get a build green
+# would be the wrong fix.
+accepted = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "zlib-acknowledgement",
+    "0BSD",
+    "CC0-1.0",
+    "Unlicense",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CDLA-Permissive-2.0",
+    # Weak, file-level copyleft. Reached only through
+    # fastembed -> hf-hub -> dirs -> dirs-sys -> option-ext, used unmodified,
+    # so it reaches none of this project's own files.
+    "MPL-2.0",
+    "OpenSSL",
+]
+
+# Every target, not just this machine's: a notice that omits the crates a
+# Windows build pulls in is a notice that is wrong for a Windows build.
+targets = []
+ignore-build-dependencies = false
+ignore-dev-dependencies = true

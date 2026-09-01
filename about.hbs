@@ -1,0 +1,42 @@
+# Third-party notices
+
+ExcelGRAG is distributed under `MIT OR Apache-2.0` (see `LICENSE-MIT` and
+`LICENSE-APACHE`). It builds on the crates below, whose licences ask that their
+notices travel with any distribution — Apache-2.0 §4(d) most explicitly, and
+the MIT and BSD-family licences by way of their copyright notices.
+
+Where a crate offers a choice, the licence recorded here is the one this
+project takes; the crate's own metadata is the authority on what else it
+allows.
+
+This file is generated. Regenerate it after changing dependencies:
+
+```sh
+cargo about generate about.hbs -o THIRD-PARTY.md
+```
+
+`about.toml` carries the list of accepted licences, which is a policy as much
+as a list: a dependency whose licence is not on it fails the run rather than
+being written in quietly.
+
+## Summary
+
+| Licence | Crates |
+|---|---:|
+{{#each overview}}| {{{name}}} | {{count}} |
+{{/each}}
+
+{{#each licenses}}
+## {{{name}}}
+
+{{#each used_by}}`{{crate.name}} {{crate.version}}`{{#unless @last}} · {{/unless}}{{/each}}
+
+<details><summary>Licence text</summary>
+
+```
+{{{text}}}
+```
+
+</details>
+
+{{/each}}
