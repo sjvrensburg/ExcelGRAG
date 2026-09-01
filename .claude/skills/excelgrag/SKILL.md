@@ -9,9 +9,11 @@ description: >-
   change this rate" — rather than opening the file and reading it by eye.
   Built for workbooks too large to load into a spreadsheet app or an LLM's
   context: a 170 MB / 43M-cell XLSB is the reference case. Covers the
-  index/search/ask workflow, the evidence system that stops a guess from
-  reading like an answer, and the refusals (ambiguous column, unmodelled
-  function, whole-column reference) that are findings, not bugs.
+  index/search/ask workflow, checking a figure is grounded in a real cell
+  (`eg where` / `find_value`) when search cannot reach it, the evidence
+  system that stops a guess from reading like an answer, and the refusals
+  (ambiguous column, unmodelled function, whole-column reference) that are
+  findings, not bugs.
 ---
 
 # ExcelGRAG
@@ -54,28 +56,37 @@ in a few places (e.g. `cells` vs `read_cells`) and are cross-referenced.
    `'Q3 Sales'!B2:D40` is *where to look*, not what is there. Follow up
    with `cells` (CLI) / `read_cells` (MCP) to read the real values and
    formulas before quoting a number in an answer.
-4. **`trace` / `precedents` / `dependents`** for provenance: what a cell's
+4. **`where` (CLI) / `find_value` (MCP)** to check a figure. Search covers
+   labels, headers, sheet names, formula text — and a column's *values*
+   only where its profile kept them (a few dozen distinct values at most,
+   plus the minimum and maximum of a large numeric column). So searching
+   for a number out of a big numeric column comes back blind, correctly and
+   unhelpfully. `eg where <workbook|corpus> 1612` scans every populated
+   cell and cites each one holding it. Expensive, like `dependents`, and
+   exhaustive — a nil answer from it means the value genuinely is not
+   there, which is what makes it worth the scan.
+5. **`trace` / `precedents` / `dependents`** for provenance: what a cell's
    formula reads (cheap — it's in the formula text) or what reads a cell
    (expensive — every formula in the workbook gets scanned).
-5. **`check` / `recompute`** to verify arithmetic still holds: recomputes a
+6. **`check` / `recompute`** to verify arithmetic still holds: recomputes a
    formula from the stored values of the cells it reads and compares
    against what the workbook cached. Refuses by name what it cannot model
    (a handful of Excel functions, whole-column references, volatile
    functions like `TODAY()`) rather than guessing — see Refusals below.
-6. **`what-if` / `what_if`** for scenario analysis: substitute a value into
+7. **`what-if` / `what_if`** for scenario analysis: substitute a value into
    a cell (in memory only — nothing is written, XLSB can't be written
    anyway) and see every cell that moves, and how far the walk got before
    giving up.
-7. **`tables` → `query_table`** and **`schema`** for tabular questions —
+8. **`tables` → `query_table`** and **`schema`** for tabular questions —
    "total X where Y", "which orders are late" — and for following a lookup
    from one table to another. `query_table` needs a table's exact range
    from `tables` first; it does not guess at table boundaries.
 
 Cheap vs expensive, roughly: `search`/`context`/`cells`/`precedents` are
 fast (index reads or formula-text reads). `dependents`/`what_if`/`check`
-scan every formula in the workbook — seconds to tens of seconds on a large
-file, not milliseconds. Don't call the expensive ones speculatively in a
-loop.
+scan every formula in the workbook, and `where`/`find_value` scans every
+cell — seconds to tens of seconds on a large file, not milliseconds. Don't
+call the expensive ones speculatively in a loop.
 
 ## Read the evidence — this is the part that actually matters
 
@@ -92,11 +103,20 @@ read this before using the passage as a source of fact:**
   matched elsewhere`. Read it; a word that "matched elsewhere" means a
   *different* part of the corpus knows that word, not this passage.
 - **Blind** — banner `BLIND MATCH: ...`. Either none of the question's words
-  are in this corpus at all, or the best result was found on something else
-  entirely. **Treat the passage as a guess, not an answer** — say so, or go
-  look elsewhere (`workbooks` shows what is actually indexed).
+  are in what this corpus indexes, or the best result was found on something
+  else entirely. **Treat the passage as a guess, not an answer** — say so, or
+  go look elsewhere (`workbooks` shows what is actually indexed).
 - **Nothing** — banner `NOTHING MATCHED.` Say so plainly; do not invent a
   number to fill the gap.
+
+**A missing number is not an absent number.** When the word that missed is a
+bare figure, both banners add a sentence saying so and naming the scan:
+*"A number can be in a cell and in no index — scan the cells (`find_value`,
+`eg where`)."* Read that literally. The index carries a column's values only
+where its profile kept them, so a figure out of a large numeric column is
+absent from the index by construction, and reporting it as absent from the
+*workbook* would be exactly the confident wrong answer this whole evidence
+system exists to stop. Run the scan before saying a figure is not there.
 - **No content words** — every word of the question was a frame word ("how
   is the total", "what does this show") with nothing to search on. Ask
   again with the specific term.
@@ -177,6 +197,7 @@ Verb ↔ tool cross-reference, for translating between the two:
 | `ask`                | `context`      | Hits, expanded and rendered as a passage |
 | `workbooks`          | `workbooks`    | What's in the corpus |
 | `cells`              | `read_cells`   | Values and formulas in a range |
+| `where`              | `find_value`   | Which cells hold a value, by scanning them |
 | `trace` (no `--dependents`) | `precedents` | What a formula reads |
 | `trace --dependents` | `dependents`   | What reads a range |
 | `check`              | `recompute`    | Does the arithmetic still hold |
@@ -188,7 +209,9 @@ Verb ↔ tool cross-reference, for translating between the two:
 
 `query_table`/`tables`/`schema` are MCP-only today; from a shell, reach the
 same query engine through `eg-eval`'s library or by scripting `cells`
-output.
+output. `find_value` scans one workbook; `eg where` also takes a corpus
+directory and scans every workbook in it, which is deliberately not offered
+over MCP — a corpus of large files is minutes of scanning per call.
 
 ## Starting a session
 

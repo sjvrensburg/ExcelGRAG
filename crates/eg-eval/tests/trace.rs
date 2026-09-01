@@ -332,3 +332,136 @@ fn a_sheet_name_that_needs_quoting_survives_the_round_trip() {
         targets(&refs)
     );
 }
+
+// ---- finding a value -----------------------------------------------------
+//
+// The direction nothing indexes. A corpus knows what a workbook *is* and,
+// where a profile kept them, what its columns hold; a figure out of a large
+// numeric column is in neither, so this is the only exhaustive answer to
+// "which cells hold 1612" there is.
+
+/// A workbook whose values are worth asking about: a number reachable two
+/// ways, the same digits stored as text, and a repeated category.
+fn values_book() -> Workbook {
+    let mut sheet = Sheet::new(SheetId(0), "Main");
+    sheet.set(0, 0, Cell::literal(CellValue::Number(1612.0)));
+    sheet.set(1, 0, Cell::literal(CellValue::Text("1612".into())));
+    sheet.set(
+        2,
+        0,
+        Cell {
+            // A formula's *value* is what it holds, which is usually the cell
+            // someone quoting a figure actually means.
+            value: CellValue::Number(1612.0),
+            formula: Some("A1*1".into()),
+            format: Default::default(),
+        },
+    );
+    sheet.set(3, 0, Cell::literal(CellValue::Text("Retail".into())));
+    sheet.set(4, 0, Cell::literal(CellValue::Text("retail".into())));
+    sheet.set(5, 0, Cell::literal(CellValue::Bool(true)));
+    // 10.13 + 6.75 is 16.88 on a sheet and 16.880000000000003 in binary
+    // floating point.
+    sheet.set(6, 0, Cell::literal(CellValue::Number(10.13 + 6.75)));
+
+    let mut other = Sheet::new(SheetId(1), "Other");
+    other.set(0, 0, Cell::literal(CellValue::Number(1612.0)));
+
+    Workbook {
+        path: "book.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash".into(),
+        sheets: vec![sheet, other],
+        defined_names: Vec::new(),
+        external_links: Vec::new(),
+    }
+}
+
+fn found(workbook: &Workbook, probe: CellValue, limit: usize) -> (Vec<String>, eg_eval::ValueScan) {
+    let (cells, report) = eg_eval::cells_holding(workbook, &probe, limit);
+    (cells.into_iter().map(|c| c.a1).collect(), report)
+}
+
+#[test]
+fn every_sheet_is_scanned_and_a_formula_counts_by_its_value() {
+    let book = values_book();
+    let (cells, report) = found(&book, CellValue::Number(1612.0), 40);
+    assert_eq!(cells, ["Main!A1", "Main!A3", "Other!A1"]);
+    assert_eq!(report.matches, 3);
+    // Every populated cell of both sheets, not just the matches.
+    assert_eq!(report.cells_scanned, 8);
+    assert!(!report.capped);
+}
+
+#[test]
+fn the_same_digits_stored_as_text_are_counted_rather_than_folded_in() {
+    // "1612 the number" and "1612 the string" are different values, and a
+    // workbook holding both is a finding. Silently merging them would hide it;
+    // saying nothing at all would report "1612 is nowhere" about a cell that
+    // shows 1612.
+    let book = values_book();
+    let (cells, report) = found(&book, CellValue::Number(1612.0), 40);
+    assert!(!cells.contains(&"Main!A2".to_string()));
+    assert_eq!(report.other_kind, 1);
+
+    // And the other way round: asking for the text finds the text, and counts
+    // the two numeric cells as the other kind.
+    let (cells, report) = found(&book, CellValue::Text("1612".into()), 40);
+    assert_eq!(cells, ["Main!A2"]);
+    assert_eq!(report.other_kind, 3);
+}
+
+#[test]
+fn text_is_matched_without_regard_to_case_the_way_excel_compares_it() {
+    let book = values_book();
+    let (cells, _) = found(&book, CellValue::Text("RETAIL".into()), 40);
+    assert_eq!(cells, ["Main!A4", "Main!A5"]);
+}
+
+#[test]
+fn a_number_is_matched_on_the_fifteen_digits_a_sheet_carries() {
+    // A6 holds 10.13+6.75, which is 16.880000000000003 as a double. Comparing
+    // raw doubles would answer "no" about a cell showing exactly the number
+    // that was asked for.
+    let book = values_book();
+    let (cells, report) = found(&book, CellValue::Number(16.88), 40);
+    assert_eq!(cells, ["Main!A7"]);
+    assert_eq!(report.matches, 1);
+}
+
+#[test]
+fn a_boolean_is_not_a_one() {
+    // `as_number` coerces TRUE to 1 for arithmetic; a value scan must not,
+    // or every checkbox in a workbook answers a search for 1.
+    let book = values_book();
+    let (cells, _) = found(&book, CellValue::Number(1.0), 40);
+    assert!(cells.is_empty());
+    let (cells, _) = found(&book, CellValue::Bool(true), 40);
+    assert_eq!(cells, ["Main!A6"]);
+}
+
+#[test]
+fn the_cap_shortens_the_list_and_leaves_the_counts_exact() {
+    let book = values_book();
+    let (cells, report) = found(&book, CellValue::Number(1612.0), 1);
+    assert_eq!(cells, ["Main!A1"]);
+    assert!(report.capped);
+    assert_eq!(
+        report.matches, 3,
+        "the count is of what is there, not of what was returned"
+    );
+    assert_eq!(report.cells_scanned, 8);
+}
+
+#[test]
+fn a_value_that_is_not_there_says_so_over_a_scan_that_saw_everything() {
+    // The answer that makes the verb worth having: nil, over a count that says
+    // the whole workbook was looked at, so it is a fact rather than a failure
+    // to find.
+    let book = values_book();
+    let (cells, report) = found(&book, CellValue::Number(99.0), 40);
+    assert!(cells.is_empty());
+    assert_eq!(report.matches, 0);
+    assert_eq!(report.other_kind, 0);
+    assert_eq!(report.cells_scanned, 8);
+}

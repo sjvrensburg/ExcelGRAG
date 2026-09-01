@@ -764,6 +764,7 @@ dependencies = [
  "eg-graph",
  "eg-ingest",
  "eg-model",
+ "eg-structure",
  "fastembed",
  "petgraph",
  "rustc-hash",

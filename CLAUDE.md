@@ -26,7 +26,7 @@ cargo clippy --workspace --all-targets
 cargo fmt
 ```
 
-The front door is the `eg` binary (`crates/eg-cli`), nine verbs in the order a
+The front door is the `eg` binary (`crates/eg-cli`), ten verbs in the order a
 question travels:
 
 ```sh
@@ -34,6 +34,7 @@ cargo run --release -p eg-cli -- index corpus/ book.xlsb   # ingest, store graph
 cargo run --release -p eg-cli -- ask corpus/ bad debt provision
 cargo run --release -p eg-cli -- search corpus/ bad debt --limit 3
 cargo run --release -p eg-cli -- cells book.xlsb 'LOOKUP!AE53:AG89'
+cargo run --release -p eg-cli -- where book.xlsb 1612          # which cells hold it
 cargo run --release -p eg-cli -- trace book.xlsb 'LOOKUP!AE53' --dependents
 cargo run --release -p eg-cli -- check book.xlsb           # sweep: do formulas still agree
 cargo run --release -p eg-cli -- what-if book.xlsb 'RATES!B4=0.15'
@@ -124,7 +125,17 @@ above it.
   reader.
 - `eg-index` — `TextIndex` (tantivy) and `VectorIndex` (fastembed,
   `bge-small-en-v1.5` via ONNX, full scan, no ANN) over the same node flattening,
-  keyed by the same blake3. Rankings are fused by reciprocal rank (`fuse`), not by
+  keyed by the same blake3. A column also carries **what it was profiled to
+  hold** — the distinct values a profile kept, and the min and max of one whose
+  list it abandoned, which are cells; never the sum, which is a number no cell
+  holds. Weighed below the node's own name (`VALUES_BOOST`), because a column
+  *called* Retail beats one *containing* the word. Only a categorical column's
+  values reach the embedded sentence, capped, or a key column's identifiers
+  would crowd out its name. **The lexical index therefore holds cell values**,
+  on the same terms `profiles/` does: they arrive only through a profile, so
+  `--redact-values`/`--no-profiles` keep them out with no separate enforcement,
+  and `eg index` rewrites a re-read workbook's documents so a later redacted run
+  cannot leave an earlier run's values behind. Rankings are fused by reciprocal rank (`fuse`), not by
   score — BM25 and cosine are not on one scale. The word ranking is weighted
   `LEXICAL_WEIGHT` (2) against the meaning ranking and both are asked 50 deep
   before fusing; both numbers were measured with the answer scorer, not chosen,
@@ -138,7 +149,13 @@ above it.
   question the corpus knows and which the top result accounts for; that is
   printed above every passage, and a `Verdict::Blind` raises a banner. It is
   deliberately not a confidence score — see the README for the two that were
-  tried and discarded. `expand()` walks out from
+  tried and discarded. A miss is reported against **what the corpus indexes**,
+  never against the workbook: an unmatched word that parses as a number earns a
+  sentence saying a column's values are indexed only where its profile kept
+  them, and naming the scan (`find_value`, `eg where`) that can settle it —
+  otherwise "1612 is not in this corpus" reads as "1612 is not in the workbook",
+  which is the exact class of mistake this layer exists to prevent.
+  `expand()` walks out from
   hits under a budget, recording for every node which node pulled it in and
   along which edge; `render()` turns the subgraph into a numbered, citable
   passage. Passages carry **no cell values** — they say where to look.
@@ -155,8 +172,13 @@ above it.
   foreign keys a workbook declares in its `VLOOKUP`/`INDEX-MATCH` formulas; an
   approximate lookup is a *banding* over thresholds, not a key). Also:
   `precedents_of` (cheap, in the formula's own text), `dependents_of` (expensive,
-  scans every formula), and `recompute`/`check` which evaluate a formula and
-  compare with the value Excel stored. `whatif::what_if` substitutes values
+  scans every formula), `cells_holding` (expensive, scans every *cell* — the
+  direction nothing indexes, and the answer to a figure the profile was never
+  going to keep; formula cells match on their value, numbers through the sheet's
+  fifteen digits, text without regard to case, never across types, and the cells
+  that only *look* like the probe are counted rather than folded in), and
+  `recompute`/`check` which evaluate a formula and compare with the value Excel
+  stored. `whatif::what_if` substitutes values
   through an `Overrides` overlay — the workbook is never mutated, since XLSB
   cannot be written — and walks the closure a level per full formula scan. The
   overlay is indexed by column: a what-if's overlay holds every cell it has
@@ -166,8 +188,8 @@ above it.
   `invalidate` whenever an override changes, or a cached lookup column outlives
   the values behind it.
 - `eg-mcp` — MCP server over the whole stack (`workbooks`, `search`, `context`,
-  `read_cells`, `precedents`, `dependents`, `recompute`, `tables`, `query_table`,
-  `schema`, `what_if`). Hand-written stdio JSON
+  `read_cells`, `precedents`, `dependents`, `find_value`, `recompute`, `tables`,
+  `query_table`, `schema`, `what_if`). Hand-written stdio JSON
   protocol, no SDK, because the workspace is synchronous. A failing tool returns a
   *result* with `isError`, never a protocol error.
 - `eg-cli` — `eg`.
@@ -190,6 +212,13 @@ above it.
   blocked formula, and everything reading it, comes back as *no answer*; so does
   a cycle, which is reported rather than iterated to a fixed point. Silently
   keeping the stored value would understate the impact.
+- **A miss is a fact about the index, never about the workbook.** Every name in
+  a workbook is indexed; a column's *values* are indexed only where its profile
+  kept them, so a figure out of a large numeric column is absent by
+  construction. Search says "not in what this corpus indexes", and an unmatched
+  number earns the sentence that says why and names the scan that settles it.
+  `cells_holding` is that scan, and it is exhaustive so that its nil answer is
+  worth something.
 - **Unsupported functions are refused by name, not guessed.** ~50 of Excel's
   functions are modelled; volatile functions (`TODAY()`) are refused too, because
   "differs" would be the wrong verdict.
@@ -266,9 +295,14 @@ disagreement is a regression**.
 
 `private/` is gitignored in full and holds a real XLSB containing commercial and
 personal data. **A corpus's `profiles/` directory holds cell values** — distinct
-values, sums, minima — unlike `graphs/`, which holds only structure. Index with
-`--redact-values` for a corpus that must not carry the workbook's contents, or
-`--no-profiles` for none at all.
+values, sums, minima — unlike `graphs/`, which holds only structure. So does
+`text/`, since those values are indexed: the distinct lists and the numeric
+bounds, in an inverted index that can be read back. Both come from the same
+place, so both are governed by the same two flags — index with `--redact-values`
+for a corpus that must not carry the workbook's contents, or `--no-profiles` for
+none at all. Re-running `eg index` with either flag over a corpus built without
+them rewrites the documents rather than leaving the old ones in place; a corpus
+whose `profiles/` was deleted by hand is *not* scrubbed, and wants a reindex.
 
 The demo workbook is the way out of this: it is synthetic and committed, so its
 figures, sheet names and cell values may be quoted freely — in the README, in a

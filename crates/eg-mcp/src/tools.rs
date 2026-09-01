@@ -17,7 +17,9 @@
 
 use eg_eval::query::{query as query_run, Aggregate, Filter, Query, Test};
 use eg_eval::whatif::{what_if, Blocked, Change, WhatIfOptions};
-use eg_eval::{cell as cell_fact, cells_in, dependents_of, precedents_of, recompute, Outcome};
+use eg_eval::{
+    cell as cell_fact, cells_holding, cells_in, dependents_of, precedents_of, recompute, Outcome,
+};
 use eg_eval::{infer_schema, Lookup};
 use eg_index::SearchOptions;
 use eg_model::{parse_a1, redact_formula_literals, CellValue, RangeRef, Workbook};
@@ -105,6 +107,28 @@ pub const TOOLS: &[Tool] = &[
                       reads a cell, so every formula in the workbook is scanned — seconds on a \
                       large file, not milliseconds.",
         schema: || cell_schema("The range to find readers of."),
+    },
+    Tool {
+        name: "find_value",
+        description: "Find the cells holding a value, by scanning every one of them. Use this \
+                      when `search` comes back blind on a figure that is plainly in the \
+                      workbook: the index carries a column's values only where there were few \
+                      enough to keep, so a number from a large numeric column is in no index and \
+                      cannot be. Expensive, for the same reason `dependents` is — nothing \
+                      records where a value lives. Exhaustive, so a nil answer means the value \
+                      is genuinely not there.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "value": { "description": "The value to find, as a JSON number, string or boolean. A number and the string of its digits are different values; the answer says how many cells hold the other one." },
+                    "workbook": { "type": "string", "description": "Which workbook (content hash, path or file name). Optional when the corpus holds one." },
+                    "limit": { "type": "integer", "description": "Most cells to return, default 40." }
+                },
+                "required": ["value"],
+                "additionalProperties": false
+            })
+        },
     },
     Tool {
         name: "recompute",
@@ -243,6 +267,7 @@ pub fn call(state: &mut State, name: &str, args: &Value) -> Result<String, Strin
         "read_cells" => read_cells(state, args),
         "precedents" => precedents(state, args),
         "dependents" => dependents(state, args),
+        "find_value" => find_value(state, args),
         "recompute" => recompute_tool(state, args),
         "tables" => tables(state, args),
         "query_table" => query_table(state, args),
@@ -646,6 +671,67 @@ fn dependents(state: &mut State, args: &Value) -> Result<String, String> {
         out.push_str("  nothing in this workbook reads it\n");
     } else if report.capped {
         out.push_str("  … more, raise limit\n");
+    }
+    Ok(out)
+}
+
+/// Which cells hold a value.
+///
+/// One workbook, resolved the way every other cell-level tool resolves one.
+/// Not the whole corpus: the scan is linear in a workbook and a corpus of large
+/// files would be minutes, which is not a thing to do to an agent that asked a
+/// question. `eg where corpus/ <value>` on a terminal is where a caller who
+/// wants that goes.
+fn find_value(state: &mut State, args: &Value) -> Result<String, String> {
+    let limit = opt_usize(args, "limit", 40)?.clamp(1, 500);
+    let redact = state.redact_values;
+    let probe = cell_value(
+        args.get("value")
+            .ok_or_else(|| "value is required — the value to find".to_string())?,
+    )?;
+    if probe == CellValue::Empty {
+        return Err("value names nothing to look for; an empty cell is not a value".to_string());
+    }
+    let (_, path) = state.resolve(opt_str(args, "workbook")?.as_deref())?;
+    let (loaded, load_seconds) = state.workbook(&path)?;
+    let workbook = &loaded.workbook;
+
+    let (cells, report) = cells_holding(workbook, &probe, limit);
+    let mut out = match load_seconds {
+        Some(seconds) => format!("(opened {path} in {seconds:.1}s)\n"),
+        None => String::new(),
+    };
+    out.push_str(&format!(
+        "{} cell(s) hold {}, of {} scanned\n",
+        report.matches,
+        show(&probe, redact),
+        report.cells_scanned
+    ));
+    for fact in &cells {
+        out.push_str(&format!("  {:<24}", fact.a1));
+        if let Some(formula) = &fact.formula {
+            out.push_str(&format!(" ={}", show_formula(formula, redact)));
+        }
+        out.push_str(&format!("  {}\n", show(&fact.value, redact)));
+    }
+    if report.capped {
+        out.push_str("  … more, raise limit\n");
+    }
+    // The usual reason a value that is on the screen scans as absent. Left
+    // unsaid, the answer above reads as "it is not in this workbook".
+    if report.other_kind > 0 {
+        out.push_str(&format!(
+            "  {} more cell(s) show the same characters while holding another type. \
+             A number and the string of its digits are different values here: send \
+             1612 to find one and \"1612\" to find the other.\n",
+            report.other_kind
+        ));
+    }
+    if report.matches == 0 {
+        out.push_str(
+            "  every populated cell was compared, so this is exhaustive: the value is not \
+             in this workbook\n",
+        );
     }
     Ok(out)
 }

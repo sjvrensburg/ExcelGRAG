@@ -11,12 +11,28 @@
 //! the sheet name it happens to live under, or every node on a sheet called
 //! Revenue outranks the Revenue column itself.
 //!
+//! A node also carries what it *holds*, where the corpus knows: a column's
+//! profile records the distinct values of a column that has few enough of them,
+//! and the bounds of one that is numeric. Nothing indexed those, which made a
+//! whole class of question unanswerable — a workbook is asked about in the
+//! vocabulary of its values at least as often as in the vocabulary of its
+//! headers, and searching for a figure that is plainly in a cell came back
+//! blind. They go in [`NodeDoc::values`], scored below the node's own name,
+//! because a column *called* Retail is a better answer than one *containing*
+//! the word.
+//!
+//! What that cannot cover is stated where the limit is: a profile abandons the
+//! distinct list above [`eg_structure::ProfileOptions::max_distinct`], so a number in a
+//! column of two hundred thousand measurements is in no index and never will
+//! be. `eg_eval::cells_holding` scans the cells for those.
+//!
 //! This module knows nothing about tantivy. The vector index will want the same
 //! flattening with the three fields joined instead of weighed, and building it
 //! here keeps the two indexes describing the same nodes.
 
 use eg_graph::{EdgeKind, Graph, Node, NodeKind};
-use eg_model::{RangeRef, SheetId};
+use eg_model::{shown, RangeRef, SheetId};
+use eg_structure::{ColumnProfile, Profiles};
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
@@ -43,6 +59,24 @@ pub struct NodeDoc {
     /// Everything else worth matching — a formula, what a name refers to, the
     /// headers of a table's columns.
     pub body: String,
+    /// What the node has been profiled to hold, as the strings a profile
+    /// stores. Empty for every kind but a column, for a column no profile
+    /// covers, and for a corpus indexed with values redacted.
+    ///
+    /// The kept distinct values where there are few enough of them; the
+    /// minimum and the maximum where there were too many to keep and the
+    /// column is numeric. Only those two — a sum or a mean is a number the
+    /// workbook never wrote in a cell, and indexing it would offer a hit on a
+    /// value nobody can go and read.
+    pub values: Vec<String>,
+    /// Whether those values read as a category — few of them, each repeated —
+    /// rather than as a key column's identifiers.
+    ///
+    /// What decides whether they are worth putting in front of a sentence
+    /// embedder. `Retail, Business, Wholesale` is a phrase about what the
+    /// column means; two thousand account numbers is not, and would crowd the
+    /// node's own name out of a 512-token window.
+    pub categorical: bool,
     /// How many cells the node stands for.
     ///
     /// The tie-breaker. `VLOOKUP` appears in nearly every formula of a real
@@ -70,21 +104,88 @@ impl NodeDoc {
             out.push_str(": ");
             out.push_str(&self.body);
         }
+        if self.categorical {
+            let mut values = self.values.iter().take(EMBEDDED_VALUES).peekable();
+            if values.peek().is_some() {
+                out.push_str(", holding ");
+                out.push_str(&values.cloned().collect::<Vec<_>>().join(", "));
+            }
+        }
         out
     }
 }
 
-/// Flatten every node of a graph.
+/// How many of a categorical column's values reach the embedding.
+///
+/// A cap rather than the whole list, because the point of putting them there
+/// is that the node reads as a phrase about what the column means, and
+/// `max_distinct` values is a list rather than a phrase. The
+/// lexical half indexes all of them, which is where an exact value is meant to
+/// be found anyway.
+const EMBEDDED_VALUES: usize = 12;
+
+/// Flatten every node of a graph, with nothing said about what it holds.
 ///
 /// The order is the graph's own node order, so `node` is also the position.
 pub fn docs_for(graph: &Graph) -> Vec<NodeDoc> {
+    docs_for_with(graph, None)
+}
+
+/// Flatten every node of a graph, carrying the values its columns were
+/// profiled to hold.
+///
+/// `profiles` is the same workbook's `profiles/` entry, or `None` for a corpus
+/// that has none — indexed with `--no-profiles`, or stored before profiles
+/// existed. A profile whose values were redacted carries none, so passing it is
+/// the same as passing `None` and the caller does not have to know that.
+///
+/// A profile is matched to a column node by **range**, which is an identity and
+/// not a guess: the graph builds a column node over the region body's rows at
+/// one column, and `read_table` builds the profile over exactly that rectangle.
+/// A column the profiler did not cover — a region's row-label columns, which
+/// sit outside the body it profiles — simply gets no values, rather than the
+/// values of whichever column happened to be next to it.
+pub fn docs_for_with(graph: &Graph, profiles: Option<&Profiles>) -> Vec<NodeDoc> {
     let sheets = sheet_names(graph);
     let parents = parents(graph);
+    let profiled = by_range(profiles);
 
     graph
         .node_indices()
-        .map(|idx| doc_for(graph, idx, &sheets, &parents))
+        .map(|idx| doc_for(graph, idx, &sheets, &parents, &profiled))
         .collect()
+}
+
+/// Column profiles by the range they cover.
+///
+/// Empty when values were not collected: a profile built with
+/// [`eg_structure::ProfileOptions::values`] off holds counts and types, which are structure
+/// the graph already carries, and nothing a searcher would type.
+fn by_range(profiles: Option<&Profiles>) -> FxHashMap<RangeRef, &ColumnProfile> {
+    let Some(profiles) = profiles.filter(|p| p.values) else {
+        return FxHashMap::default();
+    };
+    profiles.columns.iter().map(|c| (c.range, c)).collect()
+}
+
+/// What a profiled column holds, as the strings to index.
+///
+/// The kept distinct values, most frequent first, or — when there were too many
+/// to keep — the bounds of a numeric column. The bounds are cells: some row
+/// really does hold the minimum and some row the maximum, so a search for
+/// either is a search that can be followed to a cell. A sum or a mean is not,
+/// and is left out for that reason.
+fn values_of(profile: &ColumnProfile) -> Vec<String> {
+    if let Some(distinct) = &profile.distinct {
+        return distinct.iter().map(|v| v.value.clone()).collect();
+    }
+    match &profile.numeric {
+        // Rendered through the sheet's own fifteen digits, the way a profile
+        // writes a distinct value, so the two spellings of a number that
+        // reaches this index by two routes are one token.
+        Some(n) => vec![format!("{}", shown(n.min)), format!("{}", shown(n.max))],
+        None => Vec::new(),
+    }
 }
 
 /// Sheet names by id, read off the sheet nodes rather than passed in, so a
@@ -119,6 +220,7 @@ fn doc_for(
     idx: NodeIndex,
     sheets: &FxHashMap<SheetId, String>,
     parents: &FxHashMap<NodeIndex, NodeIndex>,
+    profiled: &FxHashMap<RangeRef, &ColumnProfile>,
 ) -> NodeDoc {
     let node = &graph[idx];
     let sheet = node.sheet().and_then(|id| sheets.get(&id).cloned());
@@ -164,6 +266,11 @@ fn doc_for(
         Node::ExternalWorkbook(_) => String::new(),
     };
 
+    let profile = match node {
+        Node::Column(c) => profiled.get(&c.range).copied(),
+        _ => None,
+    };
+
     NodeDoc {
         node: idx.index() as u32,
         cells: cells(node),
@@ -173,6 +280,8 @@ fn doc_for(
         label: node.label(),
         context: context.join(" "),
         body,
+        values: profile.map(values_of).unwrap_or_default(),
+        categorical: profile.is_some_and(ColumnProfile::is_categorical),
     }
 }
 

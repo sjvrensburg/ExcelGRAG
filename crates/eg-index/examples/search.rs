@@ -102,7 +102,12 @@ fn main() {
                     continue;
                 }
             };
-            match index.index_stored(&stored) {
+            // The same profiles `eg index` indexes, so this measures the
+            // index that verb builds rather than a smaller one — and so that
+            // running this over a corpus does not quietly strip the values
+            // out of an index that had them.
+            let profiles = corpus.profiles(hash).unwrap_or_default();
+            match index.index_stored_with(&stored, profiles.as_ref()) {
                 Ok(n) => {
                     documents += n;
                     indexed += 1;

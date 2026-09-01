@@ -125,7 +125,7 @@ pub enum Verdict {
     /// Nothing matched at all.
     Nothing,
     /// The result was not found on anything the question asked about — either
-    /// no word of it is in this corpus, or the best result carries none of the
+    /// no word of it is in what this corpus indexes, or the best result carries none of the
     /// words that are. This one *is* unambiguous, and is the only one that
     /// raises a banner.
     Blind,
@@ -241,7 +241,13 @@ impl Search {
             return "the question carried no content word to search on".to_string();
         }
         if self.hits.is_empty() {
-            return "nothing matched".to_string();
+            // Not a bare "nothing matched": a numeric miss is the one case
+            // where nothing matching says nothing about the workbook, and
+            // this is the line a caller reads before deciding it does.
+            return match self.value_note() {
+                Some(note) => format!("nothing matched; {note}"),
+                None => "nothing matched".to_string(),
+            };
         }
         let mut out = if self.covered.is_empty() {
             "the top result matches none of the question's words".to_string()
@@ -263,9 +269,12 @@ impl Search {
         }
         if !self.unmatched.is_empty() {
             out.push_str(&format!(
-                "; {} not in this corpus at all",
+                "; {} not in what this corpus indexes",
                 quoted(&self.unmatched)
             ));
+        }
+        if let Some(note) = self.value_note() {
+            out.push_str(&format!("; {note}"));
         }
         if !self.uncertain.is_empty() {
             out.push_str(&format!(
@@ -289,6 +298,54 @@ impl Search {
         out
     }
 
+    /// Unmatched words that could be in a cell anyway.
+    ///
+    /// The two absences mean different things and the evidence layer exists so
+    /// that things which mean different things stop reading alike. A *name*
+    /// the corpus does not know is a name the workbook does not use — the
+    /// index carries every label, header, sheet name and formula there is. A
+    /// *number* it does not know may be in a cell and in no index at all: a
+    /// column's values are indexed only where its profile kept a distinct list
+    /// of them, and a profile abandons that list above a few dozen values, so
+    /// a figure out of a large numeric column is absent by construction and no
+    /// search will ever find it.
+    ///
+    /// Told nothing, a caller reads "1612 is not in this corpus" as "1612 is
+    /// not in the workbook", which is the sort of confident wrong answer the
+    /// whole of this module is here to prevent. What answers it is a scan of
+    /// the cells, which is a different tool and not a better search.
+    ///
+    /// Deliberately shallow: anything that parses as a number. A year in a
+    /// header is caught by this too, and the note it earns is still true —
+    /// the index does not carry every cell value whatever the word looks
+    /// like. Erring the other way would leave the case this exists for
+    /// unmarked.
+    pub fn unindexable(&self) -> Vec<String> {
+        self.unmatched
+            .iter()
+            .filter(|w| w.parse::<f64>().is_ok())
+            .cloned()
+            .collect()
+    }
+
+    /// The note [`Search::unindexable`] earns, or nothing.
+    ///
+    /// One sentence, said in both the evidence line and the banner, because
+    /// the two are read in different places and this is the one caveat that
+    /// changes what a caller should do next.
+    fn value_note(&self) -> Option<String> {
+        let words = self.unindexable();
+        if words.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{} {} a number, and a column's values are indexed only where its profile kept \
+             them — scan the cells ({SCAN}) before concluding it is absent",
+            quoted(&words),
+            if words.len() == 1 { "is" } else { "are" },
+        ))
+    }
+
     /// The banner, for the case where there is no room to argue.
     ///
     /// `None` otherwise, including for a partial match: a warning on most
@@ -301,12 +358,32 @@ impl Search {
                 "every word in the question is a frame word — ask with the terms you want found."
                     .to_string(),
             ),
-            Verdict::Nothing => Some("NOTHING MATCHED.".to_string()),
+            Verdict::Nothing => Some(match self.unindexable().is_empty() {
+                true => "NOTHING MATCHED.".to_string(),
+                // The lexical half finding nothing at all is the *usual*
+                // answer to a bare number, not the exotic one, and the
+                // banner saying only "NOTHING MATCHED" about a figure that
+                // is in a cell is precisely the wrong answer.
+                false => format!(
+                    "NOTHING MATCHED. A number can be in a cell and in no index — \
+                     scan the cells ({SCAN})."
+                ),
+            }),
             Verdict::Blind if self.matched.is_empty() => Some(format!(
-                "BLIND MATCH: none of {} appears anywhere in this corpus, so nothing \
+                "BLIND MATCH: none of {} appears in what this corpus indexes, so nothing \
                  below was found on the question. Treat it as a guess; `workbooks` \
-                 says what is actually indexed.",
-                quoted(&self.unmatched)
+                 says what is actually indexed.{}",
+                quoted(&self.unmatched),
+                match self.unindexable().is_empty() {
+                    true => String::new(),
+                    // Said in the banner and not only in the evidence line,
+                    // because this is the case the banner is *wrong* about
+                    // without it: a number absent from the index is not a
+                    // number absent from the workbook.
+                    false => format!(
+                        " A number can be in a cell and in no index — scan the cells ({SCAN})."
+                    ),
+                }
             )),
             Verdict::Blind => Some(format!(
                 "BLIND MATCH: the best result carries none of {} — the words of the \
@@ -317,6 +394,13 @@ impl Search {
         }
     }
 }
+
+/// How to look for a value the index cannot hold, on both surfaces that can.
+///
+/// Named rather than described because a caller told "search the cells" has
+/// been told nothing it can act on, and these two are the same scan behind an
+/// MCP tool and a terminal verb.
+const SCAN: &str = "`find_value`, `eg where`";
 
 fn quoted(words: &[String]) -> String {
     words
@@ -649,6 +733,73 @@ mod tests {
         };
         // "bucket" is matched, not covered, not uncertain — a confirmed miss.
         assert_eq!(search.verdict(), Verdict::Partial);
+    }
+
+    #[test]
+    fn a_number_the_index_does_not_have_is_not_a_number_the_workbook_lacks() {
+        // A corpus indexes a column's values only where its profile kept them,
+        // so a figure out of a large numeric column is absent by construction.
+        // Reported as "not in this corpus at all" it reads as "the workbook
+        // does not contain 1612", which is the confident wrong answer this
+        // whole module exists to prevent.
+        let search = Search {
+            hits: vec![hit("wbA", 99)],
+            unmatched: vec!["1612".to_string()],
+            ..Search::default()
+        };
+        assert_eq!(search.unindexable(), vec!["1612".to_string()]);
+        let evidence = search.evidence();
+        assert!(evidence.contains("indexed only where"), "{evidence}");
+        assert!(evidence.contains("eg where"), "{evidence}");
+        // And it must not claim the corpus was asked something it was not.
+        assert!(
+            !evidence.contains("not in this corpus at all"),
+            "{evidence}"
+        );
+
+        let warning = search.warning().expect("blind, so a banner");
+        assert!(warning.starts_with("BLIND MATCH:"), "{warning}");
+        assert!(warning.contains("in no index"), "{warning}");
+    }
+
+    #[test]
+    fn a_word_that_is_not_a_number_earns_no_such_note() {
+        // The note is about values, and every *name* in a workbook is indexed.
+        // A caveat that appears on every miss is a caveat nobody reads.
+        let search = Search {
+            hits: vec![hit("wbA", 99)],
+            unmatched: vec!["ferrous".to_string()],
+            ..Search::default()
+        };
+        assert!(search.unindexable().is_empty());
+        let evidence = search.evidence();
+        assert!(!evidence.contains("eg where"), "{evidence}");
+        assert!(
+            evidence.contains("not in what this corpus indexes"),
+            "{evidence}"
+        );
+    }
+
+    #[test]
+    fn a_number_that_matched_nothing_at_all_still_says_why() {
+        // The shape a bare number actually takes: the lexical half returns no
+        // hit whatever, so the verdict is `Nothing` rather than `Blind`, and
+        // an unqualified "NOTHING MATCHED" about a figure that is in a cell is
+        // exactly the wrong answer.
+        let search = Search {
+            hits: Vec::new(),
+            unmatched: vec!["1612".to_string()],
+            ..Search::default()
+        };
+        assert_eq!(search.verdict(), Verdict::Nothing);
+        let warning = search.warning().expect("nothing matched, so a banner");
+        assert!(warning.starts_with("NOTHING MATCHED."), "{warning}");
+        assert!(warning.contains("in no index"), "{warning}");
+        assert!(
+            search.evidence().contains("eg where"),
+            "{}",
+            search.evidence()
+        );
     }
 
     #[test]

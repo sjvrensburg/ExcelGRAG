@@ -26,7 +26,9 @@
 //! explanation.
 
 use eg_model::formula::scan_references_into;
-use eg_model::{CellRef, CellValue, RangeRef, ReferenceSpan, Sheet, SheetId, ValueKind, Workbook};
+use eg_model::{
+    shown, CellRef, CellValue, RangeRef, ReferenceSpan, Sheet, SheetId, ValueKind, Workbook,
+};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
@@ -125,6 +127,28 @@ pub struct ScanReport {
     pub references_scanned: u64,
     /// Results found, including any past the cap.
     pub matches: u64,
+    /// Whether the cap stopped the result list short. The counts above are
+    /// exact regardless; only the list is capped.
+    pub capped: bool,
+}
+
+/// What a value scan looked at, so a caller can tell "not there" from
+/// "we stopped listing".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValueScan {
+    /// Populated cells examined. Every one of them, on every sheet: this is
+    /// the whole workbook, which is what makes the answer exhaustive.
+    pub cells_scanned: u64,
+    /// Cells holding the probe, including any past the cap.
+    pub matches: u64,
+    /// Cells that *show* the same characters while holding another type — a
+    /// number typed into a text cell, most often.
+    ///
+    /// Counted rather than returned, because they are not what was asked for
+    /// and they are the usual reason a value that is plainly on the screen
+    /// scans as absent. A caller that says nothing about them reports "1612 is
+    /// nowhere in this workbook" about a workbook that shows `1612` on the screen.
+    pub other_kind: u64,
     /// Whether the cap stopped the result list short. The counts above are
     /// exact regardless; only the list is capped.
     pub capped: bool,
@@ -250,6 +274,76 @@ pub fn dependents_of(
         }
     }
     (out, report)
+}
+
+/// The cells holding a given value.
+///
+/// The third direction, and the one nothing indexes at all. A corpus records
+/// what a workbook *is* — sheets, tables, columns, formulas — and a bounded
+/// sample of what its columns hold, because a profile that kept every value of
+/// a key column would be a copy of the column. So "which cells hold 1612" is
+/// not a question the graph or the index can answer, and asking them returns
+/// no match for a number that is plainly on the screen.
+///
+/// This answers it the only exhaustive way there is: every populated cell of
+/// every sheet, compared with the probe. Linear in the workbook, the same cost
+/// and for the same reason as [`dependents_of`] — nothing wrote down where a
+/// value lives, so everything is looked at.
+///
+/// A formula cell is compared on its **value**, not its text: `=B4*C4` holding
+/// 1612 is a cell that holds 1612, and it is usually the one someone quoting a
+/// figure actually means.
+///
+/// Equality is the spreadsheet's, not Rust's — see [`holds`]. `limit` caps the
+/// returned list; the counts in the report are exact.
+pub fn cells_holding(
+    workbook: &Workbook,
+    probe: &CellValue,
+    limit: usize,
+) -> (Vec<CellFact>, ValueScan) {
+    let shows = probe.to_display();
+    let mut out = Vec::new();
+    let mut report = ValueScan::default();
+
+    for sheet in &workbook.sheets {
+        for (at, cell) in sheet.iter() {
+            report.cells_scanned += 1;
+            if holds(&cell.value, probe) {
+                report.matches += 1;
+                if out.len() < limit {
+                    out.push(fact(workbook, at, cell));
+                } else {
+                    report.capped = true;
+                }
+            } else if cell.value.to_display().eq_ignore_ascii_case(&shows) {
+                report.other_kind += 1;
+            }
+        }
+    }
+    (out, report)
+}
+
+/// Whether a cell holds the probe, under the equality a spreadsheet uses.
+///
+/// Numbers through [`shown`], so a cell computed to 0.30000000000000004 holds
+/// 0.3 — the fifteen significant digits are what the sheet carries, and
+/// comparing raw doubles would answer "no" about a cell displaying the number
+/// that was asked for. Text without regard to case, which is Excel's `=`. Never
+/// across types: a probe is a value of a definite kind, and the cells that only
+/// *look* like it are counted into [`ValueScan::other_kind`] instead of
+/// silently folded in, because "1612 the number" and "1612 the string" are a
+/// finding when a workbook has both.
+pub fn holds(value: &CellValue, probe: &CellValue) -> bool {
+    match (value, probe) {
+        (CellValue::Number(a), CellValue::Number(b)) => shown(*a) == shown(*b),
+        // Excel compares text case-insensitively and does not trim: a trailing
+        // space is a different value, and one worth being able to find.
+        (CellValue::Text(a), CellValue::Text(b)) => a.to_uppercase() == b.to_uppercase(),
+        (CellValue::Bool(a), CellValue::Bool(b)) => a == b,
+        (CellValue::Error(a), CellValue::Error(b)) => a == b,
+        (CellValue::Empty, CellValue::Empty) => true,
+        _ => false,
+    }
 }
 
 /// Whether two ranges share a cell.

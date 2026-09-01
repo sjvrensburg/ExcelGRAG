@@ -228,6 +228,14 @@ threshold, so a key column of customer numbers profiles to a count and nothing
 else; listing it would be storing the column. Text values are cut to 64
 characters and say that they were.
 
+**Those values are indexed**, which is what closes the gap the paragraph above
+opens. A column carries the values its profile kept, and — where there were too
+many to keep and the column is numeric — its minimum and its maximum, which are
+cells someone can go and read. A sum is not, so a sum is left out. `eg search
+demo/ Ironwood` now finds the `Territory` column it is a value of, and
+`eg search demo/ 45033.43` finds `Balance`, whose two thousand distinct values
+were never stored.
+
 **It is also the one thing a corpus holds that is the workbook's data.**
 Everything in `graphs/` is structure — ranges, headers, counts — and that
 directory can be handed to someone who may not see the spreadsheet. Distinct
@@ -381,6 +389,21 @@ whatever else it holds, and the three are weighed differently. Otherwise every
 node on a sheet called Revenue outranks the Revenue column itself. A table also
 carries the headers of its columns, so searching for a column finds the table it
 belongs to as well.
+
+A column also carries what it was profiled to *hold*, weighed below all of
+those: a column called `Wholesale` is a better answer to "wholesale" than one
+merely containing the word in four hundred cells, and the ordering says so. That
+weight is an argument rather than a measurement, and is written down as one —
+the scored questions have too few asked in the vocabulary of a workbook's values
+to tell 0.6 from 1.0.
+
+This is the one part of the index that is the workbook's **data** rather than
+its structure, and it is here on exactly the terms `profiles/` is: the values
+reach it only through a profile that kept them, so `--redact-values` and
+`--no-profiles` keep them out with no separate enforcement. Re-indexing a
+workbook the corpus already holds rewrites its documents for that reason, even
+though the file has not changed — otherwise a later `--redact-values` run would
+scrub `profiles/` and leave the earlier run's values sitting in the index.
 
 Tokenisation is the part worth knowing about. A spreadsheet writes `NetRevenue`,
 `FY2024` and `Sheet1`, and tantivy's default tokenizer splits on punctuation
@@ -601,6 +624,42 @@ The example prints addresses and formulas, and value *kinds* rather than values,
 unless `--show-values` says otherwise. A formula is structure; a value is the
 workbook's data.
 
+### The third direction: where a value is
+
+"Which cells hold 1612" is neither of those two, and nothing indexes it. The
+corpus knows what a workbook *is*, and — since profiles reached the index — what
+its columns hold wherever there were few enough values to keep. A figure out of
+a large numeric column is in neither, and no search will ever return it. That is
+a fact about indexing rather than about the workbook, and the two must not read
+alike: a search whose only unmatched word is a number now says so, and names the
+scan that can answer it.
+
+```
+BLIND MATCH: none of "1612" appears in what this corpus indexes … A number can
+be in a cell and in no index — scan the cells (`find_value`, `eg where`).
+```
+
+The scan is exhaustive and costs what that implies: every populated cell of
+every sheet, the same linear pass `--dependents` makes and for the same reason.
+What it buys is an answer with no hedge in it — on the demo workbook, `1612` is
+`Debtors!L632` and nowhere else, and the count of cells compared is what makes a
+*nil* answer worth having.
+
+```sh
+eg where tests/fixtures/demo/impairment.xlsx 1612
+eg where corpus/ Ironwood        # a corpus scans every workbook it holds
+```
+
+A formula cell is compared on its **value**, not its text: `=ROUND(E632-K632,2)`
+holding 1612 is a cell that holds 1612, and it is usually the one someone
+quoting a figure means. Numbers are compared through the fifteen significant
+digits a sheet carries, so a cell computed to 16.880000000000003 holds 16.88.
+Text is compared without regard to case, which is Excel's `=`. Never across
+types — but the cells that only *look* like the probe are counted and reported,
+because a number typed into a text cell is the usual reason a figure that is
+plainly on the screen scans as absent, and reporting "nowhere in this workbook"
+about it would be the same wrong answer in a new place.
+
 ## Recomputing a number
 
 Provenance says which cells a formula stands on. The other half of P6 works out
@@ -802,7 +861,7 @@ count identical.
 
 Everything above is reachable through each crate's examples, which is fine for
 developing a library and poor for using one. `eg` is the same capabilities
-behind nine verbs, in the order a question travels:
+behind ten verbs, in the order a question travels:
 
 ```sh
 cargo install --path crates/eg-cli
@@ -811,6 +870,7 @@ eg index corpus/ book.xlsb                  # read it, store its graph, index it
 eg ask corpus/ bad debt provision           # a question, as a cited passage
 eg search corpus/ bad debt --limit 3        # or just what matched
 eg cells book.xlsb 'LOOKUP!AE53:AG89'       # the cells behind a citation
+eg where book.xlsb 1612                     # which cells hold a value
 eg trace book.xlsb 'LOOKUP!AE53' --dependents
 eg check book.xlsb                          # do the formulas still agree
 eg what-if book.xlsb 'RATES!BS9=0.175'      # and what moves if one changes
@@ -828,7 +888,7 @@ READMEs — while a person who types `eg cells` is asking to see the cells.
 
 ## Serving it to an agent
 
-`eg-mcp` is an MCP server over the whole stack: a corpus in, eight tools out.
+`eg-mcp` is an MCP server over the whole stack: a corpus in, twelve tools out.
 
 ```sh
 cargo run --release -p eg-graph --example corpus -- index private/book.xlsb
@@ -844,6 +904,7 @@ claude mcp add excelgrag -- "$PWD/target/release/eg-mcp" "$PWD/index"
 | `read_cells` | the formulas and values of a range |
 | `precedents` | what a formula reads |
 | `dependents` | what reads a cell — the expensive direction, and it says so |
+| `find_value` | which cells hold a value, by scanning every one of them |
 | `recompute` | whether a formula still agrees with the value stored beside it |
 | `tables` | the tables of a workbook and the columns of each, with their types |
 | `query_table` | a total, count or average over the rows of one table |
@@ -1010,9 +1071,18 @@ carries *none* of the question's words, either because none of them is in the
 corpus or because the ranking found something on other grounds entirely.
 
 ```
-BLIND MATCH: none of "colour", "invoice", "paper" appears anywhere in this
-corpus, so nothing below was found on the question. Treat it as a guess.
+BLIND MATCH: none of "colour", "invoice", "paper" appears in what this corpus
+indexes, so nothing below was found on the question. Treat it as a guess.
 ```
+
+"What this corpus indexes" rather than "this corpus", because the two differ for
+exactly one kind of word and the difference matters most there. Every *name* in
+a workbook is indexed, so a name that missed is a name the workbook does not
+use. A *number* that missed may be in a cell and in no index at all — a column's
+values are indexed only where its profile kept them. Told nothing, a caller
+reads the banner as "1612 is not in the workbook", which is precisely the
+confident wrong answer this section exists to prevent, so a numeric miss earns a
+sentence of its own and the name of the scan that can settle it.
 
 Costs one index probe per word of the question, each a fraction of a
 millisecond against a search already under one.
