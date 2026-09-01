@@ -341,6 +341,18 @@ decision, never the number it came out at. Report those on the terminal, where
 the person who asked for them is; a commit message says the check passed.
 Sheet names appear in committed prose only as consistent pseudonyms.
 
+**The workbook code-names in committed text were reviewed and kept.**
+`BP136-6-WORK DOC` (`docs/upstream-issues.md`, `eg-ingest/examples/unquoted_sheets.rs`,
+`eg-eval/examples/trace.rs`, `eg-retrieve`), `TR450-6-WORK DOC` (`docs/design.md`),
+`BZ200`, `HQ880_20240630`, `GS560` and `INDICATORS` were put to the user before
+the repository was made public, along with the fact that `BP136` and `TR450`
+name the same sheet two ways and so cannot both be the consistent pseudonym the
+rule above asks for. The decision was to publish as they stand. Do not re-open
+this, and do not scrub them on your own initiative — they are in the history
+back to `e6a0aab` regardless, so a working-tree change would achieve nothing
+but noise. Reconciling the two spellings is still worth doing if the file is
+being edited anyway; disclosure is not the reason.
+
 `docs/upstream-issues.md` and the calamine reports it links are the deliberate
 exception, reviewed and kept on those terms: their measurements and cell values
 are the evidence behind live bug reports, and a report without its evidence is
