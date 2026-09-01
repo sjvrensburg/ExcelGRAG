@@ -752,15 +752,34 @@ are ready to file.
 
 ### Reproducing
 
+The demo workbook is committed in all three formats LibreOffice can write, from
+one generator run, so this needs no workbook of your own and no regeneration
+step:
+
 ```sh
-cargo run --release -p eg-fixtures -- --rows 30 --out /tmp/demo --formats xlsx,xls
-cargo run --release -p eg-cli -- check /tmp/demo/impairment.xlsx   # agrees
-cargo run --release -p eg-cli -- check /tmp/demo/impairment.xls    # disagrees
+cargo run --release -p eg-cli -- check tests/fixtures/demo/impairment.xlsx
+#   agreed 14008 (100.0%)   differed 0
+cargo run --release -p eg-cli -- check tests/fixtures/demo/impairment.xls
+#   agreed 10001 (71.4%)    differed 4007 (28.6%)
 ```
 
-Nothing in this repository works around it. `.xls` is the least-used of the five
-formats and the demo fixture is committed as `.xlsx` and `.ods`; anyone
-investigating regenerates the `.xls` with the command above.
+Same spreadsheet, same bytes on disk for anyone who clones the repository. To
+build it from source instead:
+
+```sh
+cargo run --release -p eg-fixtures -- --rows 2000 --out tests/fixtures/demo
+```
+
+`cargo test -p eg-ingest --test parity` holds the defect to its exact shape
+rather than describing it: values agree everywhere, every formula that differs
+does so *only* in which sheet a reference is attributed to, the substitutions
+observed are exactly `Debtors`→`Rates` and `Rates`→`Debtors` — a swap, in both
+directions, which is what points at an index into the wrong table rather than
+an off-by-one — and the single exception is the 3-D reference above. The test
+asserts that some formulas still differ, so it fails when this is fixed instead
+of passing vacuously and outliving the defect.
+
+Nothing in this repository works around it.
 
 ## 10. An ODF error cell reads as an empty cell
 
