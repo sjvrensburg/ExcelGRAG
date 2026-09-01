@@ -1,4 +1,5 @@
-//! The demonstration workbook: a fictional distributor's debtor impairment.
+//! The demonstration workbook: a fictional distributor's trade debtor
+//! impairment.
 //!
 //! The shape is deliberately the shape of the workbook this project was built
 //! against — a long working table whose columns are filled-down formulas, small
@@ -74,7 +75,7 @@ fn debtors(rows: usize) -> Sheet {
     sheet.push(vec![
         Cell::text("Account"),
         Cell::text("Account Holder"),
-        Cell::text("Suburb"),
+        Cell::text("Territory"),
         Cell::text("Debt Type"),
         Cell::text("Balance"),
         Cell::text("Days Overdue"),
@@ -84,14 +85,14 @@ fn debtors(rows: usize) -> Sheet {
         Cell::text("Provision"),
         Cell::text("Present Value"),
         Cell::text("Impairment"),
-        Cell::text("Days per Rand"),
+        Cell::text("Days per Unit"),
     ]);
 
     let mut rng = Rng::new(0x5EED_1234_ABCD_0001);
     for i in 0..rows {
         let row = i + 2;
         let category = CATEGORIES[rng.below(CATEGORIES.len())];
-        let suburb = SUBURBS[rng.below(SUBURBS.len())];
+        let territory = TERRITORIES[rng.below(TERRITORIES.len())];
         // A zero balance every so often, so the last column has real errors in
         // it rather than a uniform column of numbers.
         let balance = if i % ZERO_BALANCE_EVERY == 0 {
@@ -103,8 +104,8 @@ fn debtors(rows: usize) -> Sheet {
 
         sheet.push(vec![
             Cell::text(format!("RB-{:06}", 100_000 + i)),
-            Cell::text(holder(&mut rng, category, suburb)),
-            Cell::text(suburb),
+            Cell::text(holder(&mut rng, category, territory)),
+            Cell::text(territory),
             Cell::text(category),
             Cell::Number(balance),
             Cell::Number(days),
@@ -327,11 +328,11 @@ fn notes() -> Sheet {
 // ---- generated data --------------------------------------------------------
 
 const CATEGORIES: [&str; 4] = ["Retail", "Business", "Wholesale", "Internal"];
-const SUBURBS: [&str; 6] = [
-    "Kloofview",
-    "Marula Park",
+const TERRITORIES: [&str; 6] = [
+    "Kingsford",
+    "Northgate",
     "Stonebridge",
-    "Weavers Nek",
+    "Eastwick",
     "Palm Grove",
     "Ironwood",
 ];
@@ -351,11 +352,11 @@ const TRADES: [&str; 8] = [
 /// Invented entities rather than invented people: a fixture that ships in a
 /// public repository should not carry anything that reads like a person's
 /// details, even fictional ones.
-fn holder(rng: &mut Rng, category: &str, suburb: &str) -> String {
+fn holder(rng: &mut Rng, category: &str, territory: &str) -> String {
     match category {
-        "Business" => format!("{} {}", suburb, TRADES[rng.below(TRADES.len())]),
-        "Internal" => format!("{suburb} Depot"),
-        _ => format!("Unit {} {}", 1 + rng.below(400), suburb),
+        "Business" => format!("{} {}", territory, TRADES[rng.below(TRADES.len())]),
+        "Internal" => format!("{territory} Depot"),
+        _ => format!("{} Outlet {}", territory, 1 + rng.below(400)),
     }
 }
 

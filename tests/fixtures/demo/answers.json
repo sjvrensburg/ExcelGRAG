@@ -84,9 +84,9 @@
     "why": "a defined name, which nothing else in the graph is called"
   },
   {
-    "ask": "which suburb is an account in",
+    "ask": "which territory is an account in",
     "want": [
-      "Suburb"
+      "Territory"
     ],
     "why": "a plain categorical column, and the easiest question here"
   },
