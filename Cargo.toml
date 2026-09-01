@@ -12,9 +12,10 @@ members = [
     "crates/eg-cli",
     "crates/eg-fixtures",
 ]
+exclude = ["vendor/calamine"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sjvrensburg/ExcelGRAG"
@@ -38,6 +39,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rustc-hash = "2"
 petgraph = { version = "0.8", features = ["serde-1"] }
 smallvec = { version = "1", features = ["serde"] }
+fs4 = "0.13"
 tantivy = "0.26"
 fastembed = { version = "6", default-features = false, features = [
     "ort-download-binaries-rustls-tls",
@@ -49,9 +51,8 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 
-# calamine fork carrying six fixes, each on its own branch and pointed at here
-# through one integration branch, since `[patch.crates-io]` takes a single
-# source:
+# Vendored calamine source carrying the reader fixes listed below, plus
+# defined-name scope preservation, ODS error cells, and correct XLS XTI lookup.
 #
 #   tafia/calamine#712 (branch xlsb-shared-formulas) — XLSB/XLS shared and array
 #     formulas, and the transposed `>`/`>=` operators. Without it 70% of the
@@ -68,6 +69,8 @@ codegen-units = 1
 #     workbook is resolved against this one's sheets, naming a real sheet and
 #     recording a real dependency on the wrong one.
 #
-# Drop this section once they land in a published release.
+# The patched revision is vendored so every correctness fix used by ExcelGRAG
+# is reproducible from this repository. Drop this section once they all land in
+# a published release.
 [patch.crates-io]
-calamine = { git = "https://github.com/sjvrensburg/calamine.git", branch = "excelgrag" }
+calamine = { path = "vendor/calamine" }

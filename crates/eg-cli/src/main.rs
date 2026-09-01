@@ -30,6 +30,15 @@ mod workbook;
 
 use clap::{Args, Parser, Subcommand};
 
+fn nonzero_usize(value: &str) -> Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| format!("{value:?} is not a non-negative integer"))?;
+    (parsed > 0)
+        .then_some(parsed)
+        .ok_or_else(|| "must be at least 1".to_string())
+}
+
 #[derive(Parser)]
 #[command(
     name = "eg",
@@ -40,6 +49,10 @@ use clap::{Args, Parser, Subcommand};
     arg_required_else_help = true
 )]
 struct Cli {
+    /// Refuse inputs above this many populated cells. Use 0 for no limit when
+    /// deliberately processing a very large trusted workbook.
+    #[arg(long, global = true, default_value_t = 20_000_000)]
+    max_input_cells: u64,
     #[command(subcommand)]
     command: Command,
 }
@@ -78,19 +91,19 @@ enum Command {
         #[arg(required = true)]
         query: Vec<String>,
         /// How many search hits to expand from.
-        #[arg(long, default_value_t = 5)]
+        #[arg(long, default_value_t = 5, value_parser = nonzero_usize)]
         seeds: usize,
         /// Dependency hops from a seed.
         #[arg(long, default_value_t = 2)]
         hops: usize,
         /// Most nodes per workbook.
-        #[arg(long, default_value_t = 40)]
+        #[arg(long, default_value_t = 40, value_parser = nonzero_usize)]
         budget: usize,
         /// Contained children to show per node.
         #[arg(long, default_value_t = 0)]
         children: usize,
         /// Ceiling on the passage, in characters.
-        #[arg(long, default_value_t = 8000)]
+        #[arg(long, default_value_t = 8000, value_parser = nonzero_usize)]
         chars: usize,
         /// Restrict to one workbook, by content hash (or a prefix of it).
         #[arg(long)]
@@ -107,7 +120,7 @@ enum Command {
         dir: String,
         #[arg(required = true)]
         query: Vec<String>,
-        #[arg(long, default_value_t = 8)]
+        #[arg(long, default_value_t = 8, value_parser = nonzero_usize)]
         limit: usize,
         /// Restrict to one workbook, by content hash (or a prefix of it).
         #[arg(long)]
@@ -127,7 +140,7 @@ enum Command {
         workbook: String,
         /// A citation, sheet and all, e.g. "'Q3 Sales'!B2:D40".
         citation: String,
-        #[arg(long, default_value_t = 40)]
+        #[arg(long, default_value_t = 40, value_parser = nonzero_usize)]
         limit: usize,
         #[command(flatten)]
         privacy: Privacy,
@@ -147,7 +160,7 @@ enum Command {
         /// text. Quotes force text, so `"12"` finds the string and `12` the
         /// number.
         value: String,
-        #[arg(long, default_value_t = 40)]
+        #[arg(long, default_value_t = 40, value_parser = nonzero_usize)]
         limit: usize,
         #[command(flatten)]
         privacy: Privacy,
@@ -161,7 +174,7 @@ enum Command {
         /// nothing records who reads a cell, so every formula is scanned.
         #[arg(long)]
         dependents: bool,
-        #[arg(long, default_value_t = 40)]
+        #[arg(long, default_value_t = 40, value_parser = nonzero_usize)]
         limit: usize,
     },
 
@@ -175,7 +188,7 @@ enum Command {
         #[arg(long)]
         scope: Option<String>,
         /// How many disagreements to list.
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = 20, value_parser = nonzero_usize)]
         limit: usize,
         #[command(flatten)]
         privacy: Privacy,
@@ -191,13 +204,13 @@ enum Command {
         changes: Vec<String>,
         /// Levels of the dependency chain to follow. Each one is a full scan
         /// of the workbook's formulas.
-        #[arg(long, default_value_t = 8)]
+        #[arg(long, default_value_t = 8, value_parser = nonzero_usize)]
         levels: usize,
         /// Ceiling on how many cells the change may reach before the walk
         /// gives up. The counts stay exact for what it did walk.
-        #[arg(long, default_value_t = 500_000)]
+        #[arg(long, default_value_t = 500_000, value_parser = nonzero_usize)]
         max_cells: usize,
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = 20, value_parser = nonzero_usize)]
         limit: usize,
         #[command(flatten)]
         privacy: Privacy,
@@ -221,6 +234,7 @@ struct Privacy {
 
 fn main() {
     let cli = Cli::parse();
+    let max_input_cells = (cli.max_input_cells != 0).then_some(cli.max_input_cells);
     // Set only by `Check`, when the sweep found a disagreement — CLAUDE.md
     // calls that a regression, and a caller (CI, most of all) cannot gate on
     // it from stdout alone.
@@ -240,6 +254,7 @@ fn main() {
             lexical_only,
             !no_profiles,
             privacy.redact_values,
+            max_input_cells,
         ),
         Command::Ask {
             dir,
@@ -280,26 +295,44 @@ fn main() {
             citation,
             limit,
             privacy,
-        } => workbook::cells(&workbook, &citation, limit, privacy.redact_values),
+        } => workbook::cells(
+            &workbook,
+            &citation,
+            limit,
+            privacy.redact_values,
+            max_input_cells,
+        ),
         Command::Where {
             target,
             value,
             limit,
             privacy,
-        } => workbook::holding(&target, &value, limit, privacy.redact_values),
+        } => workbook::holding(
+            &target,
+            &value,
+            limit,
+            privacy.redact_values,
+            max_input_cells,
+        ),
         Command::Trace {
             workbook,
             citation,
             dependents,
             limit,
-        } => workbook::trace(&workbook, &citation, dependents, limit),
+        } => workbook::trace(&workbook, &citation, dependents, limit, max_input_cells),
         Command::Check {
             workbook,
             scope,
             limit,
             privacy,
-        } => workbook::check(&workbook, scope.as_deref(), limit, privacy.redact_values)
-            .map(|found_disagreements| disagreements = found_disagreements),
+        } => workbook::check(
+            &workbook,
+            scope.as_deref(),
+            limit,
+            privacy.redact_values,
+            max_input_cells,
+        )
+        .map(|found_disagreements| disagreements = found_disagreements),
         Command::WhatIf {
             workbook,
             changes,
@@ -314,6 +347,7 @@ fn main() {
             max_cells,
             limit,
             privacy.redact_values,
+            max_input_cells,
         ),
         Command::Serve { dir, privacy } => corpus::serve(&dir, privacy.redact_values),
     };
@@ -398,5 +432,46 @@ mod tests {
             }
             _ => panic!("wrong command"),
         }
+    }
+
+    #[test]
+    fn list_limits_and_walk_budgets_refuse_zero() {
+        assert!(
+            Cli::try_parse_from(["eg", "cells", "book.xlsx", "Sheet1!A1", "--limit", "0"]).is_err()
+        );
+        assert!(Cli::try_parse_from([
+            "eg",
+            "what-if",
+            "book.xlsx",
+            "Sheet1!A1=1",
+            "--levels",
+            "0"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "eg",
+            "what-if",
+            "book.xlsx",
+            "Sheet1!A1=1",
+            "--max-cells",
+            "0"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn input_cell_limit_is_safe_by_default_and_explicitly_disableable() {
+        let default = Cli::try_parse_from(["eg", "cells", "book.xlsx", "Sheet1!A1"]).unwrap();
+        assert_eq!(default.max_input_cells, 20_000_000);
+        let unlimited = Cli::try_parse_from([
+            "eg",
+            "cells",
+            "book.xlsx",
+            "Sheet1!A1",
+            "--max-input-cells",
+            "0",
+        ])
+        .unwrap();
+        assert_eq!(unlimited.max_input_cells, 0);
     }
 }

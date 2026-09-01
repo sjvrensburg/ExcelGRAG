@@ -61,7 +61,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          # `Cargo.lock` pins the calamine fork by commit, so the key follows it.
+          # `Cargo.lock` pins the vendored calamine dependency graph.
           key: ${{ matrix.name }}
 
       # `Embedder::new` downloads bge-small-en-v1.5 (~130 MB) on first use, and

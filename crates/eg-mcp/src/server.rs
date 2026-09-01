@@ -98,6 +98,13 @@ impl Server {
             return Err(format!("no tool called {name:?}"));
         }
         let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+        let tool = TOOLS
+            .iter()
+            .find(|tool| tool.name == name)
+            .expect("checked above");
+        if let Err(message) = validate_schema(&arguments, &(tool.schema)(), "arguments") {
+            return Ok(text_result(message, true));
+        }
         Ok(match tools::call(&mut self.state, name, &arguments) {
             Ok(text) => text_result(text, false),
             // A tool that could not do what was asked reports back through the
@@ -106,6 +113,77 @@ impl Server {
             Err(message) => text_result(message, true),
         })
     }
+}
+
+/// Validate the deliberately small JSON-Schema subset used by our tool list.
+/// Keeping this beside dispatch guarantees the contract we advertise is also
+/// enforced without pulling a full schema engine into the server.
+fn validate_schema(value: &Value, schema: &Value, path: &str) -> Result<(), String> {
+    if let Some(kind) = schema.get("type").and_then(Value::as_str) {
+        let valid = match kind {
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "string" => value.is_string(),
+            "integer" => value.as_u64().is_some(),
+            "number" => value.is_number(),
+            "boolean" => value.is_boolean(),
+            _ => true,
+        };
+        if !valid {
+            return Err(format!("{path} must be {kind}"));
+        }
+    }
+    if let Some(allowed) = schema.get("enum").and_then(Value::as_array) {
+        if !allowed.contains(value) {
+            return Err(format!("{path} is not one of the allowed values"));
+        }
+    }
+    if let Some(n) = value.as_u64() {
+        if schema
+            .get("minimum")
+            .and_then(Value::as_u64)
+            .is_some_and(|min| n < min)
+        {
+            return Err(format!("{path} is below the minimum"));
+        }
+        if schema
+            .get("maximum")
+            .and_then(Value::as_u64)
+            .is_some_and(|max| n > max)
+        {
+            return Err(format!("{path} is above the maximum"));
+        }
+    }
+    if let Some(object) = value.as_object() {
+        let properties = schema.get("properties").and_then(Value::as_object);
+        if schema.get("additionalProperties") == Some(&Value::Bool(false)) {
+            for key in object.keys() {
+                if !properties.is_some_and(|p| p.contains_key(key)) {
+                    return Err(format!("{path} contains unknown property {key:?}"));
+                }
+            }
+        }
+        if let Some(required) = schema.get("required").and_then(Value::as_array) {
+            for key in required.iter().filter_map(Value::as_str) {
+                if !object.contains_key(key) {
+                    return Err(format!("{path}.{key} is required"));
+                }
+            }
+        }
+        if let Some(properties) = properties {
+            for (key, child) in object {
+                if let Some(child_schema) = properties.get(key) {
+                    validate_schema(child, child_schema, &format!("{path}.{key}"))?;
+                }
+            }
+        }
+    }
+    if let (Some(items), Some(item_schema)) = (value.as_array(), schema.get("items")) {
+        for (index, item) in items.iter().enumerate() {
+            validate_schema(item, item_schema, &format!("{path}[{index}]"))?;
+        }
+    }
+    Ok(())
 }
 
 fn text_result(text: String, is_error: bool) -> Value {
@@ -335,5 +413,48 @@ mod tests {
         let (text, is_error) = call(&mut server, "search", json!({ "query": "bad debt" }));
         assert!(!is_error, "{text}");
         assert!(text.contains("nothing matched"), "{text}");
+    }
+
+    #[test]
+    fn tool_arguments_enforce_the_schema_the_server_advertises() {
+        let (mut server, _dir) = server();
+        let response = server
+            .handle(request(
+                "tools/call",
+                json!({ "name": "workbooks", "arguments": { "surprise": true } }),
+            ))
+            .expect("answered");
+        assert_eq!(response.result.expect("tool result")["isError"], true);
+
+        let response = server
+            .handle(request(
+                "tools/call",
+                json!({
+                    "name": "query_table",
+                    "arguments": {
+                        "table": "Sheet1!A1:B2",
+                        "aggregate": [{ "of": "count", "typo": true }]
+                    }
+                }),
+            ))
+            .expect("answered");
+        assert_eq!(response.result.expect("tool result")["isError"], true);
+    }
+
+    #[test]
+    fn zero_and_overlarge_limits_are_rejected_not_coerced() {
+        let (mut server, _dir) = server();
+        for limit in [0, 101] {
+            let response = server
+                .handle(request(
+                    "tools/call",
+                    json!({
+                        "name": "search",
+                        "arguments": { "query": "revenue", "limit": limit }
+                    }),
+                ))
+                .expect("answered");
+            assert_eq!(response.result.expect("tool result")["isError"], true);
+        }
     }
 }

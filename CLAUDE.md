@@ -64,10 +64,9 @@ cannot write XLSB, so that format still rests on the vendor fixtures.
 
 All three formats it can write are committed under `tests/fixtures/demo`, from
 one generator run, so they are the same spreadsheet by construction. The `.xls`
-is committed even though calamine reads it *wrongly* (issue 9): a defect a
-bug report only describes is one nobody else can confirm, and this one is
-invisible to every other check — the values are right and the formulas parse,
-they just name the wrong sheet.
+is committed because format parity caught issue 9: its formulas once named the
+wrong real sheets while their cached values stayed correct. The vendored reader
+now fixes that path and parity requires complete agreement with the XLSX twin.
 
 Each crate also has `examples/` that exercise its layer directly and print
 measurements; those are the development surface (`cargo run --release -p
@@ -245,15 +244,14 @@ run. Every licence on that list is permissive; adding a copyleft one to get a
 green build would be the wrong fix. Regenerate the notice when dependencies
 move.
 
-## The calamine fork
+## The vendored calamine patch
 
 `[patch.crates-io]` in the workspace `Cargo.toml` points calamine at
-`sjvrensburg/calamine` branch `excelgrag`, pinned by the committed `Cargo.lock`.
-Five fixes ride on it (two upstream as #712/#713, three not yet submitted);
+`vendor/calamine`. The source is committed so every reader fix is reproducible
+without an unpublished remote branch. Seven fixes ride on it;
 without them 70% of a real XLSB workbook's formulas are lost and comparisons are
-inverted. `docs/upstream-issues.md` documents all seven defects. Delete the patch
-section once they land in a published release. `Cargo.lock` is committed on
-purpose — it is what pins the fork to an exact commit.
+inverted. `docs/upstream-issues.md` documents the defects. Delete the patch and
+vendored directory once they land in a published release.
 
 ## Testing the reader
 
@@ -286,14 +284,15 @@ Four independent checks, because they fail differently:
    --test demo`, `cargo test -p eg-ingest --test parity`) — thousands of
    formulas whose values LibreOffice computed, asserting no disagreements and
    that the only refusals are the two the fixture plants. It caught three
-   reader/schema defects in its first hour; two are calamine's and are recorded
-   in `docs/upstream-issues.md` as issues 9 and 10. The parity half compares
+   reader/schema defects in its first hour; two originated in calamine and are
+   recorded in `docs/upstream-issues.md` as issues 9 and 10. Both are fixed in
+   the vendored reader. The parity half compares
    the same workbook as `.xlsx` and as `.ods` — the two files come from one
    generator run, so they are the same spreadsheet by construction — down to
    **formula text**, cell for cell. That is the only check on the ODF
    translation that is not its own author's opinion, and the sweep is run over
-   both, asserting the same refusals from each and that the only ODS
-   disagreements are the error cells issue 10 loses.
+   both, asserting the same refusals from each and that ODS error cells remain
+   errors rather than disappearing as empty strings.
 
 6. **Whether the answers are any good** (`cargo test -p eg-retrieve --test
    answers`, and `eg-retrieve --example answers` against a real corpus) —

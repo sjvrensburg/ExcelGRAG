@@ -54,7 +54,7 @@ impl ReferenceSpan {
 
 /// Whether `b` can appear inside an identifier or a defined name.
 fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'.'
+    !b.is_ascii() || b.is_ascii_alphanumeric() || b == b'_' || b == b'.'
 }
 
 /// Find every cell reference in a formula, in order of appearance.
@@ -96,6 +96,28 @@ pub fn scan_references_into(formula: &str, out: &mut Vec<ReferenceSpan>) {
                         });
                     }
                     None => i = after_name,
+                }
+            }
+            c if !c.is_ascii() => {
+                let start = i;
+                let end = scan_ident(b, i);
+                if end < b.len() && b[end] == b'!' {
+                    match reference_after_qualifier(formula, b, end, start) {
+                        Some((span, local, parsed)) => {
+                            i = span.end;
+                            out.push(ReferenceSpan {
+                                span,
+                                local,
+                                parsed,
+                                qualified: true,
+                            });
+                        }
+                        None => i = end + 1,
+                    }
+                } else {
+                    // A Unicode name is one token. In particular, do not
+                    // rescan an ASCII A1-shaped suffix as a cell reference.
+                    i = end;
                 }
             }
             c if c.is_ascii_alphabetic() || c == b'$' || c == b'_' => {
@@ -334,6 +356,36 @@ pub fn scan_names_into(formula: &str, out: &mut Vec<NameSpan>) {
                     Some(p) => i + p + 1,
                     None => i + 1,
                 };
+            }
+            c if !c.is_ascii() => {
+                let start = i;
+                let end = scan_ident(b, i);
+                if end < b.len() && b[end] == b'!' {
+                    let sheet = formula[start..end].to_string();
+                    i = match reference_after_qualifier(formula, b, end, start) {
+                        Some((span, _, _)) => span.end,
+                        None => match qualified_name(formula, b, end) {
+                            Some(span) => {
+                                let e = span.end;
+                                out.push(NameSpan {
+                                    span,
+                                    sheet_name: Some(sheet),
+                                });
+                                e
+                            }
+                            None => end + 1,
+                        },
+                    };
+                } else {
+                    let is_call = end < b.len() && b[end] == b'(';
+                    if !is_call {
+                        out.push(NameSpan {
+                            span: start..end,
+                            sheet_name: None,
+                        });
+                    }
+                    i = end;
+                }
             }
             c if c.is_ascii_alphabetic() || c == b'_' || c == b'\\' => {
                 let start = i;
@@ -879,6 +931,26 @@ mod tests {
         assert_eq!(texts("Data2023+A1"), ["A1"]);
         assert_eq!(texts("_tax*B2"), ["B2"]);
         assert_eq!(texts("my.name1"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn unicode_defined_names_are_one_name_and_not_a_reference_suffix() {
+        let formula = "éA1+税率A1";
+        assert!(scan_references(formula).is_empty());
+        let names: Vec<&str> = scan_names(formula)
+            .iter()
+            .map(|n| &formula[n.span.clone()])
+            .collect();
+        assert_eq!(names, ["éA1", "税率A1"]);
+    }
+
+    #[test]
+    fn unicode_sheet_qualifiers_are_scanned_as_a_whole() {
+        let formula = "État!A1+État!Taxe";
+        assert_eq!(texts(formula), ["État!A1"]);
+        let names = scan_names(formula);
+        assert_eq!(&formula[names[0].span.clone()], "Taxe");
+        assert_eq!(names[0].sheet_name.as_deref(), Some("État"));
     }
 
     #[test]

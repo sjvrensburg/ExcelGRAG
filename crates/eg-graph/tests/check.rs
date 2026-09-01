@@ -5,6 +5,7 @@
 
 use eg_graph::{build, check, Edge, EdgeKind};
 use eg_model::{Cell, CellValue, Sheet, SheetId, Workbook, WorkbookFormat};
+use petgraph::graph::NodeIndex;
 
 fn grid(id: u16, name: &str, rows: &[&str]) -> Sheet {
     let mut sheet = Sheet::new(SheetId(id), name);
@@ -51,6 +52,19 @@ fn a_correctly_built_graph_has_nothing_to_report() {
     let wb = two_sheets();
     let built = build(&wb);
     assert_eq!(check(&built), vec![]);
+}
+
+#[test]
+fn an_invalid_root_is_reported_instead_of_panicking() {
+    let mut built = build(&two_sheets());
+    built.root = NodeIndex::new(built.graph.node_count() + 100);
+    let violations = check(&built);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.invariant == "root belongs to the graph"),
+        "{violations:?}"
+    );
 }
 
 #[test]

@@ -246,6 +246,98 @@ fn counting_values_and_counting_rows_are_different_questions() {
 }
 
 #[test]
+fn grouping_and_distinct_counts_keep_cell_types_separate() {
+    let mut sheet = Sheet::new(SheetId(0), "Typed");
+    sheet.set(0, 0, Cell::literal(CellValue::Text("Key".into())));
+    sheet.set(0, 1, Cell::literal(CellValue::Text("Value".into())));
+    sheet.set(1, 0, Cell::literal(CellValue::Text("one".into())));
+    sheet.set(1, 1, Cell::literal(CellValue::Number(1.0)));
+    sheet.set(2, 0, Cell::literal(CellValue::Text("two".into())));
+    sheet.set(2, 1, Cell::literal(CellValue::Text("1".into())));
+    let table = read_table(&sheet, &region(2, 1, &["Value"])).unwrap();
+    let workbook = Workbook {
+        path: "typed.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "typed".into(),
+        sheets: vec![sheet],
+        defined_names: Vec::new(),
+        external_links: Vec::new(),
+    };
+    let answer = query(
+        &workbook,
+        &table,
+        &Query {
+            group_by: vec!["Value".into()],
+            aggregates: vec![Aggregate::Count, Aggregate::CountDistinct("Value".into())],
+            limit: 10,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(answer.groups.len(), 2, "numeric 1 is not text 1");
+    assert!(answer.groups.iter().all(|group| group.rows == 1));
+    assert!(answer.groups.iter().all(|group| group.counts[1] == Some(1)));
+
+    let distinct = query(
+        &workbook,
+        &table,
+        &Query {
+            aggregates: vec![Aggregate::CountDistinct("Value".into())],
+            limit: 10,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(distinct.one().unwrap().counts[0], Some(2));
+}
+
+#[test]
+fn grouping_tuples_cannot_collide_through_cell_text() {
+    let separator = '\u{1f}';
+    let mut sheet = Sheet::new(SheetId(0), "Tuples");
+    for (col, value) in ["Row", "Left", "Right"].into_iter().enumerate() {
+        sheet.set(0, col as u16, Cell::literal(CellValue::Text(value.into())));
+    }
+    for (row, values) in [
+        ["a", &format!("x{separator}y"), "z"],
+        ["b", "x", &format!("y{separator}z")],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (col, value) in values.into_iter().enumerate() {
+            sheet.set(
+                row as u32 + 1,
+                col as u16,
+                Cell::literal(CellValue::Text(value.into())),
+            );
+        }
+    }
+    let table = read_table(&sheet, &region(2, 2, &["Left", "Right"])).unwrap();
+    let workbook = Workbook {
+        path: "tuple.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "tuple".into(),
+        sheets: vec![sheet],
+        defined_names: Vec::new(),
+        external_links: Vec::new(),
+    };
+    let answer = query(
+        &workbook,
+        &table,
+        &Query {
+            group_by: vec!["Left".into(), "Right".into()],
+            aggregates: vec![Aggregate::Count],
+            limit: 10,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(answer.groups.len(), 2);
+}
+
+#[test]
 fn a_query_asking_for_nothing_is_refused() {
     let err = ask(Query::default()).unwrap_err();
     assert!(matches!(err, QueryError::NothingAsked), "{err}");

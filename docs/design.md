@@ -29,7 +29,7 @@ the invariants and working rules that fall out of everything below.
 
 ## Contents
 
-- [The calamine fork](#the-calamine-fork)
+- [The vendored calamine reader](#the-vendored-calamine-reader)
 - [Formula grouping](#formula-grouping)
 - [Region detection](#region-detection)
 - [The graph](#the-graph)
@@ -48,15 +48,13 @@ the invariants and working rules that fall out of everything below.
 - [How this is tested](#how-this-is-tested)
 
 
-## The calamine fork
+## The vendored calamine reader
 
-`eg-ingest` depends on a [forked calamine](https://github.com/sjvrensburg/calamine/tree/xlsb-shared-formulas),
-wired in via `[patch.crates-io]` and pinned by `Cargo.lock`. Nothing extra to
-clone — `cargo build` fetches it. Each fix is submitted upstream on its own
-branch; the workspace points at an `excelgrag` branch carrying all of them,
-because `[patch.crates-io]` takes a single source.
+`eg-ingest` depends on the calamine source committed under `vendor/calamine`,
+wired in via `[patch.crates-io]` and pinned by `Cargo.lock`. Nothing extra is
+fetched. The relevant fixes have also been submitted upstream independently.
 
-The fork fixes two silent bugs in both binary formats: dropped shared and array
+The vendored reader fixes two silent bugs in both binary formats: dropped shared and array
 formulas, and transposed `>=` / `>`. Without them most of the formulas in a real
 XLSB workbook go missing, and every comparison is inverted.
 
@@ -68,7 +66,8 @@ others, because a discarded prefix like `TR450` is itself a valid cell
 reference.
 
 Submitted upstream as [tafia/calamine#712](https://github.com/tafia/calamine/pull/712).
-Once it lands in a published release, delete the `[patch.crates-io]` section.
+Once all required fixes land in a published release, delete the vendored source
+and the `[patch.crates-io]` section.
 See `docs/upstream-issues.md`, which also records what a pre-PR review caught.
 
 
@@ -85,7 +84,7 @@ finds the cells that break a pattern — the classic hand-edited row in an
 otherwise uniform column.
 
 That ratio used to be two orders of magnitude worse. The difference is not this
-code: before the calamine fork's fixes, relative references in XLSB were decoded
+code: before the vendored reader fixes, relative references in XLSB were decoded
 wrongly, so every row of a filled-down column normalised to a *different* shape
 and almost nothing grouped. Grouping was reporting a reader defect as a property
 of the workbook.
@@ -771,8 +770,8 @@ cell, and a dependency the graph recorded and nobody could have questioned. A
 handful of formulas gave the wrong number and a couple gave the right one by
 coincidence, the local cell happening to hold what the foreign cell held.
 
-`docs/upstream-issues.md` has all seven, and the four found this way are in the
-calamine fork.
+`docs/upstream-issues.md` records the reader defects and their regression tests;
+the required fixes are present in the vendored reader.
 
 
 ## What if this number were different

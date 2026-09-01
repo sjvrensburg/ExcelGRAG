@@ -243,7 +243,6 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 [[package]]
 name = "calamine"
 version = "0.36.1"
-source = "git+https://github.com/sjvrensburg/calamine.git?branch=excelgrag#fb0466b67ed585da95e9c82b80bed11e0f5f9d2f"
 dependencies = [
  "atoi_simd",
  "byteorder",
@@ -711,7 +710,7 @@ checksum = "117240f60069e65410b3ae1bb213295bd828f707b5bec6596a1afc8793ce0cbc"
 
 [[package]]
 name = "eg-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "eg-eval",
@@ -727,7 +726,7 @@ dependencies = [
 
 [[package]]
 name = "eg-eval"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "eg-ingest",
  "eg-model",
@@ -739,18 +738,19 @@ dependencies = [
 
 [[package]]
 name = "eg-fixtures"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
 ]
 
 [[package]]
 name = "eg-graph"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "eg-ingest",
  "eg-model",
  "eg-structure",
+ "fs4",
  "petgraph",
  "rustc-hash",
  "serde",
@@ -760,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "eg-index"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "eg-graph",
  "eg-ingest",
@@ -777,7 +777,7 @@ dependencies = [
 
 [[package]]
 name = "eg-ingest"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "calamine",
@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "eg-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "eg-eval",
  "eg-graph",
@@ -809,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "eg-model"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rustc-hash",
  "serde",
@@ -819,7 +819,7 @@ dependencies = [
 
 [[package]]
 name = "eg-retrieve"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "eg-graph",
  "eg-index",
@@ -835,7 +835,7 @@ dependencies = [
 
 [[package]]
 name = "eg-structure"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "eg-ingest",
  "eg-model",
