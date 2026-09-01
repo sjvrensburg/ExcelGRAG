@@ -25,6 +25,7 @@
 //! the reason the project exists — a first-class input rather than a degraded one.
 
 mod convert;
+mod odf;
 
 use std::path::{Path, PathBuf};
 
@@ -184,7 +185,14 @@ pub fn load_with(path: impl AsRef<Path>, opts: &LoadOptions) -> Result<Loaded, I
         .iter()
         .map(|(name, refers_to)| DefinedName {
             name: name.clone(),
-            refers_to: refers_to.clone(),
+            // ODF writes the target in its own address syntax (`$Rates.$B$11`),
+            // and every resolver downstream reads A1. Untranslatable targets
+            // keep what the file said, so the name still exists and simply
+            // fails to resolve, rather than resolving somewhere else.
+            refers_to: match matches!(format, WorkbookFormat::Ods) {
+                true => odf::address_to_a1(refers_to).unwrap_or_else(|| refers_to.clone()),
+                false => refers_to.clone(),
+            },
             // calamine flattens scope away; names are treated as workbook-scoped
             // and the sheet qualifier inside `refers_to` carries the location.
             scope: None,
@@ -260,9 +268,23 @@ pub fn load_with(path: impl AsRef<Path>, opts: &LoadOptions) -> Result<Loaded, I
         }
 
         if opts.read_formulas {
+            let mut untranslated = 0u32;
             match sheets.worksheet_formula(name) {
-                Ok(formulas) => corrupt_coords += attach_formulas(&mut sheet, &formulas),
+                Ok(formulas) => {
+                    corrupt_coords +=
+                        attach_formulas(&mut sheet, &formulas, format, &mut untranslated)
+                }
                 Err(e) => warnings.push(format!("no formulas for sheet {name:?}: {e}")),
+            }
+            // Said out loud for the same reason a corrupt coordinate is: a
+            // reference left in OpenDocument syntax is one the graph will not
+            // have an edge for, and a caller must not have to infer that from
+            // an edge count.
+            if untranslated > 0 {
+                warnings.push(format!(
+                    "sheet {name:?}: {untranslated} reference(s) could not be translated from \
+                     OpenDocument formula syntax and were left as written"
+                ));
             }
             // `attach_formulas` can add cells the value loop above never saw
             // — a formula whose cached value is blank creates a fresh entry
@@ -318,12 +340,23 @@ pub fn load_with(path: impl AsRef<Path>, opts: &LoadOptions) -> Result<Loaded, I
 /// are created here rather than dropped, because a blank-valued formula is still
 /// a node in the dependency graph.
 ///
+/// ODS formula text arrives in OpenDocument syntax and is translated to A1 here
+/// (see [`odf`]), so that no other crate ever sees a second formula dialect;
+/// `untranslated` accumulates the references that translation had to leave as
+/// written.
+///
 /// Returns how many formula cells had to be dropped for a corrupt coordinate.
-fn attach_formulas(sheet: &mut Sheet, formulas: &calamine::Range<String>) -> u32 {
+fn attach_formulas(
+    sheet: &mut Sheet,
+    formulas: &calamine::Range<String>,
+    format: WorkbookFormat,
+    untranslated: &mut u32,
+) -> u32 {
     // As with values, these coordinates are relative to the formula range's own
     // origin, which is generally *not* the same as the value range's origin.
     let (row0, col0) = formulas.start().unwrap_or((0, 0));
     let mut corrupt_coords = 0u32;
+    let own_sheet = sheet.name.clone();
     for (row, col, text) in formulas.used_cells() {
         if text.is_empty() {
             continue;
@@ -334,7 +367,14 @@ fn attach_formulas(sheet: &mut Sheet, formulas: &calamine::Range<String>) -> u32
             continue;
         };
         // calamine strips the leading '='; normalise in case a backend keeps it.
-        let formula = text.strip_prefix('=').unwrap_or(text).to_string();
+        let text = text.strip_prefix('=').unwrap_or(text);
+        let formula = if matches!(format, WorkbookFormat::Ods) {
+            let (a1, left) = odf::to_a1(text, &own_sheet);
+            *untranslated += left;
+            a1
+        } else {
+            text.to_string()
+        };
         match sheet.get(row, col) {
             Some(existing) => {
                 let mut cell = existing.clone();
@@ -576,7 +616,13 @@ mod tests {
         ];
         let formulas = calamine::Range::from_sparse(cells);
         let mut sheet = Sheet::new(SheetId(0), "Sheet1");
-        let dropped = attach_formulas(&mut sheet, &formulas);
+        let mut untranslated = 0;
+        let dropped = attach_formulas(
+            &mut sheet,
+            &formulas,
+            WorkbookFormat::Xlsx,
+            &mut untranslated,
+        );
         assert_eq!(dropped, 1, "the out-of-range formula cell is counted");
         assert_eq!(
             sheet.get(0, 0).and_then(|c| c.formula.as_deref()),

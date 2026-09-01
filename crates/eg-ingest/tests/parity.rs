@@ -213,12 +213,13 @@ fn the_demo_workbook_reads_the_same_as_xlsx_and_as_ods() {
     //
     //   cargo run --release -p eg-fixtures -- --rows 2000 --out tests/fixtures/demo
     //
-    // Formula *text* is not compared. ODS is the one format where it cannot
-    // be: calamine hands back the ODF source verbatim — `of:=VLOOKUP([.D2];…)`,
-    // its own reference syntax and its own argument separator — rather than the
-    // A1 text every other format yields. Whether a cell has a formula at all is
-    // still compared, because a format silently dropping one is the failure
-    // this file exists for.
+    // Formula text is compared, and this is the only test that can check the
+    // ODF translation against something other than its own author's opinion.
+    // calamine hands back the ODF source verbatim for ODS — `of:=VLOOKUP(
+    // [.D2];[Rates.$A$4:.$B$7];2;FALSE())` — and `eg_ingest::odf` turns it into
+    // the A1 the rest of the workspace speaks. What it should turn it into is
+    // exactly what LibreOffice wrote into the xlsx from the same source, cell
+    // for cell, which is what this compares.
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/demo");
     let xlsx = load(dir.join("impairment.xlsx")).expect("load demo xlsx");
     let ods = load(dir.join("impairment.ods")).expect("load demo ods");
@@ -265,13 +266,8 @@ fn the_demo_workbook_reads_the_same_as_xlsx_and_as_ods() {
 
             let fa = sheet_a.get(row, col).and_then(|c| c.formula.as_deref());
             let fb = sheet_b.get(row, col).and_then(|c| c.formula.as_deref());
-            if fa.is_some() != fb.is_some() {
-                mismatches.push(format!(
-                    "{}!{a1} formula present: {} vs {}",
-                    sheet_a.name,
-                    fa.is_some(),
-                    fb.is_some()
-                ));
+            if fa != fb {
+                mismatches.push(format!("{}!{a1} formula: {fa:?} vs {fb:?}", sheet_a.name));
             }
         }
     }
@@ -291,4 +287,18 @@ fn the_demo_workbook_reads_the_same_as_xlsx_and_as_ods() {
         "the ODS error-cell gap has closed — delete this allowance and the \
          upstream note with it"
     );
+
+    // A defined name's target is an address, not formula text, and arrives in
+    // ODF syntax too — a gap that hides rather than fails, because a name that
+    // resolves to nothing looks like a workbook without one.
+    let names = |w: &eg_model::Workbook| {
+        let mut v: Vec<(String, String)> = w
+            .defined_names
+            .iter()
+            .map(|n| (n.name.clone(), n.refers_to.clone()))
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(names(&xlsx.workbook), names(&ods.workbook));
 }

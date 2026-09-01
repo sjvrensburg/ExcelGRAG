@@ -78,6 +78,15 @@ above it.
   `Capabilities` saying what a format could not provide. calamine exposes **no
   cell styling for any format**, so structural analysis may never depend on
   presentation — only value kinds, blank runs, and formula-shape homogeneity.
+  It is also where a format's formula dialect stops: ODS arrives as
+  OpenFormula (`of:=VLOOKUP([.D2];[Rates.$A$4:.$B$7];2;FALSE())`, and
+  `$Rates.$B$11` for a defined name's target), and `odf::to_a1` translates it,
+  so **one formula syntax exists downstream and it is A1**. Left untranslated
+  it did not fail loudly — `scan_references` found nothing, so the graph had no
+  dependency edges; `to_r1c1_shape` normalised nothing, so every formula was
+  its own group; and every cell was refused. What the translation cannot do it
+  leaves bracketed and counts into a warning, because a wrong edge is worse
+  than a missing formula.
 - `eg-structure` — regions (tables/blocks recovered from blank runs and value-kind
   contrast; a region's leading **row-label columns are named** by
   `label_headers` and kept out of `headers`, so the column a table is keyed by
@@ -226,7 +235,13 @@ Four independent checks, because they fail differently:
    formulas whose values LibreOffice computed, asserting no disagreements and
    that the only refusals are the two the fixture plants. It caught three
    reader/schema defects in its first hour; two are calamine's and are recorded
-   in `docs/upstream-issues.md` as issues 9 and 10.
+   in `docs/upstream-issues.md` as issues 9 and 10. The parity half compares
+   the same workbook as `.xlsx` and as `.ods` — the two files come from one
+   generator run, so they are the same spreadsheet by construction — down to
+   **formula text**, cell for cell. That is the only check on the ODF
+   translation that is not its own author's opinion, and the sweep is run over
+   both, asserting the same refusals from each and that the only ODS
+   disagreements are the error cells issue 10 loses.
 
 6. **Whether the answers are any good** (`cargo test -p eg-retrieve --test
    answers`, and `eg-retrieve --example answers` against a real corpus) —
