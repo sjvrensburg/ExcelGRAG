@@ -147,6 +147,46 @@ fn forgetting_a_workbook_removes_its_file() {
 }
 
 #[test]
+fn a_failed_put_leaves_the_handle_agreeing_with_the_manifest() {
+    // The same property `a_failed_forget_restores_the_in_memory_manifest`
+    // asserts, in the other direction: an entry kept in memory that no
+    // manifest on disk lists lets a later `put_profiles` pass its
+    // "already in the corpus" check against nothing.
+    let root = dir();
+    let wb = workbook("hash-put-failure");
+    let built = build(&wb);
+    let mut corpus = Corpus::open(&root).unwrap();
+
+    let manifest = root.join("manifest.json");
+    std::fs::remove_file(&manifest).ok();
+    std::fs::create_dir(&manifest).unwrap();
+    assert!(corpus
+        .put(&wb.content_hash, &wb.path, 2, 12, false, &built)
+        .is_err());
+    assert!(
+        !corpus.entries().any(|(hash, _)| hash == wb.content_hash),
+        "a workbook the manifest never listed must not linger in the handle"
+    );
+    // Nothing can be hung off an entry the manifest does not carry, whether
+    // that is refused for the manifest's sake or for the broken file's.
+    assert!(corpus
+        .put_profiles(
+            &wb.content_hash,
+            &wb.path,
+            &eg_structure::Profiles::default()
+        )
+        .is_err());
+
+    std::fs::remove_dir(&manifest).unwrap();
+    corpus
+        .put(&wb.content_hash, &wb.path, 2, 12, false, &built)
+        .unwrap();
+    assert!(corpus.entries().any(|(hash, _)| hash == wb.content_hash));
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn a_failed_forget_restores_the_in_memory_manifest() {
     let root = dir();
     let wb = workbook("hash-forget-failure");
@@ -419,7 +459,7 @@ fn two_open_corpus_handles_merge_manifest_updates() {
 
 #[cfg(unix)]
 #[test]
-fn failed_profile_manifest_writes_roll_back_files_and_handle_state() {
+fn a_failed_profile_write_never_puts_cell_values_back() {
     use std::os::unix::fs::PermissionsExt;
 
     let root = dir();
@@ -448,15 +488,35 @@ fn failed_profile_manifest_writes_roll_back_files_and_handle_state() {
         .put_profiles(&wb.content_hash, &wb.path, &replacement)
         .is_err());
     std::fs::set_permissions(&root, writable.clone()).unwrap();
+    // The corpus holds no profiles for the workbook rather than the ones it
+    // held before. Reverting the file is the disclosure this guards against:
+    // when the write that failed was a `--redact-values` re-index, putting
+    // the predecessor back restores exactly the values it existed to remove.
+    assert_eq!(corpus.profiles(&wb.content_hash).unwrap(), None);
+    assert!(
+        !corpus.profiles_path(&wb.content_hash).exists(),
+        "the profiles file must not survive a failed write"
+    );
+    // And the handle still agrees with the manifest on disk, so a retry works.
+    corpus
+        .put_profiles(&wb.content_hash, &wb.path, &original)
+        .unwrap();
     assert_eq!(
         corpus.profiles(&wb.content_hash).unwrap(),
         Some(original.clone())
     );
 
+    // A failed scrub leaves the state the call started in — it must never
+    // write the deleted file back, which is how a reported failure ended up
+    // serving the values anyway.
     std::fs::set_permissions(&root, readonly).unwrap();
     assert!(corpus.forget_profiles(&wb.content_hash).is_err());
     std::fs::set_permissions(&root, writable).unwrap();
     assert_eq!(corpus.profiles(&wb.content_hash).unwrap(), Some(original));
+    // Retryable, and this time it takes.
+    corpus.forget_profiles(&wb.content_hash).unwrap();
+    assert_eq!(corpus.profiles(&wb.content_hash).unwrap(), None);
+    assert!(!corpus.profiles_path(&wb.content_hash).exists());
 
     let _ = std::fs::remove_dir_all(&root);
 }

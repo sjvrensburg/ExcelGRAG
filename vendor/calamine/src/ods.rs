@@ -84,6 +84,9 @@ pub enum OdsError {
     AttrError(quick_xml::events::attributes::AttrError),
     /// XML encoding error
     EncodingError(quick_xml::encoding::EncodingError),
+    /// A cell marked as an error whose body is not one of the error values
+    /// this reader knows, and so cannot be named.
+    CellError(String),
     /// File exceeds maximum cell count
     CellLimitExceeded {
         /// Number of cells requested
@@ -130,6 +133,9 @@ impl std::fmt::Display for OdsError {
             OdsError::WorksheetNotFound(name) => write!(f, "Worksheet '{name}' not found"),
             OdsError::AttrError(e) => write!(f, "XML attribute Error: {e}"),
             OdsError::EncodingError(e) => write!(f, "XML encoding Error: {e}"),
+            OdsError::CellError(value) => {
+                write!(f, "Unrecognised cell error value: '{value}'")
+            }
             OdsError::CellLimitExceeded { requested, max } => {
                 write!(
                     f,
@@ -730,6 +736,13 @@ where
                         || e.name() == QName(b"table:covered-table-cell") =>
                 {
                     let value = if is_error {
+                        // Named, not guessed — the same rule `Xlsx`'s
+                        // `FromStr for CellErrorType` follows, and `Xls`'s
+                        // `parse_err`. Falling through to `#VALUE!` made a
+                        // cell this reader could not name read as a specific
+                        // error it is not: a localized error string, or an
+                        // empty body, came back as `#VALUE!` and a recompute
+                        // then agreed or differed for the wrong reason.
                         Data::Error(match s.trim() {
                             "#DIV/0!" => CellErrorType::Div0,
                             "#N/A" => CellErrorType::NA,
@@ -737,8 +750,9 @@ where
                             "#NULL!" => CellErrorType::Null,
                             "#NUM!" => CellErrorType::Num,
                             "#REF!" => CellErrorType::Ref,
-                            "#DATA!" => CellErrorType::GettingData,
-                            _ => CellErrorType::Value,
+                            "#VALUE!" => CellErrorType::Value,
+                            "#DATA!" | "#GETTING_DATA" => CellErrorType::GettingData,
+                            other => return Err(OdsError::CellError(other.to_string())),
                         })
                     } else {
                         Data::String(s)
