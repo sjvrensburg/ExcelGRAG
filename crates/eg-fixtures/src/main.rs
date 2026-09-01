@@ -34,6 +34,15 @@
 //! fixtures under `tests/fixtures/vendor`, which real Excel wrote. Anyone with
 //! Excel can open the generated `.xlsx` and save it as `.xlsb` beside it, and
 //! the parity test will pick it up.
+//!
+//! # Why all three outputs are committed
+//!
+//! `.xlsx`, `.ods` and `.xls` from one run are the same spreadsheet by
+//! construction rather than by someone remembering to save it three times,
+//! which is what makes them worth comparing to each other. The `.xls` is
+//! committed *because* calamine reads it wrongly — see issue 9 in
+//! `docs/upstream-issues.md` — since a defect a bug report only describes is
+//! one nobody else can confirm.
 
 mod book;
 mod fods;

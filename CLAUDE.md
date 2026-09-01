@@ -55,6 +55,13 @@ with one that shares no code. Never fill those values in from `eg-eval` — the
 fixture would then agree with us by construction and test nothing. LibreOffice
 cannot write XLSB, so that format still rests on the vendor fixtures.
 
+All three formats it can write are committed under `tests/fixtures/demo`, from
+one generator run, so they are the same spreadsheet by construction. The `.xls`
+is committed even though calamine reads it *wrongly* (issue 9): a defect a
+bug report only describes is one nobody else can confirm, and this one is
+invisible to every other check — the values are right and the formulas parse,
+they just name the wrong sheet.
+
 Each crate also has `examples/` that exercise its layer directly and print
 measurements; those are the development surface (`cargo run --release -p
 eg-graph --example graph -- private/book.xlsb`). The CLI deliberately wraps

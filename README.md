@@ -1088,10 +1088,13 @@ measured against it, which is the argument for having it:
   thousand formula groups instead of one, and the evaluator refused all
   fourteen thousand cells with a parse error. Fixed here, by translating at
   the reader, so that past `eg-ingest` one formula syntax exists and it is A1.
-- Read as `.xls`, every cross-sheet reference names the *wrong* sheet — on one
-  sheet, two of them come back swapped — and a 3-D reference decodes to a
-  column past Excel's last. SheetJS reads the same bytes correctly, so the file
-  is not at fault.
+- Read as `.xls`, every cross-sheet reference names the *wrong* sheet — the two
+  the workbook uses come back swapped — and a 3-D reference decodes to a column
+  past Excel's last. SheetJS reads the same bytes correctly, so the file is not
+  at fault. 28.6% of the workbook's formulas disagree with their own cached
+  values as a result, while the values themselves are perfectly correct: the
+  file is right, and the reader mis-reads it in a way that leaves everything
+  looking well-formed.
 - Read as `.ods`, an error cell reads as an empty one, because ODF marks errors
   with an extension attribute and leaves the string value blank.
 
@@ -1110,12 +1113,23 @@ The most important test is format parity: the same logical workbook read as
 already caught three real bugs — see `docs/upstream-issues.md`.
 
 Fixtures live in `tests/fixtures/vendor` and were authored by real Excel, because
-no open-source tool can write XLSB. The demo workbook adds a pair the project
-owns: `.xlsx` and `.ods` from a single generator run, so they are the same
-spreadsheet by construction rather than by someone remembering to save it
-twice. That pair is what holds the ODF translation honest — the A1 it must
-produce is exactly the A1 LibreOffice wrote into the other file, compared cell
-for cell across every formula.
+no open-source tool can write XLSB. The demo workbook adds three the project
+owns — `.xlsx`, `.ods` and `.xls` from a single generator run, so they are the
+same spreadsheet by construction rather than by someone remembering to save it
+three times. That is what holds the ODF translation honest: the A1 it must
+produce is exactly the A1 LibreOffice wrote into the `.xlsx`, compared cell for
+cell across every formula.
+
+The `.xls` is committed even though calamine reads it wrongly, which is the
+point of it. A defect a bug report only describes is one nobody else can
+confirm, and this one hides well — the values are right, the formulas parse,
+and each names a real range on a real sheet, just not the one that was written.
+The test pins its exact shape: values agree everywhere, every differing formula
+differs *only* in which sheet a reference is attributed to, and the
+substitutions are exactly `Debtors`→`Rates` and `Rates`→`Debtors`. A swap in
+both directions is what points at an index into the wrong table rather than an
+off-by-one. It also asserts that formulas still differ, so it fails when
+calamine fixes this instead of quietly outliving the defect.
 
 Two further checks stand behind the layers above the reader: the graph's lifted
 edges are re-derived from the cells and compared, in [Checking the lifted edges

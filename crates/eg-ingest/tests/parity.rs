@@ -8,10 +8,11 @@
 //! The `.xlsb`/`.xlsx` pairs under `tests/fixtures/vendor` were authored by real
 //! Excel, because nothing open-source can write XLSB.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use eg_ingest::{load, Capabilities};
-use eg_model::{CellValue, WorkbookFormat};
+use eg_model::{scan_references, CellValue, WorkbookFormat};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -301,4 +302,132 @@ fn the_demo_workbook_reads_the_same_as_xlsx_and_as_ods() {
         v
     };
     assert_eq!(names(&xlsx.workbook), names(&ods.workbook));
+}
+
+/// The same demo workbook as `.xls`, where the reader is known to be wrong.
+///
+/// This is here to make an upstream bug report reproducible by someone who does
+/// not have the workbook it was found on. calamine reads a BIFF cross-sheet
+/// reference through the wrong table — the `EXTERNSHEET`/`XTI` index used as if
+/// it were a tab index — and the qualifiers come back *swapped*: what is on
+/// `Rates` is attributed to `Debtors` and the other way round. It is recorded
+/// as issue 9 in `docs/upstream-issues.md`, and reproduced against stock
+/// calamine 0.36.1, so it is not the fork's doing.
+///
+/// The defect is invisible to every other check in this file. The values are
+/// right, the formula count is right, the formulas *parse*, and each one names
+/// a real range on a real sheet — just not the one that was written. Only
+/// having the same spreadsheet in a second format shows it.
+#[test]
+fn the_demo_workbook_as_xls_names_the_wrong_sheets_and_nothing_else() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/demo");
+    let xlsx = load(dir.join("impairment.xlsx")).expect("load demo xlsx");
+    let xls = load(dir.join("impairment.xls")).expect("load demo xls");
+
+    // Which sheet a reference was attributed to, counted over every formula
+    // whose text differs: `("Rates", "Debtors")` means the xlsx said `Rates`
+    // where the xls said `Debtors`.
+    let mut substitutions: BTreeMap<(String, String), usize> = BTreeMap::new();
+    let mut unexplained: Vec<String> = Vec::new();
+    let mut values = Vec::new();
+    let (mut agreeing, mut differing) = (0usize, 0usize);
+
+    for sheet_a in &xlsx.workbook.sheets {
+        let sheet_b = xls
+            .workbook
+            .sheet_by_name(&sheet_a.name)
+            .expect("the same workbook, so the same sheets");
+
+        let mut coords: Vec<(u32, u16)> = sheet_a
+            .iter()
+            .chain(sheet_b.iter())
+            .map(|(r, _)| (r.row, r.col))
+            .collect();
+        coords.sort_unstable();
+        coords.dedup();
+
+        for (row, col) in coords {
+            let a1 = eg_model::CellRef::new(sheet_a.id, row, col).to_a1();
+            let (va, vb) = (sheet_a.value(row, col), sheet_b.value(row, col));
+            if !values_agree(&va, &vb) {
+                values.push(format!("{}!{a1}: {va:?} vs {vb:?}", sheet_a.name));
+            }
+
+            let fa = sheet_a.get(row, col).and_then(|c| c.formula.as_deref());
+            let fb = sheet_b.get(row, col).and_then(|c| c.formula.as_deref());
+            let (Some(fa), Some(fb)) = (fa, fb) else {
+                if fa.is_some() != fb.is_some() {
+                    unexplained.push(format!("{}!{a1}: {fa:?} vs {fb:?}", sheet_a.name));
+                }
+                continue;
+            };
+            if fa == fb {
+                agreeing += 1;
+                continue;
+            }
+            differing += 1;
+
+            // A qualifier defect and only a qualifier defect: the two formulas
+            // must refer to the same things in the same order and at the same
+            // local addresses, differing only in the sheet each is attributed
+            // to. Anything else is a different bug and must not be absorbed
+            // into this one.
+            let (refs_a, refs_b) = (scan_references(fa), scan_references(fb));
+            let mut qualifier_only = refs_a.len() == refs_b.len();
+            for (x, y) in refs_a.iter().zip(refs_b.iter()) {
+                let local_matches = fa[x.local.clone()] == fb[y.local.clone()];
+                match (local_matches, &x.parsed.sheet_name, &y.parsed.sheet_name) {
+                    (true, Some(from), Some(to)) if from != to => {
+                        *substitutions.entry((from.clone(), to.clone())).or_default() += 1;
+                    }
+                    (true, from, to) if from == to => {}
+                    _ => qualifier_only = false,
+                }
+            }
+            if !qualifier_only {
+                unexplained.push(format!("{}!{a1}: {fa:?} vs {fb:?}", sheet_a.name));
+            }
+        }
+    }
+
+    // Values are untouched. The defect is in how a formula's *references* are
+    // decoded, not in what the file cached, which is exactly why a sweep like
+    // `eg check` cannot see it either.
+    assert!(values.is_empty(), "xls values differ: {values:?}");
+
+    // The one difference that is not a swapped qualifier: a 3-D reference,
+    // whose sheet span decodes to a single sheet and a column past Excel's
+    // last (`XFD`). Recorded here rather than tolerated — a second unexplained
+    // difference, or this one going away, fails the test.
+    assert_eq!(
+        unexplained.len(),
+        1,
+        "xls differs in ways issue 9 does not explain: {unexplained:?}"
+    );
+    assert!(
+        unexplained[0].contains("Jan:Mar!B2") && unexplained[0].contains("BTRN"),
+        "the 3-D reference decodes differently than recorded: {}",
+        unexplained[0]
+    );
+
+    // And the shape of the defect itself: a *swap*, not a shift or a default to
+    // the formula's own sheet. Both directions occurring is what points at an
+    // index into the wrong table rather than an off-by-one.
+    let pairs: Vec<(&str, &str)> = substitutions
+        .keys()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![("Debtors", "Rates"), ("Rates", "Debtors")],
+        "the substitutions are not the recorded swap: {substitutions:?}"
+    );
+
+    // Asserted so the test fails when calamine is fixed, rather than passing
+    // vacuously and outliving the defect it documents.
+    assert!(
+        differing > 0 && agreeing > 0,
+        "{agreeing} formulas agreed and {differing} differed — if none differ, \
+         issue 9 is fixed: delete this test and the upstream note with it"
+    );
 }
