@@ -35,11 +35,76 @@ fn values_agree(a: &CellValue, b: &CellValue) -> bool {
     }
 }
 
-fn formulas_agree(a: Option<&str>, b: Option<&str>) -> bool {
+/// How much a comparison is allowed to forgive in formula text.
+#[derive(Clone, Copy, PartialEq)]
+enum Formulas {
+    /// Byte for byte. What every Excel-authored pair must manage.
+    Identical,
+    /// Byte for byte once a boolean literal is spelled one way.
+    ///
+    /// The demo workbook's `.xls` and `.xlsx` are one LibreOffice conversion
+    /// of one source, and LibreOffice writes the literal differently into
+    /// each: BIFF gets the token (`PtgBool`), which reads back as `FALSE`,
+    /// while the OOXML export writes the nullary function `FALSE()`. Both
+    /// name the same value and both readers are faithful to the bytes they
+    /// were handed — which is what the Excel-authored fixtures above prove,
+    /// since they are compared with [`Formulas::Identical`] and pass.
+    ///
+    /// Kept as its own mode, and used by exactly one comparison, so that this
+    /// stays a known difference between two writers rather than a blanket
+    /// loosening of the assertion that matters most here.
+    ModuloBooleanSpelling,
+}
+
+/// `FALSE()` → `FALSE`, `TRUE()` → `TRUE`, outside string literals.
+///
+/// The literal spelling is a token; the same characters inside `"…"` are a
+/// workbook's data. A plain `str::replace` rewrote both.
+fn normalize_boolean_literals(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'"' {
+            let start = i;
+            i += 1;
+            while i < b.len() {
+                if b[i] == b'"' {
+                    if b.get(i + 1) == Some(&b'"') {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            out.push_str(&text[start..i]);
+            continue;
+        }
+        let rest = &text[i..];
+        match ["FALSE()", "TRUE()"]
+            .into_iter()
+            .find(|literal| rest.starts_with(literal))
+        {
+            Some(literal) => {
+                out.push_str(literal.trim_end_matches("()"));
+                i += literal.len();
+            }
+            None => {
+                let ch = text[i..].chars().next().expect("a char boundary");
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    out
+}
+
+fn formulas_agree(a: Option<&str>, b: Option<&str>, mode: Formulas) -> bool {
     match (a, b) {
-        (Some(a), Some(b)) => {
-            let normalize = |text: &str| text.replace("FALSE()", "FALSE").replace("TRUE()", "TRUE");
-            normalize(a) == normalize(b)
+        (Some(a), Some(b)) if mode == Formulas::ModuloBooleanSpelling => {
+            normalize_boolean_literals(a) == normalize_boolean_literals(b)
         }
         _ => a == b,
     }
@@ -52,8 +117,18 @@ fn formulas_agree(a: Option<&str>, b: Option<&str>) -> bool {
 /// would report spurious mismatches. Only sheets present in both are compared,
 /// because the vendored fixtures do not all carry the same sheet set.
 fn assert_agree(label: &str, a: &eg_ingest::Loaded, b: &eg_ingest::Loaded) {
+    assert_agree_with(label, a, b, Formulas::Identical);
+}
+
+fn assert_agree_with(
+    label: &str,
+    a: &eg_ingest::Loaded,
+    b: &eg_ingest::Loaded,
+    mode: Formulas,
+) -> usize {
     let mut compared = 0usize;
     let mut mismatches = Vec::new();
+    let mut forgiven = 0usize;
 
     for sheet_a in &a.workbook.sheets {
         let Some(sheet_b) = b.workbook.sheet_by_name(&sheet_a.name) else {
@@ -84,8 +159,10 @@ fn assert_agree(label: &str, a: &eg_ingest::Loaded, b: &eg_ingest::Loaded) {
             // cached values looking perfectly correct.
             let fa = sheet_a.get(row, col).and_then(|c| c.formula.as_deref());
             let fb = sheet_b.get(row, col).and_then(|c| c.formula.as_deref());
-            if !formulas_agree(fa, fb) {
+            if !formulas_agree(fa, fb, mode) {
                 mismatches.push(format!("{}!{a1} formula: {fa:?} vs {fb:?}", sheet_a.name));
+            } else if fa != fb {
+                forgiven += 1;
             }
         }
     }
@@ -97,6 +174,7 @@ fn assert_agree(label: &str, a: &eg_ingest::Loaded, b: &eg_ingest::Loaded) {
         mismatches.len(),
         mismatches.join("\n  ")
     );
+    forgiven
 }
 
 fn sheet_names(loaded: &eg_ingest::Loaded) -> BTreeSet<&str> {
@@ -371,5 +449,43 @@ fn the_demo_workbook_reads_the_same_as_xlsx_and_as_xls() {
     let xlsx = load(dir.join("impairment.xlsx")).expect("load demo xlsx");
     let xls = load(dir.join("impairment.xls")).expect("load demo xls");
     assert_eq!(xlsx.workbook.sheets.len(), xls.workbook.sheets.len());
-    assert_agree("demo: xlsx vs xls", &xlsx, &xls);
+    let forgiven = assert_agree_with(
+        "demo: xlsx vs xls",
+        &xlsx,
+        &xls,
+        Formulas::ModuloBooleanSpelling,
+    );
+    // The difference is real and it is exactly one thing: every formula that
+    // differs at all differs only in how LibreOffice spelled the boolean
+    // literal into each file (see `Formulas::ModuloBooleanSpelling`). Asserting
+    // that some were forgiven keeps the mode honest — if LibreOffice ever
+    // writes the two the same way, this comparison goes back to strict rather
+    // than quietly keeping a licence it no longer needs.
+    assert!(
+        forgiven > 0,
+        "no formula needed the boolean-spelling licence; compare strictly instead"
+    );
+    // And every one of them is a `VLOOKUP`'s exact-match argument, not some
+    // other divergence that happens to normalise away.
+    for sheet in &xlsx.workbook.sheets {
+        let Some(other) = xls.workbook.sheet_by_name(&sheet.name) else {
+            continue;
+        };
+        for (at, cell) in sheet.iter() {
+            let (Some(fa), Some(fb)) = (
+                cell.formula.as_deref(),
+                other.get(at.row, at.col).and_then(|c| c.formula.as_deref()),
+            ) else {
+                continue;
+            };
+            if fa != fb {
+                assert!(
+                    fa.contains("FALSE()") && fb.contains("FALSE"),
+                    "{}!{}: unexpected difference {fa:?} vs {fb:?}",
+                    sheet.name,
+                    at.to_a1()
+                );
+            }
+        }
+    }
 }

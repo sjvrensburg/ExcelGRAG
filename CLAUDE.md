@@ -248,10 +248,11 @@ move.
 
 `[patch.crates-io]` in the workspace `Cargo.toml` points calamine at
 `vendor/calamine`. The source is committed so every reader fix is reproducible
-without an unpublished remote branch. Seven fixes ride on it;
-without them 70% of a real XLSB workbook's formulas are lost and comparisons are
-inverted. `docs/upstream-issues.md` documents the defects. Delete the patch and
-vendored directory once they land in a published release.
+without an unpublished remote branch, and every one of them rides on it: without
+them 70% of a real XLSB workbook's formulas are lost and comparisons are
+inverted.
+`docs/upstream-issues.md` documents the defects, one numbered section each.
+Delete the patch and vendored directory once they land in a published release.
 
 ## Testing the reader
 

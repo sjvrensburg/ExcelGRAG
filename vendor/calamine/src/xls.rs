@@ -923,9 +923,7 @@ fn parse_extern_sheet(r: &Record<'_>, biff: Biff) -> Vec<Xti> {
             // Single record with cXTI count + array of 6-byte XTI structs
             let cxti = read_u16(r.data) as usize;
             r.data[2..]
-                .as_chunks::<6>()
-                .0
-                .iter()
+                .chunks_exact(6)
                 .take(cxti)
                 .map(|xti| Xti {
                     _isup_book: read_u16(&xti[..2]),
@@ -1696,6 +1694,36 @@ fn parse_defined_names(rgce: &[u8], biff: Biff) -> Result<(Option<usize>, String
 /// `N`-class tokens `PtgRefN` and `PtgAreaN`, which shared and array formulas
 /// are built from, store offsets from the evaluating cell rather than absolute
 /// positions, so they cannot be decoded without it.
+/// Write the sheet, or sheet span, that an `ixti` names.
+///
+/// `ixti` indexes the EXTERNSHEET (XTI) table, *not* the sheet tabs. The two
+/// coincide in a workbook whose sheets were never reordered or deleted, which
+/// is what made using it as a tab index read plausibly while naming the wrong
+/// sheet — `docs/upstream-issues.md` issue 9. The `Err3d` tokens kept doing
+/// exactly that after the others were fixed, and nothing tests them, so the
+/// four now share one resolver.
+///
+/// An XTI spanning tabs is a 3-D reference (`Jan:Dec!B2`), and both ends are
+/// written: which sheets a reference names is the whole of what a dependency
+/// edge is lifted onto.
+fn push_xti_sheet(xtis: &[Xti], sheets: &[String], ixti: u16, formula: &mut String) {
+    let span = xtis.get(ixti as usize);
+    match span.and_then(|xti| sheets.get(xti.itab_first as usize)) {
+        Some(first) => {
+            push_sheet_name(first, formula);
+            if let Some(last) = span
+                .filter(|xti| xti.itab_last != xti.itab_first)
+                .and_then(|xti| sheets.get(xti.itab_last as usize))
+            {
+                formula.push(':');
+                push_sheet_name(last, formula);
+            }
+        }
+        // Not a sheet name but an error marker, so it is not quoted.
+        None => formula.push_str("#REF"),
+    }
+}
+
 fn parse_formula(
     mut rgce: &[u8],
     sheets: &[String],
@@ -1719,15 +1747,8 @@ fn parse_formula(
                 let ixti = read_u16(&rgce[0..2]);
                 let rowu = read_u16(&rgce[2..]);
                 let colu = read_u16(&rgce[4..]);
-                let sh = xtis
-                    .get(ixti as usize)
-                    .and_then(|xti| sheets.get(xti.itab_first as usize));
                 stack.push(formula.len());
-                match sh {
-                    Some(sh) => push_sheet_name(sh, &mut formula),
-                    // Not a sheet name but an error marker, so it is not quoted.
-                    None => formula.push_str("#REF"),
-                }
+                push_xti_sheet(xtis, sheets, ixti, &mut formula);
                 formula.push('!');
                 let col = colu & 0x3fff;
                 if colu & 0x4000 == 0 {
@@ -1744,21 +1765,7 @@ fn parse_formula(
                 // PtgArea3d
                 let ixti = read_u16(&rgce[0..2]);
                 stack.push(formula.len());
-                let span = xtis.get(ixti as usize);
-                match span.and_then(|xti| sheets.get(xti.itab_first as usize)) {
-                    Some(sh) => {
-                        push_sheet_name(sh, &mut formula);
-                        if let Some(end) = span
-                            .filter(|xti| xti.itab_last != xti.itab_first)
-                            .and_then(|xti| sheets.get(xti.itab_last as usize))
-                        {
-                            formula.push(':');
-                            push_sheet_name(end, &mut formula);
-                        }
-                    }
-                    // Not a sheet name but an error marker, so it is not quoted.
-                    None => formula.push_str("#REF"),
-                }
+                push_xti_sheet(xtis, sheets, ixti, &mut formula);
                 formula.push('!');
                 let first_row = read_u16(&rgce[2..4]);
                 let last_row = read_u16(&rgce[4..6]);
@@ -1789,11 +1796,7 @@ fn parse_formula(
                 // PtfRefErr3d
                 let ixti = read_u16(&rgce[0..2]);
                 stack.push(formula.len());
-                match sheets.get(ixti as usize) {
-                    Some(sh) => push_sheet_name(sh, &mut formula),
-                    // Not a sheet name but an error marker, so it is not quoted.
-                    None => formula.push_str("#REF"),
-                }
+                push_xti_sheet(xtis, sheets, ixti, &mut formula);
                 formula.push('!');
                 formula.push_str("#REF!");
                 rgce = &rgce[6..];
@@ -1802,11 +1805,7 @@ fn parse_formula(
                 // PtgAreaErr3d
                 let ixti = read_u16(&rgce[0..2]);
                 stack.push(formula.len());
-                match sheets.get(ixti as usize) {
-                    Some(sh) => push_sheet_name(sh, &mut formula),
-                    // Not a sheet name but an error marker, so it is not quoted.
-                    None => formula.push_str("#REF"),
-                }
+                push_xti_sheet(xtis, sheets, ixti, &mut formula);
                 formula.push('!');
                 formula.push_str("#REF!");
                 rgce = &rgce[10..];

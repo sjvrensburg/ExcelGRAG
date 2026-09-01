@@ -449,8 +449,11 @@ fn describe(sheet: &Sheet, range: RangeRef, cell_count: u64, opts: &RegionOption
     // a short list of labels. Past that it reads like real column data (a
     // list of names, a column of dates) that happens not to have a header,
     // not a note; `cols == 1` alone used to call every height of it a note.
-    const NOTE_COLUMN_ROW_CAP: u32 = 3;
-    let kind = if header_rows > 0 && rows > header_rows && rows >= opts.min_table_rows {
+    const NOTE_COLUMN_ROW_CAP: u64 = 3;
+    let kind = if header_rows > 0
+        && rows > u64::from(header_rows)
+        && rows >= u64::from(opts.min_table_rows)
+    {
         RegionKind::Table
     } else if (rows <= 1 || (cols == 1 && rows <= NOTE_COLUMN_ROW_CAP))
         && is_mostly_text(sheet, range)
@@ -536,7 +539,9 @@ fn detect_title(sheet: &Sheet, range: RangeRef) -> Option<String> {
 /// text where the body is not. That contrast is the only signal available
 /// without styling, and it is the one people actually rely on when reading.
 fn count_header_rows(sheet: &Sheet, range: RangeRef, opts: &RegionOptions) -> u32 {
-    let max = opts.max_header_rows.min(range.rows().saturating_sub(1));
+    // `rows()` is a `u64` because a whole-column range is one row taller
+    // than `u32` holds; a header count never is, so the min is taken there.
+    let max = u64::from(opts.max_header_rows).min(range.rows() - 1) as u32;
     let mut header_rows = 0;
 
     while header_rows < max {

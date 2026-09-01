@@ -675,7 +675,7 @@ fn cells(node: &Node) -> u64 {
     match node {
         Node::Sheet(s) => s.cells,
         Node::Region(r) => r.cell_count,
-        Node::Column(c) => u64::from(c.range.rows()),
+        Node::Column(c) => c.range.rows(),
         Node::FormulaGroup(g) => g.cell_count,
         Node::Workbook(_) | Node::DefinedName(_) | Node::ExternalWorkbook(_) => 0,
     }

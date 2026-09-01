@@ -52,9 +52,48 @@ impl ReferenceSpan {
     }
 }
 
-/// Whether `b` can appear inside an identifier or a defined name.
-fn is_ident_byte(b: u8) -> bool {
-    !b.is_ascii() || b.is_ascii_alphanumeric() || b == b'_' || b == b'.'
+/// Whether `c` can appear inside an identifier or a defined name.
+///
+/// Excel's rule for a name is letters, digits, `_` and `.`, and it is not an
+/// ASCII rule: `Taxe_État` and `税率` are names, and a sheet may be called
+/// either. So a non-ASCII *letter or digit* is an identifier character, along
+/// with the combining marks that finish one when the text arrives decomposed.
+///
+/// Everything else non-ASCII is not, which is the half that matters. Counting
+/// every non-ASCII byte as an identifier byte looks like the safe reading and
+/// is the opposite: a formula carrying a Unicode operator or separator
+/// (`−A1`, U+2212) then scans as one long token, so `A1` is not a reference
+/// and the cell's dependency edge is silently missing — and `audit()` agrees,
+/// because it re-derives through this same scanner.
+fn is_ident_char(c: char) -> bool {
+    if c.is_ascii() {
+        c.is_ascii_alphanumeric() || c == '_' || c == '.'
+    } else {
+        c.is_alphanumeric() || is_combining_mark(c)
+    }
+}
+
+/// Whether `c` completes the character before it rather than starting one of
+/// its own. `std` exposes no `is_mark`, and a Unicode table crate would be a
+/// heavy dependency for five ranges that have not moved in decades.
+fn is_combining_mark(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F
+    )
+}
+
+/// Whether the character *before* `i` is one an identifier could continue
+/// from — the check that keeps `E5` in `1E5` from being read as a reference.
+/// `i` must sit on a character boundary, which every token start does.
+fn char_before_is_ident(formula: &str, i: usize) -> bool {
+    formula[..i].chars().next_back().is_some_and(is_ident_char)
+}
+
+/// Whether the character at `i` starts an identifier. False on a continuation
+/// byte, so the byte-at-a-time fallback never tries to slice one.
+fn starts_ident(formula: &str, i: usize) -> bool {
+    formula.is_char_boundary(i) && formula[i..].chars().next().is_some_and(is_ident_char)
 }
 
 /// Find every cell reference in a formula, in order of appearance.
@@ -98,31 +137,20 @@ pub fn scan_references_into(formula: &str, out: &mut Vec<ReferenceSpan>) {
                     None => i = after_name,
                 }
             }
-            c if !c.is_ascii() => {
+            // A name, a sheet qualifier, or a reference — in any script. A
+            // non-ASCII token takes this same arm rather than one of its own,
+            // because everything below it applies to `État!A1` and
+            // `État:Mars!B2` exactly as it does to their ASCII twins. Given
+            // an arm of its own it had only the qualifier branch, so a 3-D
+            // reference whose first sheet was non-ASCII lifted onto the
+            // second sheet alone: a real sheet, and not the one written.
+            c if c.is_ascii_alphabetic()
+                || c == b'$'
+                || c == b'_'
+                || (!c.is_ascii() && starts_ident(formula, i)) =>
+            {
                 let start = i;
-                let end = scan_ident(b, i);
-                if end < b.len() && b[end] == b'!' {
-                    match reference_after_qualifier(formula, b, end, start) {
-                        Some((span, local, parsed)) => {
-                            i = span.end;
-                            out.push(ReferenceSpan {
-                                span,
-                                local,
-                                parsed,
-                                qualified: true,
-                            });
-                        }
-                        None => i = end + 1,
-                    }
-                } else {
-                    // A Unicode name is one token. In particular, do not
-                    // rescan an ASCII A1-shaped suffix as a cell reference.
-                    i = end;
-                }
-            }
-            c if c.is_ascii_alphabetic() || c == b'$' || c == b'_' => {
-                let start = i;
-                let end = scan_ident(b, i);
+                let end = scan_ident(formula, i);
 
                 // `Sheet1!A1`: an unquoted name followed by `!` qualifies the
                 // reference that comes after it.
@@ -151,7 +179,7 @@ pub fn scan_references_into(formula: &str, out: &mut Vec<ReferenceSpan>) {
                 // tells a sheet range from a column range apart is whether a
                 // `!` follows the second half.
                 if end < b.len() && b[end] == b':' {
-                    if let Some(bang) = scan_3d_sheet_range_bang(b, end) {
+                    if let Some(bang) = scan_3d_sheet_range_bang(formula, end) {
                         match reference_after_qualifier(formula, b, bang, start) {
                             Some((span, local, parsed)) => {
                                 i = span.end;
@@ -174,7 +202,7 @@ pub fn scan_references_into(formula: &str, out: &mut Vec<ReferenceSpan>) {
                 // A bare token. It is a reference only if it looks like one and
                 // is not a function call.
                 let is_call = end < b.len() && b[end] == b'(';
-                let preceded_by_ident = start > 0 && is_ident_byte(b[start - 1]);
+                let preceded_by_ident = start > 0 && char_before_is_ident(formula, start);
                 if !is_call && !preceded_by_ident {
                     if let Some(parsed) = parse_cell_token(&formula[start..end]) {
                         // `A1:A4` is one range. Taken as two cells it would
@@ -224,7 +252,7 @@ pub fn scan_references_into(formula: &str, out: &mut Vec<ReferenceSpan>) {
                 while end < b.len() && b[end].is_ascii_digit() {
                     end += 1;
                 }
-                let preceded_by_ident = start > 0 && is_ident_byte(b[start - 1]);
+                let preceded_by_ident = start > 0 && char_before_is_ident(formula, start);
                 if !preceded_by_ident && end < b.len() && b[end] == b':' {
                     if let Some(second_end) = scan_axis_only_after_colon(b, end) {
                         if let Ok(parsed) = parse_a1(&formula[start..second_end]) {
@@ -249,7 +277,7 @@ pub fn scan_references_into(formula: &str, out: &mut Vec<ReferenceSpan>) {
                 match close {
                     Some(close) => {
                         let start = i;
-                        let after = scan_ident(b, close + 1);
+                        let after = scan_ident(formula, close + 1);
                         if after < b.len() && b[after] == b'!' {
                             match reference_after_qualifier(formula, b, after, start) {
                                 Some((span, local, parsed)) => {
@@ -357,44 +385,21 @@ pub fn scan_names_into(formula: &str, out: &mut Vec<NameSpan>) {
                     None => i + 1,
                 };
             }
-            c if !c.is_ascii() => {
-                let start = i;
-                let end = scan_ident(b, i);
-                if end < b.len() && b[end] == b'!' {
-                    let sheet = formula[start..end].to_string();
-                    i = match reference_after_qualifier(formula, b, end, start) {
-                        Some((span, _, _)) => span.end,
-                        None => match qualified_name(formula, b, end) {
-                            Some(span) => {
-                                let e = span.end;
-                                out.push(NameSpan {
-                                    span,
-                                    sheet_name: Some(sheet),
-                                });
-                                e
-                            }
-                            None => end + 1,
-                        },
-                    };
-                } else {
-                    let is_call = end < b.len() && b[end] == b'(';
-                    if !is_call {
-                        out.push(NameSpan {
-                            span: start..end,
-                            sheet_name: None,
-                        });
-                    }
-                    i = end;
-                }
-            }
-            c if c.is_ascii_alphabetic() || c == b'_' || c == b'\\' => {
+            // As in `scan_references_into`, a non-ASCII token takes the same
+            // arm as an ASCII one: a Unicode sheet name qualifies a name or a
+            // 3-D reference the same way, and only this arm knows that.
+            c if c.is_ascii_alphabetic()
+                || c == b'_'
+                || c == b'\\'
+                || (!c.is_ascii() && starts_ident(formula, i)) =>
+            {
                 let start = i;
                 // Excel allows a name to begin with `\`, but only there, so it
                 // is not an identifier byte and `scan_ident` must start past
                 // it. Scanning from `start` would return an empty run, leaving
                 // `i` where it was: an infinite loop, pushing an empty name on
                 // every pass until the allocator gives out.
-                let end = scan_ident(b, if c == b'\\' { i + 1 } else { i });
+                let end = scan_ident(formula, if c == b'\\' { i + 1 } else { i });
 
                 if end < b.len() && b[end] == b'!' {
                     let sheet = formula[start..end].to_string();
@@ -422,7 +427,7 @@ pub fn scan_names_into(formula: &str, out: &mut Vec<NameSpan>) {
                 // `A:C`, and a `!` right after the second identifier is what
                 // tells the two apart.
                 if end < b.len() && b[end] == b':' {
-                    if let Some(bang) = scan_3d_sheet_range_bang(b, end) {
+                    if let Some(bang) = scan_3d_sheet_range_bang(formula, end) {
                         i = match reference_after_qualifier(formula, b, bang, start) {
                             Some((span, _, _)) => span.end,
                             None => bang + 1,
@@ -432,7 +437,7 @@ pub fn scan_names_into(formula: &str, out: &mut Vec<NameSpan>) {
                 }
 
                 let is_call = end < b.len() && b[end] == b'(';
-                let preceded_by_ident = start > 0 && is_ident_byte(b[start - 1]);
+                let preceded_by_ident = start > 0 && char_before_is_ident(formula, start);
                 let is_reference = parse_cell_token(&formula[start..end]).is_some();
                 if !is_call && !preceded_by_ident && !is_reference {
                     // `A:A` — a bare column with no row is not a defined name
@@ -490,7 +495,7 @@ fn qualified_name(formula: &str, b: &[u8], bang: usize) -> Option<Range<usize>> 
         return None;
     }
     let start = bang + 1;
-    let end = scan_ident(b, start);
+    let end = scan_ident(formula, start);
     if end == start || (end < b.len() && b[end] == b'(') {
         return None;
     }
@@ -518,10 +523,23 @@ fn skip_quoted(b: &[u8], mut i: usize, q: u8) -> usize {
     b.len()
 }
 
-/// Consume an identifier-ish run: letters, digits, `_`, `.` and `$`.
-fn scan_ident(b: &[u8], mut i: usize) -> usize {
-    while i < b.len() && (is_ident_byte(b[i]) || b[i] == b'$') {
-        i += 1;
+/// Consume an identifier-ish run: letters, digits, `_`, `.` and `$`, in any
+/// script. `i` must sit on a character boundary; the run ends on one too.
+fn scan_ident(formula: &str, mut i: usize) -> usize {
+    let b = formula.as_bytes();
+    while i < b.len() {
+        if b[i].is_ascii() {
+            if is_ident_char(b[i] as char) || b[i] == b'$' {
+                i += 1;
+            } else {
+                break;
+            }
+        } else {
+            match formula[i..].chars().next() {
+                Some(c) if is_ident_char(c) => i += c.len_utf8(),
+                _ => break,
+            }
+        }
     }
     i
 }
@@ -541,7 +559,7 @@ fn extend_to_range(formula: &str, b: &[u8], end: usize) -> Option<usize> {
         return None;
     }
     let second_start = end + 1;
-    let second_end = scan_ident(b, second_start);
+    let second_end = scan_ident(formula, second_start);
     if second_end == second_start {
         return None;
     }
@@ -561,10 +579,11 @@ fn extend_to_range(formula: &str, b: &[u8], end: usize) -> Option<usize> {
 /// never itself sheet-qualified by a trailing `!`, so a `!` right after the
 /// second identifier is unambiguous evidence this is a sheet range, checked
 /// before the shorthand is ever attempted.
-fn scan_3d_sheet_range_bang(b: &[u8], colon: usize) -> Option<usize> {
+fn scan_3d_sheet_range_bang(formula: &str, colon: usize) -> Option<usize> {
+    let b = formula.as_bytes();
     debug_assert_eq!(b[colon], b':');
     let second_start = colon + 1;
-    let second_end = scan_ident(b, second_start);
+    let second_end = scan_ident(formula, second_start);
     if second_end == second_start {
         return None;
     }
@@ -633,7 +652,7 @@ fn reference_after_qualifier(
         return None;
     };
     let local_start = bang + 1;
-    let local_end = scan_ident(b, local_start);
+    let local_end = scan_ident(formula, local_start);
     if local_end == local_start {
         return None;
     }
@@ -725,7 +744,7 @@ pub fn redact_formula_literals(formula: &str) -> String {
             ref_idx += 1;
             continue;
         }
-        let preceded_by_ident = i > 0 && is_ident_byte(b[i - 1]);
+        let preceded_by_ident = i > 0 && char_before_is_ident(formula, i);
         let starts_number = !preceded_by_ident
             && (b[i].is_ascii_digit()
                 || (b[i] == b'.' && b.get(i + 1).is_some_and(u8::is_ascii_digit)));
@@ -942,6 +961,35 @@ mod tests {
             .map(|n| &formula[n.span.clone()])
             .collect();
         assert_eq!(names, ["éA1", "税率A1"]);
+    }
+
+    #[test]
+    fn a_unicode_first_sheet_still_spans_a_3d_reference() {
+        // Scanned by an arm of its own, `État:Mars!B2` came back as a
+        // reference to `Mars` alone — a real sheet, and not the one written —
+        // plus a name `État` no workbook defines.
+        let refs = scan_references("État:Mars!B2");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].parsed.sheet_name.as_deref(), Some("État"));
+        assert_eq!(refs[0].parsed.end_sheet_name.as_deref(), Some("Mars"));
+        assert!(scan_names("État:Mars!B2").is_empty());
+        // The same reference the other way round, in case only one arm is fixed.
+        let refs = scan_references("Jan:Déc!B2");
+        assert_eq!(refs[0].parsed.sheet_name.as_deref(), Some("Jan"));
+        assert_eq!(refs[0].parsed.end_sheet_name.as_deref(), Some("Déc"));
+    }
+
+    #[test]
+    fn a_unicode_operator_does_not_swallow_the_reference_after_it() {
+        // U+2212 MINUS SIGN. Counting every non-ASCII byte as part of an
+        // identifier made `−A1` one token, so the edge simply vanished.
+        assert_eq!(texts("−A1"), ["A1"]);
+        assert!(scan_names("−A1").is_empty());
+        assert_eq!(texts("B2−A1"), ["B2", "A1"]);
+        // A non-breaking space between operands, likewise.
+        assert_eq!(texts("B2\u{a0}+\u{a0}A1"), ["B2", "A1"]);
+        // But a letter before it is still a letter: `éA1` stays one name.
+        assert!(scan_references("éA1").is_empty());
     }
 
     #[test]
