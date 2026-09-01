@@ -920,6 +920,35 @@ pub(crate) fn shared_formula_anchor_row(rgce: &[u8]) -> Option<u32> {
 /// It is required because the `N`-class reference tokens `PtgRefN` and
 /// `PtgAreaN` — the ones shared and array formulas are built from — store
 /// *offsets from the cell being evaluated* rather than absolute positions.
+/// Write the sheet an `ixti` names, or the marker Excel writes when nothing
+/// stands behind it.
+///
+/// `ixti` indexes the EXTERNSHEET table, whose entries this reader has already
+/// resolved to names. A truncated or malformed one leaves a formula naming an
+/// entry that is not there; indexing straight into the list panicked, and a
+/// panic here takes down the load of the whole workbook — and, through a
+/// corpus build, every other workbook in the run — over one bad formula. The
+/// BIFF reader has always written `#REF` for this, unquoted because it is an
+/// error marker and not a name.
+fn push_xti_sheet(sheets: &[String], ixti: u16, formula: &mut String) {
+    match sheets.get(ixti as usize) {
+        Some(sheet) => push_sheet_name(sheet, formula),
+        None => formula.push_str("#REF"),
+    }
+}
+
+/// Refuse a token whose operand runs past the end of the record.
+fn check_len(found: usize, expected: usize, typ: &'static str) -> Result<(), XlsbError> {
+    if found < expected {
+        return Err(XlsbError::Len {
+            typ,
+            expected,
+            found,
+        });
+    }
+    Ok(())
+}
+
 fn parse_formula(
     mut rgce: &[u8],
     sheets: &[String],
@@ -938,9 +967,10 @@ fn parse_formula(
         match ptg {
             0x3a | 0x5a | 0x7a => {
                 // PtgRef3d
+                check_len(rgce.len(), 8, "PtgRef3d")?;
                 let ixti = read_u16(&rgce[0..2]);
                 stack.push(formula.len());
-                push_sheet_name(&sheets[ixti as usize], &mut formula);
+                push_xti_sheet(sheets, ixti, &mut formula);
                 formula.push('!');
                 let (col, col_rel, row_rel) = read_loc_col(read_u16(&rgce[6..8]));
                 push_a1(&mut formula, read_u32(&rgce[2..6]), col, row_rel, col_rel);
@@ -948,9 +978,10 @@ fn parse_formula(
             }
             0x3b | 0x5b | 0x7b => {
                 // PtgArea3d
+                check_len(rgce.len(), 14, "PtgArea3d")?;
                 let ixti = read_u16(&rgce[0..2]);
                 stack.push(formula.len());
-                push_sheet_name(&sheets[ixti as usize], &mut formula);
+                push_xti_sheet(sheets, ixti, &mut formula);
                 formula.push('!');
                 // ixti(2) rwFirst(4) rwLast(4) colFirst(2) colLast(2).
                 let (c1, c1_rel, r1_rel) = read_loc_col(read_u16(&rgce[10..12]));
@@ -962,18 +993,20 @@ fn parse_formula(
             }
             0x3c | 0x5c | 0x7c => {
                 // PtfRefErr3d
+                check_len(rgce.len(), 8, "PtgRefErr3d")?;
                 let ixti = read_u16(&rgce[0..2]);
                 stack.push(formula.len());
-                push_sheet_name(&sheets[ixti as usize], &mut formula);
+                push_xti_sheet(sheets, ixti, &mut formula);
                 formula.push('!');
                 formula.push_str("#REF!");
                 rgce = &rgce[8..];
             }
             0x3d | 0x5d | 0x7d => {
                 // PtgAreaErr3d
+                check_len(rgce.len(), 14, "PtgAreaErr3d")?;
                 let ixti = read_u16(&rgce[0..2]);
                 stack.push(formula.len());
-                push_sheet_name(&sheets[ixti as usize], &mut formula);
+                push_xti_sheet(sheets, ixti, &mut formula);
                 formula.push('!');
                 formula.push_str("#REF!");
                 rgce = &rgce[14..];

@@ -26,9 +26,9 @@ macro_rules! from_err {
 /// Converts a &[u8] into an iterator of `u32`s
 pub fn to_u32(s: &[u8]) -> impl ExactSizeIterator<Item = u32> + '_ {
     assert_eq!(s.len() % 4, 0);
-    s.as_chunks::<4>()
-        .0
-        .iter()
+    // `chunks_exact`, not `as_chunks`: the latter is stable only from 1.88
+    // and this crate declares 1.85. Same iteration, same drop of a short tail.
+    s.chunks_exact(4)
         .map(|data| u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
 }
 

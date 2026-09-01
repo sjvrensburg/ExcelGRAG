@@ -49,10 +49,13 @@ pub enum IngestError {
     UnsupportedFormat(PathBuf),
     #[error("failed to open workbook {path}: {message}")]
     Open { path: PathBuf, message: String },
-    // `eg` and `eg-mcp` both call in with no limit, so this is only reachable
-    // through a caller that set `LoadOptions::max_cells` itself — there is no
-    // CLI flag to name here, so the message stays limited to what happened.
-    #[error("stopped at {found} populated cells, over the configured limit of {limit}")]
+    // Only a caller that asked for a limit can see this: `eg` and `eg-mcp`
+    // both default to none. `eg`'s flag is named because a limit reached
+    // without knowing one was set is the confusing case.
+    #[error(
+        "stopped at {found} populated cells, over the configured limit of {limit} \
+         (raise or remove it with --max-input-cells)"
+    )]
     TooLarge { found: u64, limit: u64 },
     #[error("sheet count {0} exceeds the addressable maximum of 65536")]
     TooManySheets(usize),
@@ -210,6 +213,7 @@ pub fn load_with(path: impl AsRef<Path>, opts: &LoadOptions) -> Result<Loaded, I
     let defined_names = convert_defined_names(
         sheets.defined_names(),
         sheets.defined_name_scopes(),
+        metadata.len(),
         format,
         &mut warnings,
     );
@@ -347,9 +351,21 @@ pub fn load_with(path: impl AsRef<Path>, opts: &LoadOptions) -> Result<Loaded, I
     })
 }
 
+/// Turn a reader's defined names into the model's, resolving each name's
+/// scope against `sheet_count`.
+///
+/// The scope arrives as an index straight out of the file — xlsx parses
+/// `localSheetId` with an unchecked `parse()`, xlsb reads a raw `itab` — and
+/// an index past the last sheet is not a scope this workbook has. Narrowed to
+/// a `u16` without checking, 65,536 became sheet 0, so a name scoped to a
+/// sheet that is not there was reported as local to the first tab: a definite
+/// claim, and the wrong one. Such a name keeps its target and is reported as
+/// workbook-scoped, with a warning naming it, rather than being attributed to
+/// a real sheet or dropped.
 fn convert_defined_names(
     raw: &[(String, String)],
     scopes: &[Option<usize>],
+    sheet_count: usize,
     format: WorkbookFormat,
     warnings: &mut Vec<String>,
 ) -> Vec<DefinedName> {
@@ -371,9 +387,23 @@ fn convert_defined_names(
         defined_names.push(DefinedName {
             name: name.clone(),
             refers_to: target,
-            scope: scopes
-                .get(index)
-                .and_then(|scope| scope.map(|sheet| SheetId(sheet as u16))),
+            scope: scopes.get(index).copied().flatten().and_then(|sheet| {
+                match u16::try_from(sheet)
+                    .ok()
+                    .filter(|_| sheet < sheet_count)
+                    .map(SheetId)
+                {
+                    Some(id) => Some(id),
+                    None => {
+                        warnings.push(format!(
+                            "defined name {name:?} is scoped to sheet index {sheet}, which this \
+                             workbook does not have ({sheet_count} sheets); read as \
+                             workbook-scoped"
+                        ));
+                        None
+                    }
+                }
+            }),
         });
     }
     defined_names
@@ -619,12 +649,39 @@ mod tests {
         let names = convert_defined_names(
             &[("Rate".to_string(), ".B2:$Mar.B2".to_string())],
             &[None],
+            1,
             WorkbookFormat::Ods,
             &mut warnings,
         );
         assert_eq!(names[0].refers_to, ".B2:$Mar.B2");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("Rate") && warnings[0].contains("could not be translated"));
+    }
+
+    #[test]
+    fn a_name_scoped_past_the_last_sheet_is_not_attributed_to_a_real_one() {
+        // Truncated to a `u16`, 65,536 was sheet 0: a name scoped to a sheet
+        // this workbook does not have, reported as local to the first tab.
+        let mut warnings = Vec::new();
+        let names = convert_defined_names(
+            &[
+                ("Rate".to_string(), "Sheet1!$B$2".to_string()),
+                ("Band".to_string(), "Sheet1!$C$2".to_string()),
+                ("Ghost".to_string(), "Sheet1!$D$2".to_string()),
+            ],
+            &[Some(1), Some(65_536), Some(9)],
+            2,
+            WorkbookFormat::Xlsx,
+            &mut warnings,
+        );
+        assert_eq!(names[0].scope, Some(SheetId(1)), "a real scope is kept");
+        assert_eq!(names[1].scope, None);
+        assert_eq!(names[2].scope, None);
+        assert_eq!(warnings.len(), 2, "both are reported: {warnings:?}");
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("Band") && w.contains("65536")));
+        assert!(warnings.iter().any(|w| w.contains("Ghost")));
     }
 
     #[test]

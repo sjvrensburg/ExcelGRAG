@@ -60,7 +60,15 @@ use crate::report::BuildReport;
 
 /// Bumped when the stored shape changes. A file from another version is
 /// reported as a miss rather than deserialised into something plausible.
-pub const FORMAT_VERSION: u32 = 1;
+///
+/// "The stored shape" is not only these structs: it is everything a stored
+/// graph is *derived* from. `get` serves a stored graph whenever the version
+/// and the source file's hash both match, and the file does not change when
+/// the reader does — so a fix to what a formula decodes to, or a new field on
+/// a formula group's shape, has to move this or the corpus goes on answering
+/// from graphs built before the fix. Version 2 is the vendored reader's
+/// sheet-qualifier fixes plus `R1C1Ref::end_sheet_name`.
+pub const FORMAT_VERSION: u32 = 2;
 
 /// How many formula-group nodes are worth keeping in a stored graph.
 ///
@@ -340,6 +348,7 @@ impl Corpus {
         let _lock = self.lock_and_reload()?;
         write_atomically(&file, &bytes)?;
 
+        let previous_entry = self.manifest.workbooks.get(content_hash).cloned();
         self.manifest.workbooks.insert(
             content_hash.to_string(),
             Entry {
@@ -361,7 +370,26 @@ impl Corpus {
                     .is_some_and(|e| e.profile_values),
             },
         );
-        self.write_manifest()
+        // As in `forget`: an operation that returns `Err` must leave this
+        // handle agreeing with the manifest on disk, or a later `put_profiles`
+        // passes its "already in the corpus" check against an entry no
+        // manifest lists. The graph file stays where it is — `get` reads
+        // through the manifest, so an entry the manifest does not carry is
+        // unreachable, and a retry overwrites it.
+        if let Err(error) = self.write_manifest() {
+            match previous_entry {
+                Some(entry) => {
+                    self.manifest
+                        .workbooks
+                        .insert(content_hash.to_string(), entry);
+                }
+                None => {
+                    self.manifest.workbooks.remove(content_hash);
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Drop a workbook from the corpus. Returns whether it was there.
@@ -427,7 +455,6 @@ impl Corpus {
             profiles: profiles.clone(),
         };
         let path = self.profiles_path(content_hash);
-        let previous_file = fs::read(&path).ok();
         let previous_entry = self.manifest.workbooks.get(content_hash).cloned();
         let bytes = serde_json::to_vec(&stored).expect("profiles of plain data serialise");
         write_atomically(&path, &bytes)?;
@@ -444,14 +471,16 @@ impl Corpus {
                     .workbooks
                     .insert(content_hash.to_string(), entry);
             }
-            match previous_file {
-                Some(bytes) => {
-                    let _ = write_atomically(&path, &bytes);
-                }
-                None => {
-                    let _ = fs::remove_file(&path);
-                }
-            }
+            // The file goes, rather than reverting to what it held before.
+            // This is the one stored file carrying the workbook's own values,
+            // and both directions of a revert are a disclosure: putting a
+            // `--redact-values` run's predecessor back restores the values the
+            // run existed to remove, and leaving this run's file under the old
+            // manifest entry serves values that entry says are not there.
+            // Neither happens if the corpus simply holds no profiles for the
+            // workbook; `profiles` reads that as `Ok(None)`, and a retry
+            // writes the file again.
+            let _ = fs::remove_file(&path);
             return Err(error);
         }
         Ok(())
@@ -497,18 +526,18 @@ impl Corpus {
     }
 
     /// Forget one workbook's profiles, leaving its graph.
+    ///
+    /// The manifest goes first and the file second, the order [`Corpus::forget`]
+    /// uses and for a sharper reason: this file holds the workbook's own cell
+    /// values. Removing it first and rolling back on a failed manifest write
+    /// meant a scrub that failed *put the values back on disk* — and reported
+    /// an error while doing it, so the corpus went on serving what the caller
+    /// had asked it to forget. With the manifest first, a failure leaves
+    /// exactly the state the call started in, and nothing is ever written back.
     pub fn forget_profiles(&mut self, content_hash: &str) -> Result<(), StoreError> {
         let _lock = self.lock_and_reload()?;
         let path = self.profiles_path(content_hash);
-        let previous_file = fs::read(&path).ok();
         let previous_entry = self.manifest.workbooks.get(content_hash).cloned();
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(io_err(format!("removing {}", path.display()))(e));
-            }
-        }
         if let Some(entry) = self.manifest.workbooks.get_mut(content_hash) {
             entry.profiled_columns = 0;
             entry.profile_values = false;
@@ -524,12 +553,19 @@ impl Corpus {
                     self.manifest.workbooks.remove(content_hash);
                 }
             }
-            if let Some(bytes) = previous_file {
-                let _ = write_atomically(&path, &bytes);
-            }
             return Err(error);
         }
-        Ok(())
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            // The manifest no longer lists the profiles, so nothing reads
+            // them; but the file is still there, still holding values, and
+            // the caller is the only one who can do anything about that.
+            Err(e) => Err(io_err(format!(
+                "removing {} — it may still hold the workbook's values",
+                path.display()
+            ))(e)),
+        }
     }
 
     /// Where a workbook's profiles are written.
