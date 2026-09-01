@@ -172,6 +172,16 @@ fn validate_schema(value: &Value, schema: &Value, path: &str) -> Result<(), Stri
         }
         if let Some(properties) = properties {
             for (key, child) in object {
+                // An explicit `null` on an optional property means absent —
+                // it is what a great many JSON serialisers write for a field
+                // left unset, and what every `opt_*` accessor in `tools`
+                // already reads it as. Type-checking it here refused whole
+                // calls (`{"query": "revenue", "limit": null}`) before
+                // dispatch ever saw them. A *required* property is still
+                // checked, so a null there is the error it looks like.
+                if child.is_null() && !is_required(schema, key) {
+                    continue;
+                }
                 if let Some(child_schema) = properties.get(key) {
                     validate_schema(child, child_schema, &format!("{path}.{key}"))?;
                 }
@@ -184,6 +194,14 @@ fn validate_schema(value: &Value, schema: &Value, path: &str) -> Result<(), Stri
         }
     }
     Ok(())
+}
+
+/// Whether `schema` lists `key` among its required properties.
+fn is_required(schema: &Value, key: &str) -> bool {
+    schema
+        .get("required")
+        .and_then(Value::as_array)
+        .is_some_and(|required| required.iter().any(|r| r.as_str() == Some(key)))
 }
 
 fn text_result(text: String, is_error: bool) -> Value {
@@ -254,6 +272,33 @@ mod tests {
             .expect("text content")
             .to_string();
         (text, result["isError"].as_bool().expect("isError"))
+    }
+
+    #[test]
+    fn an_explicit_null_on_an_optional_argument_means_absent() {
+        // A client that serialises its unset optionals as `null` had every
+        // call refused before dispatch, though `opt_str`/`opt_usize` read a
+        // null as absent the moment they were reached.
+        let (mut server, _dir) = server();
+        let (text, is_error) = call(
+            &mut server,
+            "search",
+            json!({ "query": "revenue", "limit": null, "workbook": null, "lexical_only": null }),
+        );
+        assert!(
+            !text.contains("must be"),
+            "a null optional was type-checked: {text}"
+        );
+        // An empty corpus has nothing to find, but the call itself must land.
+        assert!(!is_error || !text.contains("must be"));
+
+        // A required argument that is null is still an error.
+        let (text, is_error) = call(&mut server, "search", json!({ "query": null }));
+        assert!(is_error, "a null required argument must be refused");
+        assert!(
+            text.contains("query"),
+            "the message names the argument: {text}"
+        );
     }
 
     #[test]

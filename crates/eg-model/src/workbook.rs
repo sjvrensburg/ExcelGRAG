@@ -151,7 +151,14 @@ impl Sheet {
         self.cells.get(&(row, col))
     }
 
+    /// One cell by address. `None` when the cell is vacant — and when it
+    /// names another sheet, which is a caller's bug rather than a question
+    /// with an answer: a region read against the wrong sheet comes back as a
+    /// table of empties, and a total over it as a confident zero. Debug
+    /// builds say so; release still refuses rather than reading the wrong
+    /// cell, since the row and column would be perfectly valid here.
     pub fn get_ref(&self, cell: CellRef) -> Option<&Cell> {
+        debug_assert_eq!(cell.sheet, self.id, "cell address is on another sheet");
         (cell.sheet == self.id)
             .then(|| self.get(cell.row, cell.col))
             .flatten()
@@ -204,7 +211,11 @@ impl Sheet {
     }
 
     /// Iterate populated cells within a range, row-major.
+    ///
+    /// A range naming another sheet yields nothing, and debug-asserts, for the
+    /// reason [`Sheet::get_ref`] does.
     pub fn iter_range(&self, range: RangeRef) -> impl Iterator<Item = (CellRef, &Cell)> + '_ {
+        debug_assert_eq!(range.sheet, self.id, "range is on another sheet");
         (range.sheet == self.id)
             .then_some(range)
             .into_iter()
@@ -421,9 +432,31 @@ mod tests {
     #[test]
     fn cell_and_range_access_refuse_a_different_sheet() {
         let s = sheet_with(&[(0, 0, "a")]);
-        assert!(s.get_ref(CellRef::new(SheetId(1), 0, 0)).is_none());
-        let other = RangeRef::new(SheetId(1), 0, 0, 0, 0);
-        assert_eq!(s.iter_range(other).count(), 0);
+        let cell = CellRef::new(SheetId(1), 0, 0);
+        let range = RangeRef::new(SheetId(1), 0, 0, 0, 0);
+        if cfg!(debug_assertions) {
+            // The refusal is the release behaviour; in a debug build the same
+            // call is loud, because a sheet handed another sheet's address is
+            // a bug in the caller and reading it as empty hides it.
+            assert!(panics(|| {
+                s.get_ref(cell);
+            }));
+            assert!(panics(|| {
+                let _ = s.iter_range(range);
+            }));
+        } else {
+            assert!(s.get_ref(cell).is_none());
+            assert_eq!(s.iter_range(range).count(), 0);
+        }
+    }
+
+    /// Whether `f` panicked, with the panic message kept off the test output.
+    fn panics(f: impl FnOnce()) -> bool {
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        std::panic::set_hook(hook);
+        caught.is_err()
     }
 
     #[test]

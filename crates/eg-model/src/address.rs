@@ -128,18 +128,38 @@ impl RangeRef {
         }
     }
 
-    pub fn rows(&self) -> u32 {
-        (self.bottom - self.top).saturating_add(1)
+    /// Height, widened to `u64` because a range spanning every addressable
+    /// row is one taller than `u32` can hold. Saturating the count into `u32`
+    /// instead made `rows() * cols()` disagree with [`cell_count`], and the
+    /// two are read as the same number: a column node's size is indexed as
+    /// `rows()` while a budget is checked against `cell_count()`.
+    ///
+    /// [`cell_count`]: RangeRef::cell_count
+    pub fn rows(&self) -> u64 {
+        debug_assert!(self.top <= self.bottom, "range corners are not normalised");
+        u64::from(self.bottom.saturating_sub(self.top)) + 1
     }
 
-    pub fn cols(&self) -> u16 {
-        (self.right - self.left).saturating_add(1)
+    /// Width, widened to `u32` for the reason [`rows`] is widened to `u64`.
+    ///
+    /// [`rows`]: RangeRef::rows
+    pub fn cols(&self) -> u32 {
+        debug_assert!(self.left <= self.right, "range corners are not normalised");
+        u32::from(self.right.saturating_sub(self.left)) + 1
     }
 
-    /// Cell count, widened to `u64` because a full-sheet range overflows `u32`.
+    /// Cell count. At most `2^32 * 2^16`, so it cannot overflow `u64`.
+    ///
+    /// The subtractions saturate rather than wrapping because the fields are
+    /// public: `new` normalises the corners, a struct literal does not, and an
+    /// inverted range used to underflow here — a panic in debug and a wild
+    /// number in release. It is still a caller's bug, and the debug assertions
+    /// in [`rows`] and [`cols`] still say so.
+    ///
+    /// [`rows`]: RangeRef::rows
+    /// [`cols`]: RangeRef::cols
     pub fn cell_count(&self) -> u64 {
-        (u64::from(self.bottom) - u64::from(self.top) + 1)
-            * (u64::from(self.right) - u64::from(self.left) + 1)
+        self.rows() * u64::from(self.cols())
     }
 
     pub fn contains(&self, cell: CellRef) -> bool {
@@ -936,6 +956,28 @@ mod tests {
     }
 
     #[test]
+    fn geometry_of_an_un_normalised_range_does_not_underflow() {
+        // Only reachable by bypassing `new`, which the public fields allow.
+        // Debug builds assert; release must not wrap to four billion rows.
+        let inverted = RangeRef {
+            sheet: S0,
+            top: 9,
+            left: 4,
+            bottom: 2,
+            right: 1,
+        };
+        if cfg!(debug_assertions) {
+            let hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            let caught = std::panic::catch_unwind(|| inverted.cell_count());
+            std::panic::set_hook(hook);
+            assert!(caught.is_err(), "a debug build must say so, loudly");
+        } else {
+            assert_eq!(inverted.cell_count(), 1);
+        }
+    }
+
+    #[test]
     fn single_cell_range_renders_without_colon() {
         let r = RangeRef::parse_local("B7", S0).unwrap();
         assert_eq!(r.to_a1(), "B7");
@@ -1177,9 +1219,12 @@ mod tests {
     fn public_geometry_rendering_does_not_overflow() {
         assert_eq!(CellRef::new(S0, u32::MAX, 0).to_a1(), "A4294967296");
         let range = RangeRef::new(S0, 0, 0, u32::MAX, u16::MAX);
-        assert_eq!(range.rows(), u32::MAX);
-        assert_eq!(range.cols(), u16::MAX);
+        assert_eq!(range.rows(), u32::MAX as u64 + 1);
+        assert_eq!(range.cols(), u16::MAX as u32 + 1);
         assert_eq!(range.cell_count(), (u32::MAX as u64 + 1) * 65_536);
+        // The two ways of asking must agree: a saturating `rows()` made the
+        // product 65,536 cells short of `cell_count()`.
+        assert_eq!(range.rows() * u64::from(range.cols()), range.cell_count());
         assert_eq!(R1C1Coord::Absolute(u32::MAX).render('R'), "R4294967296");
     }
 

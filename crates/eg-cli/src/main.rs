@@ -49,9 +49,12 @@ fn nonzero_usize(value: &str) -> Result<usize, String> {
     arg_required_else_help = true
 )]
 struct Cli {
-    /// Refuse inputs above this many populated cells. Use 0 for no limit when
-    /// deliberately processing a very large trusted workbook.
-    #[arg(long, global = true, default_value_t = 20_000_000)]
+    /// Refuse inputs above this many populated cells. 0, the default, is no
+    /// limit: the workbooks this exists for run to tens of millions of cells,
+    /// so a ceiling low enough to be a useful guard against a hostile file is
+    /// also low enough to refuse the ordinary ones. Set it when reading a
+    /// workbook you do not trust.
+    #[arg(long, global = true, default_value_t = 0)]
     max_input_cells: u64,
     #[command(subcommand)]
     command: Command,
@@ -460,18 +463,21 @@ mod tests {
     }
 
     #[test]
-    fn input_cell_limit_is_safe_by_default_and_explicitly_disableable() {
+    fn the_input_cell_limit_is_off_by_default_and_can_be_asked_for() {
+        // A default ceiling refused the workbooks this tool is for — every
+        // verb, before doing anything — while `eg serve` over the same file
+        // went on loading it, since eg-mcp passes no limit of its own.
         let default = Cli::try_parse_from(["eg", "cells", "book.xlsx", "Sheet1!A1"]).unwrap();
-        assert_eq!(default.max_input_cells, 20_000_000);
-        let unlimited = Cli::try_parse_from([
+        assert_eq!(default.max_input_cells, 0);
+        let limited = Cli::try_parse_from([
             "eg",
             "cells",
             "book.xlsx",
             "Sheet1!A1",
             "--max-input-cells",
-            "0",
+            "1000",
         ])
         .unwrap();
-        assert_eq!(unlimited.max_input_cells, 0);
+        assert_eq!(limited.max_input_cells, 1000);
     }
 }

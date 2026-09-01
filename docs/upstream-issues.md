@@ -800,6 +800,14 @@ of passing vacuously and outliving the defect.
 relative flags out of column fields. The demo `.xls` must now agree completely
 with its XLSX twin.
 
+The first fix reached only two of the four 3-D token handlers: `PtgRefErr3d`
+and `PtgAreaErr3d` — a 3-D reference to a range that no longer exists, which
+Excel writes as `#REF!` — went on indexing the sheet *tabs* with an `ixti`, and
+so went on naming whichever sheet sat at that position. Nothing exercises those
+two tokens, so the parity suite passed either way. All four now share one
+resolver, which is also what keeps a 3-D span from being written by one of them
+and dropped by another.
+
 ## 10. An ODF error cell reads as an empty cell
 
 **Reported as [#720](https://github.com/tafia/calamine/issues/720)**, with a
@@ -854,3 +862,51 @@ The vendored reader recognizes `calcext:value-type="error"`, reads the error
 code from the element text, and preserves the cell as that error. The parity
 test requires every planted ODS error to match its XLSX twin and rejects empty
 values.
+
+## 11. A malformed `EXTERNSHEET` panics the XLSB reader
+
+**Not reported upstream yet.** Found by review, not by a workbook.
+
+`parse_formula` in `xlsb/mod.rs` resolves each of the four 3-D reference tokens
+with `sheets[ixti as usize]`. `ixti` comes from the file: an XLSB whose
+`EXTERNSHEET` record is truncated — or simply written by something that got it
+wrong — leaves a formula naming an entry past the end of the table, and the
+index panics.
+
+A panic is the worst available outcome here. `eg index` reads a directory of
+workbooks in one process, so one malformed file takes down the whole run rather
+than being reported as one file that could not be read. The `.xls` reader has
+always used `.get()` for the same lookup and written `#REF` when it misses.
+
+### Fixed locally
+
+All four XLSB handlers go through one `push_xti_sheet`, which writes `#REF` for
+an index the table does not reach, and each checks its operand length first —
+the same `XlsbError::Len` refusal the `PtgRefN`/`PtgAreaN` handlers already
+make.
+
+## 12. An unrecognised ODF error value is reported as `#VALUE!`
+
+**Not reported upstream yet.** Found by review, not by a workbook.
+
+The ODS reader maps the error text of a cell to a `CellErrorType` through a
+table of eight English literals, and everything else falls through to
+`CellErrorType::Value`. So an error this reader cannot name — a localized error
+string, an `Err:NNN` from LibreOffice's own set, an empty body — is reported as
+a specific error it is not.
+
+Both sibling readers already refuse instead of guessing: `Xlsx` returns
+`XlsxError::CellError` from `FromStr for CellErrorType`, and `Xls`'s
+`parse_err` returns `XlsError::Unrecognized`. Only ODS guesses, and it is the
+one format where the value is display text rather than a code, so it is also
+the one most likely to carry something the table does not list.
+
+It matters here because `eg check` recomputes a formula and compares its result
+with what the file cached: a cell whose stored error is misreported agrees, or
+differs, for the wrong reason.
+
+### Fixed locally
+
+The table gains `#VALUE!` and `#GETTING_DATA` as names of their own, and an
+unrecognised body returns `OdsError::CellError` naming the text, matching what
+the other two readers do.
