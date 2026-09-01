@@ -27,21 +27,20 @@ fn eg() -> Command {
     Command::new(env!("CARGO_BIN_EXE_eg"))
 }
 
-/// The `"path"` field of the manifest's one workbook entry, read directly
-/// rather than by parsing the whole thing — a crude extraction is enough to
-/// check one property of one string.
+/// The `"path"` field of the manifest's one workbook entry.
+///
+/// This must go through JSON decoding: Windows canonical paths start with
+/// `\\?\` and JSON escapes every backslash, so trimming quotes from the raw
+/// line would test the encoded representation rather than the stored path.
 fn stored_path(corpus: &Path) -> String {
     let manifest = std::fs::read_to_string(corpus.join("manifest.json")).unwrap();
-    let line = manifest
-        .lines()
-        .find(|l| l.trim_start().starts_with("\"path\""))
-        .expect("a path field in the manifest");
-    line.split_once(':')
-        .unwrap()
-        .1
-        .trim()
-        .trim_matches(|c| c == '"' || c == ',')
-        .to_string()
+    let manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+    manifest["workbooks"]
+        .as_object()
+        .and_then(|workbooks| workbooks.values().next())
+        .and_then(|entry| entry["path"].as_str())
+        .expect("a path field in the manifest's workbook entry")
+        .to_owned()
 }
 
 #[test]
