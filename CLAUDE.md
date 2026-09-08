@@ -31,7 +31,7 @@ cargo clippy --workspace --all-targets
 cargo fmt
 ```
 
-The front door is the `eg` binary (`crates/eg-cli`), ten verbs in the order a
+The front door is the `eg` binary (`crates/eg-cli`), eleven verbs in the order a
 question travels:
 
 ```sh
@@ -41,6 +41,7 @@ cargo run --release -p eg-cli -- search corpus/ bad debt --limit 3
 cargo run --release -p eg-cli -- cells book.xlsb 'LOOKUP!AE53:AG89'
 cargo run --release -p eg-cli -- where book.xlsb 1612          # which cells hold it
 cargo run --release -p eg-cli -- trace book.xlsb 'LOOKUP!AE53' --dependents
+cargo run --release -p eg-cli -- graph book.xlsb 'LOOKUP!AE53' --depth 2   # a bounded subgraph, as JSON
 cargo run --release -p eg-cli -- check book.xlsb           # sweep: do formulas still agree
 cargo run --release -p eg-cli -- what-if book.xlsb 'RATES!B4=0.15'
 cargo run --release -p eg-cli -- serve corpus/             # MCP over stdio
@@ -190,10 +191,18 @@ above it.
   be a scan. `calc::Evaluator` is the reusable context the walk holds so it is
   not rebuilding a sheet-name map and a lookup index per cell; tell it
   `invalidate` whenever an override changes, or a cached lookup column outlives
-  the values behind it.
+  the values behind it. `graph::subgraph` walks `precedents_of`/`dependents_of`
+  several hops from a citation and assembles what they found into node/edge
+  JSON for a caller building a visualization — the same references `eg trace`
+  already prints, kept and linked instead of printed and discarded. Bounded
+  twice: `max_nodes` caps the walk (a `dependents` hop still costs a full
+  formula scan, batched per level rather than per frontier cell), and a
+  reference resolving to more than one cell becomes one terminal node instead
+  of being expanded — a lookup table is where a chain of reasoning ends, not a
+  fork into every cell of its rows.
 - `eg-mcp` — MCP server over the whole stack (`workbooks`, `search`, `context`,
   `read_cells`, `precedents`, `dependents`, `find_value`, `recompute`, `tables`,
-  `query_table`, `schema`, `what_if`). Hand-written stdio JSON
+  `query_table`, `schema`, `what_if`, `graph`). Hand-written stdio JSON
   protocol, no SDK, because the workspace is synchronous. A failing tool returns a
   *result* with `isError`, never a protocol error.
 - `eg-cli` — `eg`.

@@ -181,6 +181,70 @@ pub fn trace(
     Ok(())
 }
 
+/// Export a bounded formula-dependency subgraph as node/edge JSON — the walk
+/// `trace` prints one hop of, done `options.depth` times and assembled.
+pub fn graph(
+    path: &str,
+    citation: &str,
+    options: eg_eval::GraphOptions,
+    redact: bool,
+    max_input_cells: Option<u64>,
+) -> Result<(), String> {
+    let workbook = open(path, max_input_cells)?;
+    let range = locate(&workbook, citation)?;
+    let at = Instant::now();
+    let export = eg_eval::subgraph(&workbook, range, &options);
+
+    eprintln!(
+        "{} — {} node(s), {} edge(s) in {:.1}s{}",
+        workbook.cite_range(range),
+        export.nodes.len(),
+        export.edges.len(),
+        at.elapsed().as_secs_f64(),
+        if export.report.capped {
+            " (capped by --max-nodes)"
+        } else {
+            ""
+        }
+    );
+
+    let nodes: Vec<serde_json::Value> = export
+        .nodes
+        .iter()
+        .map(|node| {
+            serde_json::json!({
+                "id": node.id,
+                "kind": node.kind,
+                "formula": node.formula.as_deref().map(|f| show_formula(f, redact)),
+                "value": node.value.as_ref().map(|v| eg_eval::value_json(v, redact)),
+                "depth": node.depth,
+            })
+        })
+        .collect();
+    let edges: Vec<serde_json::Value> = export
+        .edges
+        .iter()
+        .map(|edge| {
+            serde_json::json!({
+                "from": edge.from,
+                "to": edge.to,
+                "text": edge.text,
+                "kind": edge.kind,
+            })
+        })
+        .collect();
+    let doc = serde_json::json!({
+        "nodes": nodes,
+        "edges": edges,
+        "report": export.report,
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&doc).expect("nodes and edges are plain JSON values")
+    );
+    Ok(())
+}
+
 /// Sweep a workbook's formulas, printing the report. Returns whether any
 /// disagreed — CLAUDE.md calls any disagreement a regression, and a caller
 /// (CI, most of all) cannot gate on that from stdout alone, so `main` turns
