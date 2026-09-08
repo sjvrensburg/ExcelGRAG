@@ -36,6 +36,7 @@
 //! ```
 
 pub mod calc;
+pub mod graph;
 pub mod parse;
 pub mod query;
 pub mod schema;
@@ -45,6 +46,10 @@ pub mod whatif;
 pub use calc::{
     check, evaluate, evaluate_over, recompute, recompute_over, CheckReport, Evaluator, Input,
     Outcome, Overrides, Recomputed, Unsupported,
+};
+pub use graph::{
+    subgraph, Direction as GraphDirection, EdgeKind, GraphEdge, GraphExport, GraphNode,
+    GraphOptions, GraphReport, NodeKind,
 };
 pub use parse::{parse, BinOp, Expr, ParseError, UnaryOp};
 pub use query::{query, Aggregate, Answer, Filter, Group, Query, QueryError, Test};
