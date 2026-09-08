@@ -19,7 +19,7 @@ use eg_eval::query::{query as query_run, Aggregate, Filter, Query, Test};
 use eg_eval::whatif::{what_if, Blocked, Change, WhatIfOptions};
 use eg_eval::{
     cell as cell_fact, cells_holding, cells_in, dependents_of, precedents_of, recompute, subgraph,
-    GraphDirection, GraphOptions, Outcome,
+    value_json, GraphDirection, GraphOptions, Outcome,
 };
 use eg_eval::{infer_schema, Lookup};
 use eg_index::SearchOptions;
@@ -632,22 +632,6 @@ fn show_formula(formula: &str, redact: bool) -> String {
         redact_formula_literals(formula)
     } else {
         formula.to_string()
-    }
-}
-
-/// A cell's value, as JSON — `null` for an empty cell, the value itself, or
-/// its kind when this server was started with values redacted, the same
-/// trade [`show`] makes for text output.
-fn value_json(value: &CellValue, redact: bool) -> Value {
-    if redact {
-        return Value::String(format!("<{}>", value.kind().as_str()));
-    }
-    match value {
-        CellValue::Empty => Value::Null,
-        CellValue::Number(n) => json!(n),
-        CellValue::Text(text) => Value::String(text.clone()),
-        CellValue::Bool(b) => Value::Bool(*b),
-        CellValue::Error(e) => Value::String(e.to_string()),
     }
 }
 

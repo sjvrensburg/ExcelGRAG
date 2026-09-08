@@ -27,6 +27,26 @@ use eg_model::{CellRef, CellValue, RangeRef, ReferenceSpan, Workbook};
 
 use crate::trace::{cell as cell_fact, cells_in, overlaps, resolve, sheet_ids, Reference, Target};
 
+/// A cell's value, as JSON — `null` for an empty cell, the value itself
+/// otherwise, or its kind under redaction, the same trade `eg`'s
+/// `--redact-values` makes for text output.
+///
+/// Shared by the CLI's `graph` verb and the MCP `graph` tool, which both
+/// render a [`GraphExport`] to JSON and previously kept their own identical
+/// copy of this.
+pub fn value_json(value: &CellValue, redact: bool) -> serde_json::Value {
+    if redact {
+        return serde_json::Value::String(format!("<{}>", value.kind().as_str()));
+    }
+    match value {
+        CellValue::Empty => serde_json::Value::Null,
+        CellValue::Number(n) => serde_json::json!(n),
+        CellValue::Text(text) => serde_json::Value::String(text.clone()),
+        CellValue::Bool(b) => serde_json::Value::Bool(*b),
+        CellValue::Error(e) => serde_json::Value::String(e.to_string()),
+    }
+}
+
 /// Which way to walk from the seed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -144,6 +164,17 @@ struct Builder<'a> {
     edge_seen: FxHashSet<(String, String, EdgeKind)>,
     max_nodes: usize,
     capped: bool,
+    /// Cells already placed on a dependents frontier, at this level or an
+    /// earlier one. A circular formula reference (`A1=B1+1`, `B1=A1+1`,
+    /// legal under iterative calculation) would otherwise put the same cell
+    /// back on the frontier every level: dependents costs a full workbook
+    /// scan per level, so re-scanning a cell whose dependents were already
+    /// found would cost that scan again for nothing new. Checked and
+    /// populated only against cells that have actually served as a
+    /// dependents-scan target, which is a stronger requirement than "already
+    /// has a node" — a cell can get a node from the precedents walk without
+    /// ever having been scanned for its own dependents.
+    dep_scanned: FxHashSet<CellRef>,
 }
 
 impl<'a> Builder<'a> {
@@ -156,6 +187,7 @@ impl<'a> Builder<'a> {
             edge_seen: FxHashSet::default(),
             max_nodes,
             capped: false,
+            dep_scanned: FxHashSet::default(),
         }
     }
 
@@ -357,6 +389,7 @@ pub fn subgraph(workbook: &Workbook, seed: RangeRef, options: &GraphOptions) -> 
         if fact.formula.is_some() {
             prec_frontier.push(fact.cell);
         }
+        b.dep_scanned.insert(fact.cell);
         dep_frontier.push(RangeRef::single(fact.cell));
     }
     // A citation naming exactly one, currently blank cell is still a
@@ -411,9 +444,6 @@ pub fn subgraph(workbook: &Workbook, seed: RangeRef, options: &GraphOptions) -> 
                 let Some(from_id) = b.cell_node(reference.from, depth) else {
                     break 'dep;
                 };
-                let already_known = next_dep
-                    .iter()
-                    .any(|r| *r == RangeRef::single(reference.from));
                 for target in dep_frontier.iter().filter(|t| {
                     reference
                         .target
@@ -429,7 +459,13 @@ pub fn subgraph(workbook: &Workbook, seed: RangeRef, options: &GraphOptions) -> 
                         EdgeKind::Dependent,
                     );
                 }
-                if !already_known {
+                // Queue this cell's own dependents for the next level only the
+                // first time it is reached — a cycle (`A1=B1+1`, `B1=A1+1`,
+                // legal under iterative calculation) would otherwise put it
+                // back on the frontier every level, and a dependents level
+                // costs a full workbook scan regardless of how few cells are
+                // on it.
+                if b.dep_scanned.insert(reference.from) {
                     next_dep.push(RangeRef::single(reference.from));
                 }
             }
@@ -585,5 +621,34 @@ mod tests {
         );
         assert!(export.nodes.len() <= 3);
         assert!(export.report.capped || export.nodes.len() < 3);
+    }
+
+    #[test]
+    fn a_dependents_cycle_scans_each_cell_once_rather_than_once_per_depth() {
+        // A1 = B1 + 1 ; B1 = A1 + 1 — a circular reference, legal under
+        // iterative calculation. Walking dependents from A1 should discover
+        // the two-cell cycle and then stop growing the frontier, rather than
+        // re-scanning the same two cells at every remaining depth.
+        let mut sheet = Sheet::new(SheetId(0), "Sheet1");
+        sheet.set(0, 0, formula("B1+1", CellValue::Number(1.0)));
+        sheet.set(0, 1, formula("A1+1", CellValue::Number(1.0)));
+        let wb = Workbook {
+            sheets: vec![sheet],
+            ..Default::default()
+        };
+        let export = subgraph(
+            &wb,
+            seed(&wb, "Sheet1!A1"),
+            &GraphOptions {
+                depth: 20,
+                direction: Direction::Dependents,
+                ..GraphOptions::default()
+            },
+        );
+        assert_eq!(export.nodes.len(), 2, "{:?}", export.nodes);
+        // Every level after the cycle is discovered costs nothing further —
+        // one formula each for A1 and B1's own dependents scan.
+        assert_eq!(export.report.formulas_scanned, 4, "{:?}", export.report);
+        assert!(!export.report.capped);
     }
 }

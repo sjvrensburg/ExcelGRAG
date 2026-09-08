@@ -733,6 +733,7 @@ dependencies = [
  "eg-structure",
  "rustc-hash",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

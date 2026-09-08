@@ -181,22 +181,6 @@ pub fn trace(
     Ok(())
 }
 
-/// A cell's value, as JSON — `null` for an empty cell, the value itself
-/// otherwise, or its kind under `--redact-values`, the same trade [`show`]
-/// makes for text output.
-fn value_json(value: &CellValue, redact: bool) -> serde_json::Value {
-    if redact {
-        return serde_json::Value::String(format!("<{}>", value.kind().as_str()));
-    }
-    match value {
-        CellValue::Empty => serde_json::Value::Null,
-        CellValue::Number(n) => serde_json::json!(n),
-        CellValue::Text(text) => serde_json::Value::String(text.clone()),
-        CellValue::Bool(b) => serde_json::Value::Bool(*b),
-        CellValue::Error(e) => serde_json::Value::String(e.to_string()),
-    }
-}
-
 /// Export a bounded formula-dependency subgraph as node/edge JSON — the walk
 /// `trace` prints one hop of, done `options.depth` times and assembled.
 pub fn graph(
@@ -232,7 +216,7 @@ pub fn graph(
                 "id": node.id,
                 "kind": node.kind,
                 "formula": node.formula.as_deref().map(|f| show_formula(f, redact)),
-                "value": node.value.as_ref().map(|v| value_json(v, redact)),
+                "value": node.value.as_ref().map(|v| eg_eval::value_json(v, redact)),
                 "depth": node.depth,
             })
         })
