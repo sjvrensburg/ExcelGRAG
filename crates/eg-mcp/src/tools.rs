@@ -18,7 +18,8 @@
 use eg_eval::query::{query as query_run, Aggregate, Filter, Query, Test};
 use eg_eval::whatif::{what_if, Blocked, Change, WhatIfOptions};
 use eg_eval::{
-    cell as cell_fact, cells_holding, cells_in, dependents_of, precedents_of, recompute, Outcome,
+    cell as cell_fact, cells_holding, cells_in, dependents_of, precedents_of, recompute, subgraph,
+    GraphDirection, GraphOptions, Outcome,
 };
 use eg_eval::{infer_schema, Lookup};
 use eg_index::SearchOptions;
@@ -245,6 +246,30 @@ pub const TOOLS: &[Tool] = &[
             })
         },
     },
+    Tool {
+        name: "graph",
+        description: "A bounded formula-dependency subgraph, as node/edge JSON, for building a \
+                      visualization. The same references `precedents`/`dependents` read, walked \
+                      several hops and assembled instead of printed. A reference that resolves to \
+                      more than one cell (a `SUM` range, a lookup table) becomes one terminal node \
+                      rather than being expanded cell by cell. `dependents` hops are expensive — \
+                      each costs a full scan of the workbook's formulas.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "citation": { "type": "string", "description": "The cell or range to walk out from, e.g. \"Sheet1!D7\"." },
+                    "workbook": { "type": "string", "description": "Which workbook (content hash, path or file name). Optional when the corpus holds one." },
+                    "depth": { "type": "integer", "minimum": 0, "maximum": 10, "description": "Hops from the citation, default 2. 0 exports only its own populated cells." },
+                    "direction": { "type": "string", "enum": ["both", "precedents", "dependents"], "description": "Which way to walk. Default \"both\"." },
+                    "max_nodes": { "type": "integer", "minimum": 1, "maximum": 2000, "description": "Ceiling on the total number of nodes, default 200." },
+                    "dependents_limit": { "type": "integer", "minimum": 1, "maximum": 2000, "description": "Per-hop cap on how many dependents one scan returns, default 200." }
+                },
+                "required": ["citation"],
+                "additionalProperties": false
+            })
+        },
+    },
 ];
 
 fn cell_schema(citation: &str) -> Value {
@@ -275,6 +300,7 @@ pub fn call(state: &mut State, name: &str, args: &Value) -> Result<String, Strin
         "query_table" => query_table(state, args),
         "schema" => schema(state, args),
         "what_if" => what_if_tool(state, args),
+        "graph" => graph(state, args),
         other => Err(format!("no tool called {other:?}")),
     }
 }
@@ -609,6 +635,22 @@ fn show_formula(formula: &str, redact: bool) -> String {
     }
 }
 
+/// A cell's value, as JSON — `null` for an empty cell, the value itself, or
+/// its kind when this server was started with values redacted, the same
+/// trade [`show`] makes for text output.
+fn value_json(value: &CellValue, redact: bool) -> Value {
+    if redact {
+        return Value::String(format!("<{}>", value.kind().as_str()));
+    }
+    match value {
+        CellValue::Empty => Value::Null,
+        CellValue::Number(n) => json!(n),
+        CellValue::Text(text) => Value::String(text.clone()),
+        CellValue::Bool(b) => Value::Bool(*b),
+        CellValue::Error(e) => Value::String(e.to_string()),
+    }
+}
+
 fn read_cells(state: &mut State, args: &Value) -> Result<String, String> {
     let limit = opt_bounded(args, "limit", 40, 1, 500)?;
     let redact = state.redact_values;
@@ -691,6 +733,75 @@ fn dependents(state: &mut State, args: &Value) -> Result<String, String> {
         out.push_str("  … more, raise limit\n");
     }
     Ok(out)
+}
+
+/// A bounded formula-dependency subgraph, as node/edge JSON.
+///
+/// Returned as text like every other tool here, but the text is a JSON
+/// document rather than a rendered listing — the point of this one is to be
+/// piped into a rendering step, not read directly.
+fn graph(state: &mut State, args: &Value) -> Result<String, String> {
+    let redact = state.redact_values;
+    let depth = opt_bounded(args, "depth", 2, 0, 10)?;
+    let max_nodes = opt_bounded(args, "max_nodes", 200, 1, 2000)?;
+    let dependents_limit = opt_bounded(args, "dependents_limit", 200, 1, 2000)?;
+    let direction = match opt_str(args, "direction")?.as_deref() {
+        None | Some("both") => GraphDirection::Both,
+        Some("precedents") => GraphDirection::Precedents,
+        Some("dependents") => GraphDirection::Dependents,
+        Some(other) => {
+            return Err(format!(
+                "direction must be \"both\", \"precedents\" or \"dependents\", got {other:?}"
+            ))
+        }
+    };
+    let (loaded, range, note) = located(state, args)?;
+    let workbook = &loaded.workbook;
+
+    let export = subgraph(
+        workbook,
+        range,
+        &GraphOptions {
+            depth,
+            direction,
+            max_nodes,
+            dependents_limit,
+        },
+    );
+
+    let nodes: Vec<Value> = export
+        .nodes
+        .iter()
+        .map(|node| {
+            json!({
+                "id": node.id,
+                "kind": node.kind,
+                "formula": node.formula.as_deref().map(|f| show_formula(f, redact)),
+                "value": node.value.as_ref().map(|v| value_json(v, redact)),
+                "depth": node.depth,
+            })
+        })
+        .collect();
+    let edges: Vec<Value> = export
+        .edges
+        .iter()
+        .map(|edge| {
+            json!({
+                "from": edge.from,
+                "to": edge.to,
+                "text": edge.text,
+                "kind": edge.kind,
+            })
+        })
+        .collect();
+    let doc = json!({
+        "note": note.trim_end(),
+        "seed": workbook.cite_range(range),
+        "nodes": nodes,
+        "edges": edges,
+        "report": export.report,
+    });
+    serde_json::to_string_pretty(&doc).map_err(|e| format!("could not render the graph: {e}"))
 }
 
 /// Which cells hold a value.

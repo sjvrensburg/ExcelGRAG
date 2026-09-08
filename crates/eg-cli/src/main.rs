@@ -10,6 +10,7 @@
 //! eg ask corpus/ bad debt        # a question, answered as a cited passage
 //! eg cells book.xlsb 'LOOKUP!AE53:AG89'   # the cells behind a citation
 //! eg where book.xlsb 1612        # which cells hold a value, by scanning them
+//! eg graph book.xlsb 'LOOKUP!AE53' --depth 2   # a dependency subgraph, as JSON
 //! eg check book.xlsb             # do the formulas still agree with their values
 //! eg what-if book.xlsb 'RATES!B4=0.15'    # and what moves if one changes
 //! eg serve corpus/               # the same, to an agent over MCP
@@ -181,6 +182,33 @@ enum Command {
         limit: usize,
     },
 
+    /// Export a bounded formula-dependency subgraph as node/edge JSON.
+    ///
+    /// The same traversal `trace` prints one hop of, walked `--depth` hops
+    /// and assembled into a graph an agent can feed straight into a
+    /// rendering step, rather than re-deriving it from raw cells.
+    Graph {
+        workbook: String,
+        citation: String,
+        /// Hops from the citation. 0 exports only its own populated cells.
+        #[arg(long, default_value_t = 2)]
+        depth: usize,
+        /// Which way to walk. `dependents` is expensive: nothing records who
+        /// reads a cell, so it costs a full scan of the workbook's formulas
+        /// per hop.
+        #[arg(long, value_enum, default_value_t = GraphDirectionArg::Both)]
+        direction: GraphDirectionArg,
+        /// Ceiling on the total number of nodes. Reached, the walk stops
+        /// growing rather than continuing unbounded.
+        #[arg(long, default_value_t = 200, value_parser = nonzero_usize)]
+        max_nodes: usize,
+        /// Per-hop cap on how many dependents a single scan returns.
+        #[arg(long, default_value_t = 200, value_parser = nonzero_usize)]
+        dependents_limit: usize,
+        #[command(flatten)]
+        privacy: Privacy,
+    },
+
     /// Recompute formulas and say whether they agree with their stored values.
     ///
     /// Exits 2 if any formula disagreed, so CI can gate on it without parsing
@@ -225,6 +253,26 @@ enum Command {
         #[command(flatten)]
         privacy: Privacy,
     },
+}
+
+/// `eg_eval::graph::Direction`, spelled the way a flag value is: clap's
+/// `value_enum` needs its own type rather than the library's, since the
+/// library's has no reason to know about `--direction`'s spelling.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum GraphDirectionArg {
+    Both,
+    Precedents,
+    Dependents,
+}
+
+impl From<GraphDirectionArg> for eg_eval::GraphDirection {
+    fn from(value: GraphDirectionArg) -> Self {
+        match value {
+            GraphDirectionArg::Both => eg_eval::GraphDirection::Both,
+            GraphDirectionArg::Precedents => eg_eval::GraphDirection::Precedents,
+            GraphDirectionArg::Dependents => eg_eval::GraphDirection::Dependents,
+        }
+    }
 }
 
 #[derive(Args, Clone, Copy)]
@@ -323,6 +371,26 @@ fn main() {
             dependents,
             limit,
         } => workbook::trace(&workbook, &citation, dependents, limit, max_input_cells),
+        Command::Graph {
+            workbook,
+            citation,
+            depth,
+            direction,
+            max_nodes,
+            dependents_limit,
+            privacy,
+        } => workbook::graph(
+            &workbook,
+            &citation,
+            eg_eval::GraphOptions {
+                depth,
+                direction: direction.into(),
+                max_nodes,
+                dependents_limit,
+            },
+            privacy.redact_values,
+            max_input_cells,
+        ),
         Command::Check {
             workbook,
             scope,
@@ -391,6 +459,7 @@ mod tests {
             "cells",
             "where",
             "trace",
+            "graph",
             "check",
             "what-if",
             "serve",
