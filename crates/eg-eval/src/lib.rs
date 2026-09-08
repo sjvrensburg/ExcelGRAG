@@ -48,7 +48,7 @@ pub use calc::{
     Outcome, Overrides, Recomputed, Unsupported,
 };
 pub use graph::{
-    subgraph, Direction as GraphDirection, EdgeKind, GraphEdge, GraphExport, GraphNode,
+    subgraph, value_json, Direction as GraphDirection, EdgeKind, GraphEdge, GraphExport, GraphNode,
     GraphOptions, GraphReport, NodeKind,
 };
 pub use parse::{parse, BinOp, Expr, ParseError, UnaryOp};
