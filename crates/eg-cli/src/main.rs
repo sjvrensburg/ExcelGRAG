@@ -14,6 +14,7 @@
 //! eg check book.xlsb             # do the formulas still agree with their values
 //! eg what-if book.xlsb 'RATES!B4=0.15'    # and what moves if one changes
 //! eg serve corpus/               # the same, to an agent over MCP
+//! eg gui corpus/ --open          # a browser tab and an MCP server, sharing one session
 //! ```
 //!
 //! The verbs wrap library calls only. The diagnostics — `raw_cells`,
@@ -27,6 +28,7 @@
 //! agree with each other.
 
 mod corpus;
+mod gui;
 mod workbook;
 
 use clap::{Args, Parser, Subcommand};
@@ -253,6 +255,39 @@ enum Command {
         #[command(flatten)]
         privacy: Privacy,
     },
+
+    /// Serve a corpus as a browser GUI *and* an MCP server, sharing one
+    /// engine and one chat session — an agent's tool calls and a human's
+    /// browser tab see the same thing. Point an MCP client's server command
+    /// at this verb to get both from one process.
+    Gui {
+        dir: String,
+        /// Port to serve the browser UI on, on localhost only.
+        #[arg(long, default_value_t = 8765)]
+        port: u16,
+        /// Open the browser at the served URL.
+        #[arg(long)]
+        open: bool,
+        #[command(flatten)]
+        privacy: Privacy,
+        /// Base URL of an OpenAI-chat-completions-compatible endpoint (local
+        /// or hosted) for the chat's optional query-rewriting and answer
+        /// composition. Omit to keep chat fully local and LLM-free.
+        #[arg(long)]
+        llm_base_url: Option<String>,
+        /// Name of the environment variable holding the API key for
+        /// `--llm-base-url`, read once at startup. Never pass a raw key on
+        /// the command line — it would land in shell history and `ps`.
+        #[arg(long)]
+        llm_api_key_env: Option<String>,
+        #[arg(long, default_value = "gpt-oss-120b")]
+        llm_model: String,
+        /// What a chat turn may send to the LLM: `off` (no LLM call), or the
+        /// rendered passage/citations, or additionally the cited cells'
+        /// actual values. Refused together with `--redact-values`.
+        #[arg(long, value_enum, default_value_t = eg_gui::llm::Privacy::Off)]
+        llm_privacy: eg_gui::llm::Privacy,
+    },
 }
 
 /// `eg_eval::graph::Direction`, spelled the way a flag value is: clap's
@@ -421,6 +456,41 @@ fn main() {
             max_input_cells,
         ),
         Command::Serve { dir, privacy } => corpus::serve(&dir, privacy.redact_values),
+        Command::Gui {
+            dir,
+            port,
+            open,
+            privacy,
+            llm_base_url,
+            llm_api_key_env,
+            llm_model,
+            llm_privacy,
+        } => {
+            // `--llm-privacy` with no `--llm-base-url` has nothing to send a
+            // chat turn to — silently falling back to LLM-off chat here
+            // would be exactly the silent behavior the privacy dial exists
+            // to avoid, so this is refused before `llm` even becomes an
+            // `Option`, rather than quietly discarding the requested tier.
+            if llm_privacy != eg_gui::llm::Privacy::Off && llm_base_url.is_none() {
+                Err(format!(
+                    "eg gui: --llm-privacy {llm_privacy} needs --llm-base-url — \
+                     without an endpoint there is nothing to send a chat turn to"
+                ))
+            } else {
+                gui::gui(
+                    &dir,
+                    port,
+                    open,
+                    privacy.redact_values,
+                    llm_base_url.map(|base_url| eg_gui::llm::LlmConfig {
+                        base_url,
+                        api_key: llm_api_key_env.and_then(|var| std::env::var(var).ok()),
+                        model: llm_model,
+                        privacy: llm_privacy,
+                    }),
+                )
+            }
+        }
     };
 
     if let Err(message) = result {
@@ -463,6 +533,7 @@ mod tests {
             "check",
             "what-if",
             "serve",
+            "gui",
         ] {
             assert!(names.contains(&verb.to_string()), "{verb} went missing");
         }

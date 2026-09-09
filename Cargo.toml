@@ -10,6 +10,7 @@ members = [
     "crates/eg-eval",
     "crates/eg-mcp",
     "crates/eg-cli",
+    "crates/eg-gui",
     "crates/eg-fixtures",
 ]
 exclude = ["vendor/calamine"]
@@ -44,6 +45,27 @@ tantivy = "0.26"
 fastembed = { version = "6", default-features = false, features = [
     "ort-download-binaries-rustls-tls",
     "hf-hub-rustls-tls",
+] }
+
+# eg-gui: web GUI + shared agent/human chat over MCP.
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws"] }
+notify = "8"
+rust-embed = "8"
+webbrowser = "1"
+futures = "0.3"
+clap = { version = "4", features = ["derive"] }
+# Official Rust MCP SDK — the GUI's MCP bridge runs on the Tokio runtime
+# eg-gui already needs for Axum, so it uses this instead of hand-rolling a
+# second JSON-RPC loop next to eg-mcp's existing sync one.
+rmcp = { version = "3", features = ["transport-io", "server"] }
+# OpenAI-chat-completions-compatible client for the optional chat LLM (local
+# llama.cpp/ollama or a hosted API — anything speaking the same wire format).
+# `rustls` matches this workspace's existing rustls-only TLS convention
+# (fastembed is built the same way).
+async-openai = { version = "0.42", default-features = false, features = [
+    "chat-completion",
+    "rustls",
 ] }
 
 [profile.release]
