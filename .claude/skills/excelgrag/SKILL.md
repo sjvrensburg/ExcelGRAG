@@ -206,6 +206,9 @@ Verb ↔ tool cross-reference, for translating between the two:
 | *(no CLI equivalent)* | `query_table` | Filter/group/aggregate a table |
 | *(no CLI equivalent)* | `schema`      | Foreign keys the lookups declare |
 | `serve`              | *(is the server)* | Run the MCP server |
+| `gui`                | *(is the server, plus a browser tab)* | Run the MCP server and a web GUI together, sharing one session |
+| *(no CLI equivalent)* | `chat`        | A turn in the GUI's shared chat session — only when serving with `eg gui`, not `eg serve` |
+| *(no CLI equivalent)* | `gui_show`    | Point the GUI's browser tab at a node — only when serving with `eg gui` |
 
 `query_table`/`tables`/`schema` are MCP-only today; from a shell, reach the
 same query engine through `eg-eval`'s library or by scripting `cells`
@@ -226,7 +229,17 @@ eg check book.xlsb
 claude mcp add excelgrag -- /path/to/eg-mcp /path/to/corpus
 # or, as a subcommand of eg, no second binary:
 eg serve corpus/
+# or, when the user also wants a browser tab on the same live session:
+eg gui corpus/ --open
 ```
+
+When the MCP server is `eg gui` rather than `eg serve` (check whether the
+`chat`/`gui_show` tools appear in `tools/list`), calling `chat` instead of
+`context` puts the question and its answer in front of the human too, live,
+with the same multi-turn memory as a browser follow-up. `gui_show` is for
+when a tool already answered the question (`read_cells`/`precedents`/
+`search`) and the point is just to put it in front of the human, not to ask
+anything new.
 
 `eg check <workbook>` exits `2` if any formula disagreed with its stored
 value (CI-friendly — a disagreement is always worth investigating) and `1`

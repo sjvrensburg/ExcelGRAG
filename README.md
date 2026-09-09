@@ -54,9 +54,15 @@ does not pretend otherwise.
   cells hold a value, whether a formula still agrees with its stored result,
   and what else moves if one number changes.
 - **Serves all of it to an agent** over MCP.
+- **Shows it in a browser, too** — `eg gui` serves the same corpus as a live
+  graph view, with a chat session shared between the browser and whatever
+  agent is driving the same process over MCP.
 
 Nothing about a workbook leaves the machine. The embedding model is downloaded
-once and runs locally.
+once and runs locally. The one opt-in exception is `eg gui --llm-privacy
+values`, which sends a chat turn's cited cells to whatever OpenAI-compatible
+endpoint you configure — off by default, and refused outright alongside
+`--redact-values`.
 
 ## Install
 
@@ -100,7 +106,7 @@ eg where tests/fixtures/demo/impairment.xlsx 1612
 
 ## Usage
 
-Ten verbs, in the order a question travels.
+Twelve verbs, in the order a question travels.
 
 ```sh
 eg index corpus/ book.xlsb              # read it, store its graph, index it
@@ -111,10 +117,12 @@ eg workbooks corpus/                    # what is actually indexed
 eg cells book.xlsb 'LOOKUP!AE53:AG89'   # the cells behind a citation
 eg where book.xlsb 1612                 # which cells hold a value
 eg trace book.xlsb 'LOOKUP!AE53' --dependents   # and what reads them
+eg graph book.xlsb 'LOOKUP!AE53' --depth 2      # a dependency subgraph, as JSON
 eg check book.xlsb                      # do the formulas still agree
 eg what-if book.xlsb 'RATES!BS9=0.175'  # what moves if one changes
 
 eg serve corpus/                        # the same, to an agent over MCP
+eg gui corpus/ --open                   # a browser tab *and* an MCP server, sharing one session
 ```
 
 `eg <verb> --help` for the flags. Three worth knowing:
@@ -184,6 +192,30 @@ cannot talk its way past it.
 There is also a [Claude Code skill](.claude/skills/excelgrag/SKILL.md)
 describing the workflow, the evidence system and the refusals.
 
+## Exploring it in a browser, alongside an agent
+
+`eg gui` is `eg serve` and a web UI in one process, sharing one live engine:
+
+```sh
+eg gui corpus/ --open
+```
+
+Point an MCP client's server command at this verb instead of `eg serve` and
+the same process that becomes the agent's MCP server also opens the human's
+browser tab. Two more tools appear only here, on top of the twelve above:
+
+| Tool | Answers |
+|---|---|
+| `chat` | a turn in the shared chat session — the same conversation the open browser tab shows, with sticky workbook/sheet scope carried across follow-ups |
+| `gui_show` | point the browser's camera at a node, with no question asked |
+
+Chat works fully offline by default — a turn without an LLM configured is
+`context`'s find→expand→render, shown live in both places. `--llm-base-url`
+(any OpenAI-chat-completions-compatible endpoint, local or hosted) plus
+`--llm-privacy {off|passage|values}` add query-rewriting for follow-ups and a
+composed natural-language reply, with `off` as the default and `values`
+refused together with `--redact-values`.
+
 ## How it works
 
 Data flows one way through the workspace; each crate depends only on the ones
@@ -200,6 +232,7 @@ above it.
 | `eg-eval` | Cell provenance, formula evaluation, queries, what-if |
 | `eg-mcp` | MCP server |
 | `eg-cli` | The `eg` binary |
+| `eg-gui` | Browser GUI + MCP bridge (`eg gui`), shared chat session |
 | `eg-fixtures` | Generates the committed demo workbook |
 
 A corpus is a directory: `manifest.json`, `graphs/<blake3>.json`,
@@ -228,6 +261,10 @@ For a corpus that must not carry a workbook's data, index with
 `--redact-values` (counts and types, no values) or `--no-profiles` (nothing at
 all). Re-running `eg index` with either flag over a corpus built without them
 rewrites the stored documents rather than leaving the old ones behind.
+
+`eg gui`'s chat history (`corpus/chat/`) follows the same rule: a persisted
+turn never carries more than a rendered passage does — no cell value — even
+when `--llm-privacy values` sent one to the model for that single request.
 
 ## Testing
 
