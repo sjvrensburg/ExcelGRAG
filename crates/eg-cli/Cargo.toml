@@ -19,5 +19,7 @@ eg-index.workspace = true
 eg-retrieve.workspace = true
 eg-eval.workspace = true
 eg-mcp = { path = "../eg-mcp" }
+eg-gui = { path = "../eg-gui" }
 clap = { version = "4", features = ["derive"] }
 serde_json.workspace = true
+tokio.workspace = true

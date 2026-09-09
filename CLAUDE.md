@@ -31,7 +31,7 @@ cargo clippy --workspace --all-targets
 cargo fmt
 ```
 
-The front door is the `eg` binary (`crates/eg-cli`), eleven verbs in the order a
+The front door is the `eg` binary (`crates/eg-cli`), twelve verbs in the order a
 question travels:
 
 ```sh
@@ -45,7 +45,32 @@ cargo run --release -p eg-cli -- graph book.xlsb 'LOOKUP!AE53' --depth 2   # a b
 cargo run --release -p eg-cli -- check book.xlsb           # sweep: do formulas still agree
 cargo run --release -p eg-cli -- what-if book.xlsb 'RATES!B4=0.15'
 cargo run --release -p eg-cli -- serve corpus/             # MCP over stdio
+cargo run --release -p eg-cli -- gui corpus/ --open        # a browser tab *and* an MCP server, sharing one session
 ```
+
+`eg gui` (`crates/eg-gui`) is the odd verb out: it is the only one that needs a
+Tokio runtime, because it serves a browser UI over Axum and, in the same
+process, speaks MCP over stdio via `rmcp` — the official Rust MCP SDK, not a
+hand-rolled loop like `eg-mcp`'s own (that one stays hand-rolled deliberately,
+to keep the CLI-only path dependency-light; that reasoning does not extend to
+a crate that already needs Tokio for its web server). Point an MCP client
+(e.g. Claude Code) at `eg gui <corpus> --port N --open` and the same process
+that becomes the agent's MCP server also opens the human's browser tab at that
+port — an agent's tool calls and the human's browser chat land in one shared,
+persisted session (`corpus/chat/<id>.json`), which is what makes "tell the
+agent to show me something in the GUI" and "chat with the workbook in the
+browser" the same feature rather than two. `eg gui --llm-privacy` is off by
+default (chat still works: a turn without an LLM is `eg ask`'s find→expand→
+render, shown live); `passage` lets an OpenAI-chat-completions-compatible
+endpoint (local or hosted — anything speaking that wire format) resolve
+follow-ups and phrase the reply from the rendered passage, which by
+`render()`'s own invariant never carries a cell value; `values` additionally
+sends the cited cells' contents for that one turn and is refused together
+with `--redact-values`, since sending values contradicts a corpus told not to
+show them. `values` mode is this codebase's one deliberate, opt-in exception
+to "nothing about a workbook leaves the machine" (below) — `eg gui` logs
+which base URL will receive them the moment the mode is active, so it is
+never a silent behavior.
 
 `eg-fixtures` generates the demo workbook every one of those can be run
 against — a fictional distributor's trade debtor impairment, deterministic
@@ -206,6 +231,19 @@ above it.
   protocol, no SDK, because the workspace is synchronous. A failing tool returns a
   *result* with `isError`, never a protocol error.
 - `eg-cli` — `eg`.
+- `eg-gui` — the browser GUI and, in the same process, an MCP bridge over
+  `rmcp` re-exposing every `eg-mcp` tool generically (iterating
+  `eg_mcp::tools::TOOLS` rather than redeclaring them) plus two GUI-only
+  tools: `chat` (a turn in the shared session — `chat::run_turn`) and
+  `gui_show` (point the browser's camera at a node without a full turn).
+  `App.engine` is an `Arc<Mutex<eg_mcp::State>>` shared between Axum handlers
+  and the MCP bridge, so both see one live corpus. `chat.rs` never holds that
+  lock and the separate `App.sessions` lock at once — each is taken, used,
+  and released before the next step, in particular before either `.await` on
+  the optional LLM (`llm.rs`, built on `async-openai`, not a hand-rolled HTTP
+  client), so a slow or unreachable model degrades a turn to the plain
+  rendered passage rather than blocking every other browser tab or agent
+  call behind the corpus lock.
 
 ## Invariants worth not breaking
 

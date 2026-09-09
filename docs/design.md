@@ -905,6 +905,46 @@ bring an async runtime along for something this size. A tool that fails comes
 back as a *result* with `isError`, not as a protocol error: the model can act on
 "no sheet called that, here are the ones there are" and cannot act on -32603.
 
+## Serving it to a browser, and sharing that with the agent
+
+`eg-mcp`'s reason to hand-roll its JSON-RPC loop is specifically that the rest
+of the workspace is synchronous — `eg-gui` is not that workspace: it already
+needs Tokio for its web server, so its own MCP surface is built on `rmcp`, the
+official Rust MCP SDK, rather than a second hand-rolled loop next to the
+first. The two servers stay genuinely separate: `eg-mcp` is untouched by any
+of this, and `eg-gui`'s bridge re-exposes its tools *generically*, iterating
+`eg_mcp::tools::TOOLS` and dispatching through `eg_mcp::tools::call` rather
+than re-declaring thirteen schemas by hand — the two tool lists cannot drift
+apart because there is only one, read at both call sites.
+
+The reason to run a web server and an MCP server in one process at all is
+`chat`: an agent's tool call and a human's browser tab needed to land in the
+same conversation, not two conversations that happen to be about the same
+corpus. That only works if they share one live engine (`App.engine`, an
+`Arc<Mutex<eg_mcp::State>>`, handed to both Axum's handlers and the MCP
+bridge) and one session store (`App.sessions`, persisted under
+`corpus/chat/<id>.json`, the same governance `profiles/`/`text/` already
+have). The two are independent locks, and `chat::run_turn` never holds both —
+each is taken, used, and released before the next step, deliberately before
+either `await` on the optional LLM. An LLM call can take seconds; holding the
+corpus lock for that long would serialize every other browser tab and every
+other agent tool call behind one slow model response, which defeats the
+entire point of a server that holds resources open.
+
+Whether that LLM runs at all, and what a turn may send it, is a dial rather
+than a switch, because "local" and "hosted" turned out not to be the
+interesting distinction — an OpenAI-chat-completions-compatible endpoint
+looks the same to this client whether it is a local model on the same
+machine or a hosted one, so the dial that matters is *content*, not
+*location*: off makes no network call, `passage` sends what `render()`
+already limits itself to (never a cell value, by that function's own
+invariant), and `values` additionally sends the turn's cited cells and is
+refused outright alongside `--redact-values` — a corpus told not to show
+values cannot also be told to send them elsewhere. Persisted chat history
+stays at the `passage` shape regardless of which tier produced a turn, so a
+`values`-mode answer does not leave a copy of the values it was allowed to
+see, for that one request, sitting on disk afterward.
+
 
 ## How this is tested
 

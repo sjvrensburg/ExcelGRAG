@@ -1,4 +1,9 @@
 /target
+node_modules/
+frontend/dist/*
+!frontend/dist/.gitkeep
+corpus/
+*.local
 
 # Cargo.lock is committed deliberately: this workspace produces binaries, and
 # the lock is what pins the calamine fork to an exact commit. Without it a
