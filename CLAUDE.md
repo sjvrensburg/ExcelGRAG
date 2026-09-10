@@ -281,6 +281,34 @@ above it.
   take `--redact-values`). The asymmetry is deliberate: example output ends up in
   commit messages and READMEs.
 
+## Known issues
+
+- **`eg gui`'s "Index a workbook" job can hang indefinitely, on a long-lived
+  server.** Observed once, live-testing the GUI in a browser: a valid
+  workbook submitted through the sidebar's index field never completed — no
+  `log` lines, no `IndexDone` event, nothing written to the corpus — on an
+  `eg gui` process that had been running for a while and been through many
+  searches, asks, chat turns, and selections. `eg index` on the same file
+  from a shell finished in under a second, and a *fresh* `eg gui` process
+  indexing the same file into the same corpus directory (including the exact
+  directory the hung process was using, stale tantivy lock files and all)
+  also finished in seconds — so the corpus, the file, and the indexing code
+  path are not implicated on their own. Did not reproduce on retry, and no
+  stack trace was obtainable in the environment it was found in (`ptrace`
+  blocked, no `gdb`/kernel `/proc/<pid>/task/*/stack` access). All threads
+  were parked on `futex_do_wait` with zero CPU time — consistent with a
+  `std::sync::Mutex` (or similar) never being released, not with genuinely
+  slow work. If it recurs: confirm whether `index_job::run`'s *first* `log()`
+  call ever fires (that pins the hang to before `eg_ingest::load_with`,
+  which is pure CPU/IO with no locks, rather than to indexing itself);
+  check whether `app.indexing()`'s guard is genuinely cleared on every path
+  out of the `POST /api/index` handler; and note that the one repeatable
+  difference between the process that hung and the ones that did not was how
+  long it had been running and how much it had already served — a resource
+  that only grows with server age (an accumulating handle, a channel that is
+  never drained, a lock some request forgets to release on an error path) is
+  the shape of bug to look for.
+
 ## Licensing
 
 `MIT OR Apache-2.0`, declared in `[workspace.package]` and carried by
