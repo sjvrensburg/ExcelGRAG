@@ -9,6 +9,7 @@ import {
   DIM,
   DIM_EDGE,
   ROLE_COLORS,
+  drawHighlightedLabel,
   edgeSize,
   nodeColor,
   nodeSize,
@@ -135,6 +136,10 @@ export function GraphView({
         labelFont: "system-ui, sans-serif",
         labelSize: 12,
         labelColor: { color: "#c7cdd8" },
+        // Sigma's built-in hover renderer would draw this same pale
+        // `labelColor` text on its own light pill background — see
+        // `drawHighlightedLabel`'s comment for why that's illegible.
+        defaultDrawNodeHover: drawHighlightedLabel,
         defaultEdgeColor: DIM_EDGE,
         defaultNodeColor: "#8b94a7",
         nodeReducer(node, data) {
@@ -229,9 +234,16 @@ export function GraphView({
     const sigma = sigmaRef.current;
     const node = String(focus.id);
     if (!sigma || !layout.hasNode(node)) return;
-    const x = layout.getNodeAttribute(node, "x");
-    const y = layout.getNodeAttribute(node, "y");
-    sigma.getCamera().animate({ x, y, ratio: 0.35 }, { duration: 350 });
+    // `getNodeDisplayData`, not `layout.getNodeAttribute`: the camera's
+    // x/y are in Sigma's normalized graph space, but `layout` still holds
+    // ForceAtlas2's raw pre-normalization coordinates (which can run into
+    // the hundreds) — animating the camera to those flew it off to empty
+    // space, leaving the canvas blank after every focus.
+    const display = sigma.getNodeDisplayData(node);
+    if (!display) return;
+    sigma
+      .getCamera()
+      .animate({ x: display.x, y: display.y, ratio: 0.35 }, { duration: 350 });
   }, [focus, layout]);
 
   return (

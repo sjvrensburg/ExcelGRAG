@@ -81,3 +81,37 @@ export const ROLE_COLORS: Record<string, string> = {
 // rather than melting into the background.
 export const DIM = "#2b313c";
 export const DIM_EDGE = "#20242c";
+
+// Sigma's built-in hover/highlight label renderer draws a light pill behind
+// the label, but reuses the same fixed `labelColor` (tuned for text sitting
+// directly on the dark canvas) for the text inside it — pale-on-pale,
+// unreadable. This draws the same style of pill with a fixed dark text
+// color instead, so a highlighted or selected node's label stays legible
+// regardless of what `labelColor` is set to.
+export function drawHighlightedLabel(
+  context: CanvasRenderingContext2D,
+  data: { x: number; y: number; size: number; label?: string | null },
+  settings: { labelSize: number; labelFont: string; labelWeight: string },
+): void {
+  if (!data.label) return;
+  const size = settings.labelSize;
+  context.font = `${settings.labelWeight} ${size}px ${settings.labelFont}`;
+  const paddingX = 4;
+  const paddingY = 2;
+  const textWidth = context.measureText(data.label).width;
+  const boxX = data.x + data.size + 3;
+  const boxY = data.y - size / 2 - paddingY;
+  const boxWidth = textWidth + paddingX * 2;
+  const boxHeight = size + paddingY * 2;
+  const radius = 3;
+  context.fillStyle = "#f2f4f8";
+  context.beginPath();
+  if (context.roundRect) {
+    context.roundRect(boxX, boxY, boxWidth, boxHeight, radius);
+  } else {
+    context.rect(boxX, boxY, boxWidth, boxHeight);
+  }
+  context.fill();
+  context.fillStyle = "#12151a";
+  context.fillText(data.label, boxX + paddingX, data.y + size / 3);
+}
