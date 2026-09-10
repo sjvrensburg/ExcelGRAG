@@ -43,7 +43,12 @@ pub async fn run(opts: GuiOptions) -> Result<(), String> {
     // Idempotent: the dev binary and a test harness may both end up calling
     // `run` in the same process; a second `.init()` would panic, so this is
     // best-effort and silent on failure rather than the caller's problem.
+    // `with_writer(stderr)`: stdout is the MCP bridge's stdio JSON-RPC
+    // channel (`mcp_bridge::spawn`, `rmcp::transport::io::stdio`) — a log
+    // line on stdout would land inside the protocol stream and corrupt an
+    // MCP client's framing.
     let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
@@ -93,7 +98,9 @@ pub async fn run(opts: GuiOptions) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", opts.port))
         .await
         .map_err(|e| format!("could not bind 127.0.0.1:{}: {e}", opts.port))?;
-    println!("eg gui serving {} — {}", app.dir, url);
+    // Same reason as the tracing writer above: stdout belongs to the MCP
+    // bridge, so this status line goes to stderr, not stdout.
+    eprintln!("eg gui serving {} — {}", app.dir, url);
     if opts.open {
         let _ = webbrowser::open(&url);
     }
