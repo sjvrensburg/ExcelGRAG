@@ -942,7 +942,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "eg-cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "clap",
  "eg-eval",
@@ -960,7 +960,7 @@ dependencies = [
 
 [[package]]
 name = "eg-eval"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "eg-ingest",
  "eg-model",
@@ -973,14 +973,14 @@ dependencies = [
 
 [[package]]
 name = "eg-fixtures"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "clap",
 ]
 
 [[package]]
 name = "eg-graph"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "eg-ingest",
  "eg-model",
@@ -995,7 +995,7 @@ dependencies = [
 
 [[package]]
 name = "eg-gui"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1024,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "eg-index"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "eg-graph",
  "eg-ingest",
@@ -1041,7 +1041,7 @@ dependencies = [
 
 [[package]]
 name = "eg-ingest"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "blake3",
  "calamine",
@@ -1057,7 +1057,7 @@ dependencies = [
 
 [[package]]
 name = "eg-mcp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "eg-eval",
  "eg-graph",
@@ -1073,7 +1073,7 @@ dependencies = [
 
 [[package]]
 name = "eg-model"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rustc-hash",
  "serde",
@@ -1083,7 +1083,7 @@ dependencies = [
 
 [[package]]
 name = "eg-retrieve"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "eg-graph",
  "eg-index",
@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "eg-structure"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "eg-ingest",
  "eg-model",
