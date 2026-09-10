@@ -70,6 +70,26 @@ code {
   min-width: 0;
 }
 
+/* Explicit column assignments: `.details` only mounts when a node is
+   selected, so implicit grid auto-placement (which packs items into
+   tracks by DOM order) would otherwise shove `.chat-dock` into track 3
+   whenever `.details` is absent, collapsing `.main`'s 1fr to 0. */
+.app > .side:first-child {
+  grid-column: 1;
+}
+
+.app > .main {
+  grid-column: 2;
+}
+
+.app > .details {
+  grid-column: 3;
+}
+
+.app > .chat-dock {
+  grid-column: 4;
+}
+
 /* -- Sidebar ---------------------------------------------------------- */
 
 .side {
