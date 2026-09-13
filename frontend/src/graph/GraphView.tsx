@@ -17,6 +17,10 @@ import {
   nodeColor,
   nodeSize,
 } from "./theme";
+import { computeSheetContext, nodeVisible as sharedNodeVisible } from "./visibility";
+import type { Filters } from "./visibility";
+
+export type { Filters } from "./visibility";
 
 // Sigma's own edge programs: an arrowhead at the target for the directed,
 // "X depends on Y" kinds, a plain line for the structural kinds (whose
@@ -36,16 +40,6 @@ import {
 // for the reasoning.
 const DEPENDENCY_EDGE_PROGRAM = EdgeArrowProgram;
 const STRUCTURAL_EDGE_PROGRAM = EdgeLineProgram;
-
-export interface Filters {
-  kinds: Set<string>;
-  edgeKinds: Set<string>;
-  sheet: string | null;
-  // "only": nothing off-sheet is shown. "context": one dependency hop off the
-  // sheet, plus workbook-scoped names and external targets, stays visible —
-  // the sheet filter otherwise hides the exact relationships tracing needs.
-  sheetMode: "only" | "context";
-}
 
 export type Selection =
   | { entity: "node"; id: number }
@@ -113,50 +107,13 @@ export function GraphView({
 
   // One hop of dependency/name/external context out from each sheet, so
   // "this sheet + context" can keep the relationships tracing actually
-  // needs instead of amputating every off-sheet endpoint. Recomputed only
-  // when the graph itself changes — it does not depend on which sheet is
-  // currently selected, since it is cheap enough to precompute for all of
-  // them at once and index by sheet name.
-  const sheetContext = useMemo(() => {
-    const bySheet = new Map<string, Set<number>>();
-    const nodeSheet = new Map<number, string | undefined>();
-    for (const node of graph.nodes) nodeSheet.set(node.id, node.sheet);
-    const DEP_KINDS = new Set([
-      "DEPENDS_ON",
-      "CROSS_SHEET_REF",
-      "CROSS_WORKBOOK_REF",
-      "REFERENCES_NAME",
-    ]);
-    for (const edge of graph.edges) {
-      if (!DEP_KINDS.has(edge.kind)) continue;
-      const sourceSheet = nodeSheet.get(edge.source);
-      const targetSheet = nodeSheet.get(edge.target);
-      if (sourceSheet) {
-        const set = bySheet.get(sourceSheet) ?? new Set<number>();
-        set.add(edge.target);
-        bySheet.set(sourceSheet, set);
-      }
-      if (targetSheet) {
-        const set = bySheet.get(targetSheet) ?? new Set<number>();
-        set.add(edge.source);
-        bySheet.set(targetSheet, set);
-      }
-    }
-    return bySheet;
-  }, [graph]);
-
-  // Nodes with no sheet of their own that a "this sheet only" view would
-  // otherwise erase outright — workbook-scoped names and external targets —
-  // kept in context mode regardless of which sheet is selected.
-  const sheetless = useMemo(
-    () =>
-      new Set(
-        graph.nodes
-          .filter((n) => !n.sheet && n.kind !== "workbook")
-          .map((n) => n.id),
-      ),
-    [graph],
-  );
+  // needs instead of amputating every off-sheet endpoint. Shared with
+  // `visibleCount` (App.tsx) via `./visibility` so the canvas and the
+  // topbar count agree on what "context" mode actually reveals. Recomputed
+  // only when the graph itself changes — it does not depend on which sheet
+  // is currently selected, since it is cheap enough to precompute for all
+  // of them at once and index by sheet name.
+  const sheetCtx = useMemo(() => computeSheetContext(graph), [graph]);
 
   // Build + lay out. Synchronous ForceAtlas2: a few hundred iterations on
   // graphs of this size (hundreds to ~20k nodes) costs well under a second
@@ -217,17 +174,10 @@ export function GraphView({
 
   // Whether the node filter (kind + sheet scope) hides a node — the edge
   // reducer needs this exact predicate so an edge is never drawn between two
-  // nodes that visibly aren't there.
-  const nodeVisible = (kind: string, sheet: string | undefined, id: number, f: Filters): boolean => {
-    if (!f.kinds.has(kind)) return false;
-    if (f.sheet === null || kind === "workbook") return true;
-    if (sheet === f.sheet) return true;
-    if (f.sheetMode === "context") {
-      if (sheetless.has(id)) return true;
-      if (sheetContext.get(f.sheet)?.has(id)) return true;
-    }
-    return false;
-  };
+  // nodes that visibly aren't there. Delegates to the shared predicate in
+  // `./visibility` rather than a second copy of the sheet-context logic.
+  const nodeVisible = (kind: string, sheet: string | undefined, id: number, f: Filters): boolean =>
+    sharedNodeVisible(kind, sheet, id, f, sheetCtx);
 
   useEffect(() => {
     const element = containerRef.current;
@@ -235,6 +185,12 @@ export function GraphView({
     setReady(false);
     onReady(false);
     setStatus("laying out");
+    // A focus queued for the graph this effect is about to replace must not
+    // survive into the new one: node ids are local to one graph, so an id
+    // queued for graph A can silently resolve to an unrelated node in graph
+    // B once B's Sigma instance becomes ready.
+    pendingFocus.current = null;
+    lastFocus.current = 0;
     let sigma: Sigma | null = null;
     let disposed = false;
     // Let the status paint before Sigma mounts. The layout above already ran
@@ -292,7 +248,12 @@ export function GraphView({
             out.forceLabel = true;
             out.zIndex = 3;
           }
-          if (s?.entity === "edge") {
+          // `layout.hasEdge` guards a selection left over from a graph this
+          // `layout` no longer represents (e.g. a selection whose reset
+          // hasn't committed yet) — `layout.source`/`target` throw on an
+          // unknown edge key, which would otherwise break every node's
+          // reducer call for the whole canvas at once.
+          if (s?.entity === "edge" && layout.hasEdge(s.id)) {
             const isEndpoint =
               layout.source(s.id) === node || layout.target(s.id) === node;
             if (isEndpoint) {
@@ -309,14 +270,16 @@ export function GraphView({
           if (!f.edgeKinds.has(kind)) {
             return { ...data, hidden: true } as DisplayData;
           }
-          const sourceId = Number(layout.source(edge));
-          const targetId = Number(layout.target(edge));
-          const sourceKind = String(layout.getNodeAttribute(layout.source(edge), "kind"));
-          const targetKind = String(layout.getNodeAttribute(layout.target(edge), "kind"));
-          const sourceSheet = layout.getNodeAttribute(layout.source(edge), "sheet") as
+          const sourceNode = layout.source(edge);
+          const targetNode = layout.target(edge);
+          const sourceId = Number(sourceNode);
+          const targetId = Number(targetNode);
+          const sourceKind = String(layout.getNodeAttribute(sourceNode, "kind"));
+          const targetKind = String(layout.getNodeAttribute(targetNode, "kind"));
+          const sourceSheet = layout.getNodeAttribute(sourceNode, "sheet") as
             | string
             | undefined;
-          const targetSheet = layout.getNodeAttribute(layout.target(edge), "sheet") as
+          const targetSheet = layout.getNodeAttribute(targetNode, "sheet") as
             | string
             | undefined;
           // Hide edges whose endpoints the node filter hid; a visible edge

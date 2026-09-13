@@ -313,28 +313,29 @@ pub(crate) fn ask_engine_for_node(
     render_opts: &eg_retrieve::RenderOptions,
 ) -> Result<AskEngineResult, String> {
     let hash = resolve_hash(app, workbook)?;
-    let state = app.engine();
-    let stored = state
-        .corpus
-        .get(&hash)
-        .map_err(|e| format!("could not read the stored graph: {e}"))?
-        .ok_or_else(|| format!("the corpus no longer holds {hash}"))?;
+    // `Corpus::get` returns an owned `StoredGraph`, not a borrow of the
+    // engine lock, so the lock only needs to be held for the read itself —
+    // matching `ask_engine`'s own scoping, not the wider span a single
+    // `drop(state)` further down used to cover.
+    let stored = {
+        let state = app.engine();
+        state
+            .corpus
+            .get(&hash)
+            .map_err(|e| format!("could not read the stored graph: {e}"))?
+            .ok_or_else(|| format!("the corpus no longer holds {hash}"))?
+    };
     let graph = &stored.graph;
     let index = petgraph::graph::NodeIndex::new(node_id as usize);
     if index.index() >= graph.node_count() {
         return Err(format!("node {node_id} is not in {hash}"));
     }
     let node = &graph[index];
-    let sheet_name = node.sheet().and_then(|id| {
-        graph.node_weights().find_map(|n| match n {
-            eg_graph::node::Node::Sheet(s) if s.id == id => Some(s.name.clone()),
-            _ => None,
-        })
-    });
-    let a1 = node.range().map(|r| match &sheet_name {
-        Some(name) => r.to_a1_with_sheet(name),
-        None => format!("{}!{}", r.sheet, r.to_a1()),
-    });
+    // The same sheet-name map `dto::graph_dto` builds in one pass, not a
+    // `find_map` scan of every node per lookup.
+    let sheet_names = dto::sheet_names(graph);
+    let sheet_name = node.sheet().and_then(|id| sheet_names.get(&id).cloned());
+    let a1 = node.range().map(|r| dto::cite(r, &sheet_names));
     let hit = eg_index::Hit {
         score: 1.0,
         workbook: hash.clone(),
@@ -345,32 +346,15 @@ pub(crate) fn ask_engine_for_node(
         label: node.label(),
         a1,
     };
-    let expanded = eg_retrieve::expand(&state.corpus, std::slice::from_ref(&hit), opts)
-        .map_err(|e| format!("expansion failed: {e}"))?;
-    drop(state);
+    let expanded = {
+        let state = app.engine();
+        eg_retrieve::expand(&state.corpus, std::slice::from_ref(&hit), opts)
+            .map_err(|e| format!("expansion failed: {e}"))?
+    };
     let rendered = eg_retrieve::render(&expanded, render_opts);
     let evidence = format!("selected: {}", hit.label);
     Ok(AskEngineResult {
-        // Not a ranking: the seed is a direct selection, not a query result.
-        // `verdict: "full"` says so — every "content word" (there is none) is
-        // trivially accounted for by the thing the user pointed at.
-        search_dto: SearchDto {
-            hits: vec![dto::HitDto {
-                score: hit.score,
-                workbook: hit.workbook.clone(),
-                node: hit.node,
-                kind: hit.kind.as_str().to_string(),
-                sheet: hit.sheet.clone(),
-                label: hit.label.clone(),
-                a1: hit.a1.clone(),
-            }],
-            verdict: "full".to_string(),
-            evidence: evidence.clone(),
-            warning: None,
-            matched: Vec::new(),
-            unmatched: Vec::new(),
-            both_halves: true,
-        },
+        search_dto: dto::selection_search_dto(&hit, evidence.clone()),
         retrieved_dto: dto::retrieved_dto(&expanded),
         passage: rendered.text,
         citations: rendered.citations,

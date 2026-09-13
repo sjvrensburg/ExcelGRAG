@@ -3,7 +3,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { connectEvents, getAsk, getChatHistory, getGraph, getNodeDetail, getSearch, postChat } from "./api";
 import { NO_HIGHLIGHT, GraphView } from "./graph/GraphView";
 import type { Filters, Highlight, Selection } from "./graph/GraphView";
-import { EDGE_KINDS, NODE_KINDS } from "./graph/theme";
+import { visibleCounts } from "./graph/visibility";
+import { EDGE_KINDS, NODE_KINDS, formatEdgeKind } from "./graph/theme";
 import { ChatPanel } from "./components/ChatPanel";
 import { DetailsPanel } from "./components/DetailsPanel";
 import { Legend } from "./components/Legend";
@@ -87,10 +88,15 @@ export default function App() {
     setChatError(null);
     const context = chatContext;
     postChat(text, DEFAULT_SESSION, context ? { workbook: context.workbook, node: context.node } : undefined)
-      .then((turn) => setChatTurns((prev) => appendTurn(prev, turn)))
+      .then((turn) => {
+        setChatTurns((prev) => appendTurn(prev, turn));
+        // Cleared only on success: a failed request leaves the context chip
+        // in place so retrying the same message keeps the same entity
+        // attached instead of silently falling back to a bare text search.
+        setChatContext(null);
+      })
       .catch((e) => setChatError(message(e)))
       .finally(() => setChatBusy(false));
-    setChatContext(null);
   }, [chatContext]);
 
   const log = useCallback((line: string) => {
@@ -288,17 +294,36 @@ export default function App() {
               // against the graph's actual edges in either direction, since
               // a dependency edge's `via` parent can be either endpoint
               // depending on which way the walk crossed it.
+              //
+              // Two lookups, not one: a reciprocal pair (A depends on B and
+              // B depends on A, same kind) would otherwise collide on one
+              // Map key and silently lose whichever edge was indexed first —
+              // every key here maps to a list, not a single id, so both
+              // survive. A containment hop (`Role::Ancestor`/`Child`) carries
+              // no `edge_kind` at all (see `dto::retrieved_dto`), so it falls
+              // back to "the edge between these two nodes, any kind" instead
+              // of being dropped from the highlight outright.
               const edgeIds = new Set<string>();
               if (currentGraph.current) {
-                const byPair = new Map<string, string>();
+                const push = (m: Map<string, string[]>, key: string, id: string) => {
+                  const list = m.get(key);
+                  if (list) list.push(id);
+                  else m.set(key, [id]);
+                };
+                const byKindPair = new Map<string, string[]>();
+                const byPair = new Map<string, string[]>();
                 for (const e of currentGraph.current.edges) {
-                  byPair.set(`${e.source}:${e.target}:${e.kind}`, e.id);
-                  byPair.set(`${e.target}:${e.source}:${e.kind}`, e.id);
+                  push(byKindPair, `${e.source}:${e.target}:${e.kind}`, e.id);
+                  push(byKindPair, `${e.target}:${e.source}:${e.kind}`, e.id);
+                  push(byPair, `${e.source}:${e.target}`, e.id);
+                  push(byPair, `${e.target}:${e.source}`, e.id);
                 }
                 for (const n of book.nodes) {
-                  if (n.via === undefined || !n.edge_kind) continue;
-                  const id = byPair.get(`${n.node}:${n.via}:${n.edge_kind}`);
-                  if (id) edgeIds.add(id);
+                  if (n.via === undefined) continue;
+                  const ids = n.edge_kind
+                    ? byKindPair.get(`${n.node}:${n.via}:${n.edge_kind}`)
+                    : byPair.get(`${n.node}:${n.via}`);
+                  ids?.forEach((id) => edgeIds.add(id));
                 }
               }
               setHighlight({ roles, edgeIds, workbook: book.hash });
@@ -397,11 +422,14 @@ export default function App() {
     if (!edge) return;
     const source = graph.nodes.find((n) => n.id === edge.source);
     const target = graph.nodes.find((n) => n.id === edge.target);
-    const label = `${source?.label ?? edge.source} → ${target?.label ?? edge.target} (${edge.kind.replaceAll("_", " ").toLowerCase()})`;
+    const label = `${source?.label ?? edge.source} → ${target?.label ?? edge.target} (${formatEdgeKind(edge.kind)})`;
     setChatContext({ workbook: hash, node: edge.source, label });
   }, [graph, selection]);
 
   const current = workbooks.find((w) => w.hash === currentHash.current) ?? null;
+  // Computed once per render, not once per topbar stat: `visibleCounts` walks
+  // every node and edge, and the two figures used to each redo that walk.
+  const counts = graph ? visibleCounts(graph, filters) : null;
 
   return (
     <div className="app">
@@ -435,10 +463,10 @@ export default function App() {
           <div className="topbar-title">
             {current ? fileName(current.path) : graphBusy ? "opening…" : "no workbook open"}
           </div>
-          {graph && (
+          {graph && counts && (
             <div className="topbar-stats">
-              {fmt(visibleCount(graph, filters).nodes)}/{fmt(graph.nodes.length)} nodes ·{" "}
-              {fmt(visibleCount(graph, filters).edges)}/{fmt(graph.edges.length)} edges
+              {fmt(counts.nodes)}/{fmt(graph.nodes.length)} nodes ·{" "}
+              {fmt(counts.edges)}/{fmt(graph.edges.length)} edges
               {!graph.formula_groups && " · formula groups omitted above the storage cap"}
               {(filters.kinds.size < NODE_KINDS.length ||
                 filters.edgeKinds.size < EDGE_KINDS.length ||
@@ -538,36 +566,11 @@ function applyHighlightFromSearch(
   setHighlight({ roles, edgeIds: new Set(), workbook: openHash });
 }
 
-function visibleCount(graph: GraphDto, filters: Filters): { nodes: number; edges: number } {
-  const nodeOk = (n: GraphDto["nodes"][number]) => {
-    if (!filters.kinds.has(n.kind)) return false;
-    if (filters.sheet === null || n.kind === "workbook") return true;
-    return n.sheet === filters.sheet;
-  };
-  // An approximation for the topbar count when `sheetMode` is "context":
-  // it counts strict per-sheet visibility rather than replaying the
-  // dependency-hop context walk GraphView does for rendering, so it can
-  // under-count against what's actually drawn. Good enough for "roughly how
-  // much is on screen"; the canvas itself is the source of truth for what a
-  // given node's visibility actually is.
-  const nodeIds = new Set(graph.nodes.filter(nodeOk).map((n) => n.id));
-  let edges = 0;
-  for (const e of graph.edges) {
-    if (!filters.edgeKinds.has(e.kind)) continue;
-    if (filters.sheetMode === "context") {
-      edges += 1;
-      continue;
-    }
-    if (nodeIds.has(e.source) && nodeIds.has(e.target)) edges += 1;
-  }
-  return { nodes: nodeIds.size, edges };
-}
-
 function edgeTooltip(graph: GraphDto, edge: EdgeDto): string {
   const source = graph.nodes.find((n) => n.id === edge.source);
   const target = graph.nodes.find((n) => n.id === edge.target);
   const weight = edge.weight > 1 ? ` ×${edge.weight.toLocaleString("en-US")}` : "";
-  return `${source?.label ?? edge.source} — ${edge.kind.replaceAll("_", " ").toLowerCase()}${weight} → ${target?.label ?? edge.target}`;
+  return `${source?.label ?? edge.source} — ${formatEdgeKind(edge.kind)}${weight} → ${target?.label ?? edge.target}`;
 }
 
 function message(e: unknown): string {

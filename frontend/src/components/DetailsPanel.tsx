@@ -1,5 +1,5 @@
 import type { Selection } from "../graph/GraphView";
-import { EDGE_DIRECTION_NOTE } from "../graph/theme";
+import { EDGE_DIRECTION_NOTE, formatEdgeKind } from "../graph/theme";
 import type { EdgeDto, GraphDto, NodeDetailDto, NodeDto } from "../types";
 
 interface Props {
@@ -150,7 +150,7 @@ function EdgeDetails({
   return (
     <aside className="details">
       <div className="details-head">
-        <div className="details-title">{edge.kind.replaceAll("_", " ").toLowerCase()}</div>
+        <div className="details-title">{formatEdgeKind(edge.kind)}</div>
         <button className="close" onClick={onClose} aria-label="close" />
       </div>
 
