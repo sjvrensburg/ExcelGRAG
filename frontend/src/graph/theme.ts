@@ -31,17 +31,31 @@ export const NODE_COLORS: Record<string, string> = {
   "external workbook": "#79828f",
 };
 
-// Structural edges recede so the dependency edges they sit under can read.
+// Structural edges recede so the dependency edges they sit under can read,
+// but "recede" still means visible against the canvas background
+// (contrast ~3:1 for these two, vs ~7-8:1 for the dependency kinds) — the
+// previous near-background values (~1.25:1) made every edge on the canvas
+// read as the same non-color regardless of kind.
 export const EDGE_COLORS: Record<string, string> = {
-  CONTAINS: "#272e3a",
-  HEADER_OF: "#39424f",
+  CONTAINS: "#3a4250",
+  HEADER_OF: "#4a5566",
   DEPENDS_ON: "#5aa2e8",
   CROSS_SHEET_REF: "#e2954d",
   CROSS_WORKBOOK_REF: "#e05b5b",
   REFERENCES_NAME: "#41b287",
 };
 
+// The direction convention every dependency-kind edge follows: source reads
+// target. Shown in the legend so the arrowhead's meaning doesn't have to be
+// guessed from the canvas alone.
+export const EDGE_DIRECTION_NOTE =
+  "arrows point from what depends to what it depends on";
+
 export const STRUCTURAL_EDGES = new Set(["CONTAINS", "HEADER_OF"]);
+
+export function edgeColor(kind: string): string {
+  return EDGE_COLORS[kind] ?? "#5b6373";
+}
 
 export function nodeColor(kind: string): string {
   return NODE_COLORS[kind] ?? "#8b94a7";

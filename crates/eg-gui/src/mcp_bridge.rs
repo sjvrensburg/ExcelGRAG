@@ -93,7 +93,8 @@ impl McpBridge {
                     .get("session_id")
                     .and_then(Value::as_str)
                     .unwrap_or(chat::DEFAULT_SESSION);
-                match chat::run_turn(&self.app, session_id, TurnSource::Agent, message).await {
+                match chat::run_turn(&self.app, session_id, TurnSource::Agent, message, None).await
+                {
                     Ok(turn) => CallToolResult::success(vec![ContentBlock::text(turn.answer)]),
                     Err(message) => CallToolResult::error(vec![ContentBlock::text(message)]),
                 }

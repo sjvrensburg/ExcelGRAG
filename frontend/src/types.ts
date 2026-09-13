@@ -24,6 +24,21 @@ export interface GraphDto {
   node_kinds: Record<string, number>;
   edge_kinds: Record<string, number>;
   sheets: SheetDto[];
+  coverage: CoverageDto;
+}
+
+// What the aggregate graph above omits, and why — see crates/eg-gui/src/dto.rs.
+export interface CoverageDto {
+  references_scanned: number;
+  references_lifted: number;
+  references_within_source_region: number;
+  references_cross_sheet: number;
+  references_external: number;
+  references_dangling: number;
+  references_unpopulated_target: number;
+  names_resolved: number;
+  names_not_defined: number;
+  unknown_sheets: [string, number][];
 }
 
 export interface NodeDto {
@@ -38,6 +53,7 @@ export interface NodeDto {
 }
 
 export interface EdgeDto {
+  id: string;
   source: number;
   target: number;
   kind: string;
