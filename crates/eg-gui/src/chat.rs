@@ -23,6 +23,18 @@ use crate::dto::{ChatTurnDto, TurnSourceDto, WsEvent};
 
 pub const DEFAULT_SESSION: &str = "default";
 
+/// A selection made on the canvas, carried alongside a chat message. When
+/// present it settles which entity the turn is about outright: no text
+/// search, no session-scope fallback, no LLM condensation of a follow-up
+/// against history. That is the point of it — a label like "Total" recurs
+/// across sheets and workbooks, and a stale session can be scoped to a
+/// workbook the user has since closed; an explicit node id cannot drift.
+#[derive(Clone)]
+pub struct EntityContext {
+    pub workbook: String,
+    pub node: u32,
+}
+
 /// How many prior turns' worth of history to hand the LLM when condensing a
 /// follow-up. Bounded so a long-running session's context request doesn't
 /// grow without limit.
@@ -140,6 +152,7 @@ pub async fn run_turn(
     session_id: &str,
     source: TurnSource,
     message: &str,
+    context: Option<EntityContext>,
 ) -> Result<ChatTurnDto, String> {
     // 1. Resolve session (sessions lock, released before engine/LLM work).
     let (workbook, sheet, history) = {
@@ -160,10 +173,12 @@ pub async fn run_turn(
         (session.workbook.clone(), session.sheet.clone(), history)
     };
 
-    // 2. Condense (no lock held) — only with an LLM configured and history
-    // to resolve a follow-up against.
+    // 2. Condense (no lock held) — only with an LLM configured, history to
+    // resolve a follow-up against, and no explicit selection: a structured
+    // context already says exactly what the turn is about, so condensing
+    // free text against it would be answering a question nobody asked.
     let resolved_query = match &app.llm {
-        Some(llm) if llm.privacy.allows_llm() && !history.is_empty() => {
+        Some(llm) if context.is_none() && llm.privacy.allows_llm() && !history.is_empty() => {
             Some(llm.condense(&history, message).await)
         }
         _ => None,
@@ -172,28 +187,46 @@ pub async fn run_turn(
         .clone()
         .unwrap_or_else(|| message.to_string());
 
-    // 3. Engine step: find -> expand -> render, exactly as `/api/ask`. Runs
-    // on the blocking pool; the engine lock lives and dies inside it.
+    // 3. Engine step: exactly `/api/ask`'s find -> expand -> render when
+    // there is no explicit selection; a direct expand from the selected node
+    // when there is one, so an explicit selection always outranks session
+    // scope and query condensation. Runs on the blocking pool; the engine
+    // lock lives and dies inside it.
     let app_for_engine = Arc::clone(app);
     let workbook_for_engine = workbook.clone();
     let sheet_for_engine = sheet.clone();
-    let engine_result = tokio::task::spawn_blocking(move || {
-        let params = SearchParams {
-            q: query,
-            workbook: workbook_for_engine,
-            sheet: sheet_for_engine,
-            limit: None,
-            lexical_only: None,
-        };
-        api::ask_engine(
+    let context_for_engine = context.clone();
+    let engine_result = tokio::task::spawn_blocking(move || match context_for_engine {
+        Some(ctx) => api::ask_engine_for_node(
             &app_for_engine,
-            &params,
+            &ctx.workbook,
+            ctx.node,
             &eg_retrieve::ExpandOptions::default(),
             &eg_retrieve::RenderOptions::default(),
-        )
+        ),
+        None => {
+            let params = SearchParams {
+                q: query,
+                workbook: workbook_for_engine,
+                sheet: sheet_for_engine,
+                limit: None,
+                lexical_only: None,
+            };
+            api::ask_engine(
+                &app_for_engine,
+                &params,
+                &eg_retrieve::ExpandOptions::default(),
+                &eg_retrieve::RenderOptions::default(),
+            )
+        }
     })
     .await
     .map_err(|e| format!("the chat turn panicked: {e}"))??;
+    let resolved_query = if context.is_some() {
+        Some(engine_result.evidence.clone())
+    } else {
+        resolved_query
+    };
 
     // 4. Compose (no lock held). `Values` mode reads cited cells through the
     // existing, tested `read_cells` MCP tool rather than re-deriving A1
@@ -342,6 +375,7 @@ mod tests {
             DEFAULT_SESSION,
             TurnSource::Human,
             "bad debt provision",
+            None,
         )
         .await
         .expect("the turn runs");
@@ -365,6 +399,7 @@ mod tests {
             DEFAULT_SESSION,
             TurnSource::Human,
             "bad debt provision",
+            None,
         )
         .await
         .expect("the first turn runs");
@@ -374,14 +409,56 @@ mod tests {
         // A vague follow-up, with no sheet name of its own — it should still
         // land on the same sheet, via the sticky scope carried from turn 1,
         // not because the words happen to match it too.
-        let second = run_turn(&app, DEFAULT_SESSION, TurnSource::Human, "what about it")
-            .await
-            .expect("the second turn runs");
+        let second = run_turn(
+            &app,
+            DEFAULT_SESSION,
+            TurnSource::Human,
+            "what about it",
+            None,
+        )
+        .await
+        .expect("the second turn runs");
         if let Some(citation) = second.citations.first() {
             assert!(
                 citation.starts_with(&first_sheet),
                 "follow-up citation {citation:?} should stay on {first_sheet:?} via sticky scope"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn an_explicit_selection_overrides_the_free_text_query() {
+        let (app, _dir) = indexed_app().await;
+        let (hash, node_id) = {
+            let state = app.engine();
+            let (hash, _) = state.resolve(None).expect("one workbook in the corpus");
+            let stored = state
+                .corpus
+                .get(&hash)
+                .expect("the stored graph reads back")
+                .expect("the workbook is in the corpus");
+            (hash, stored.root)
+        };
+        // The message text names nothing in the workbook; only the explicit
+        // selection can ground an answer.
+        let turn = run_turn(
+            &app,
+            DEFAULT_SESSION,
+            TurnSource::Human,
+            "what is this?",
+            Some(EntityContext {
+                workbook: hash,
+                node: node_id,
+            }),
+        )
+        .await
+        .expect("the turn runs");
+        assert!(
+            turn.resolved_query
+                .as_deref()
+                .is_some_and(|q| q.starts_with("selected:")),
+            "an explicit selection should be recorded as what the turn actually answered, got {:?}",
+            turn.resolved_query
+        );
     }
 }
