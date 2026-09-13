@@ -33,9 +33,13 @@ export const NODE_COLORS: Record<string, string> = {
 
 // Structural edges recede so the dependency edges they sit under can read,
 // but "recede" still means visible against the canvas background
-// (contrast ~3:1 for these two, vs ~7-8:1 for the dependency kinds) — the
-// previous near-background values (~1.25:1) made every edge on the canvas
-// read as the same non-color regardless of kind.
+// (contrast ~1.9:1 for CONTAINS and ~2.6:1 for HEADER_OF, computed by WCAG
+// relative luminance against the #0b0d10 canvas background in styles.css,
+// vs ~7-8:1 for the dependency kinds) — the previous near-background values
+// (~1.25:1) made every edge on the canvas read as the same non-color
+// regardless of kind. CONTAINS in particular is still a modest improvement,
+// not a legible-on-its-own color; it reads mainly by contrast with the
+// dependency kinds around it, not in isolation.
 export const EDGE_COLORS: Record<string, string> = {
   CONTAINS: "#3a4250",
   HEADER_OF: "#4a5566",
@@ -55,6 +59,13 @@ export const STRUCTURAL_EDGES = new Set(["CONTAINS", "HEADER_OF"]);
 
 export function edgeColor(kind: string): string {
   return EDGE_COLORS[kind] ?? "#5b6373";
+}
+
+// The one place an edge kind (`DEPENDS_ON`) becomes a human sentence fragment
+// ("depends on") — was copy-pasted separately in App.tsx's edgeTooltip and
+// askAboutSelection and in DetailsPanel.tsx's describeEdge/EdgeDetails title.
+export function formatEdgeKind(kind: string): string {
+  return kind.replaceAll("_", " ").toLowerCase();
 }
 
 export function nodeColor(kind: string): string {

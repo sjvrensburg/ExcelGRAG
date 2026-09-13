@@ -166,16 +166,39 @@ pub struct SheetDto {
     pub formula_cells: u64,
 }
 
+/// Sheet names by id, in one pass over the graph — the lookup every ranged
+/// node's citation and sheet label needs. Shared rather than re-scanned per
+/// node: a `node_weights().find_map(...)` per call is the one-pass-per-column
+/// mistake `eg-structure`'s docs warn about, just at the node-lookup layer
+/// instead of the cell layer.
+pub fn sheet_names(graph: &eg_graph::Graph) -> HashMap<SheetId, String> {
+    graph
+        .node_weights()
+        .filter_map(|n| match n {
+            Node::Sheet(sheet) => Some((sheet.id, sheet.name.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A range, cited the way `eg` does: `'Q3 Sales'!B2:D40`, sheet and all — or,
+/// for a sheet id this map doesn't resolve (a graph inconsistency, not the
+/// ordinary case), a citation that at least says which sheet id rather than
+/// silently guessing a name.
+pub fn cite(range: RangeRef, sheet_names: &HashMap<SheetId, String>) -> String {
+    match sheet_names.get(&range.sheet) {
+        Some(name) => range.to_a1_with_sheet(name),
+        None => format!("{}!{}", range.sheet, range.to_a1()),
+    }
+}
+
 pub fn graph_dto(stored: &StoredGraph) -> GraphDto {
     let graph = &stored.graph;
 
-    // Sheet names by id, so every ranged node can cite itself the way
-    // `eg` does: `'Q3 Sales'!B2:D40`, sheet and all.
-    let mut sheet_names: HashMap<SheetId, String> = HashMap::new();
+    let sheet_names = sheet_names(graph);
     let mut sheets = Vec::new();
     for index in graph.node_indices() {
         if let Node::Sheet(sheet) = &graph[index] {
-            sheet_names.insert(sheet.id, sheet.name.clone());
             sheets.push(SheetDto {
                 node: index.index() as u32,
                 name: sheet.name.clone(),
@@ -187,10 +210,7 @@ pub fn graph_dto(stored: &StoredGraph) -> GraphDto {
     }
     sheets.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let cite = |range: RangeRef| match sheet_names.get(&range.sheet) {
-        Some(name) => range.to_a1_with_sheet(name),
-        None => format!("{}!{}", range.sheet, range.to_a1()),
-    };
+    let cite_range = |range: RangeRef| cite(range, &sheet_names);
 
     // Containment parents first, so node flattening can point at them.
     let mut parents: HashMap<u32, u32> = HashMap::new();
@@ -214,7 +234,7 @@ pub fn graph_dto(stored: &StoredGraph) -> GraphDto {
                 id: index.index() as u32,
                 kind: node.kind().as_str().to_string(),
                 label: node.label(),
-                a1: node.range().map(&cite),
+                a1: node.range().map(&cite_range),
                 sheet: node.sheet().and_then(|id| sheet_names.get(&id).cloned()),
                 cells: match node {
                     Node::Sheet(s) => Some(s.cells),
@@ -366,27 +386,45 @@ pub struct SearchDto {
     pub both_halves: bool,
 }
 
+fn hit_dto(hit: &eg_index::Hit) -> HitDto {
+    HitDto {
+        score: hit.score,
+        workbook: hit.workbook.clone(),
+        node: hit.node,
+        kind: hit.kind.as_str().to_string(),
+        sheet: hit.sheet.clone(),
+        label: hit.label.clone(),
+        a1: hit.a1.clone(),
+    }
+}
+
 pub fn search_dto(found: &Search) -> SearchDto {
     SearchDto {
-        hits: found
-            .hits
-            .iter()
-            .map(|hit| HitDto {
-                score: hit.score,
-                workbook: hit.workbook.clone(),
-                node: hit.node,
-                kind: hit.kind.as_str().to_string(),
-                sheet: hit.sheet.clone(),
-                label: hit.label.clone(),
-                a1: hit.a1.clone(),
-            })
-            .collect(),
+        hits: found.hits.iter().map(hit_dto).collect(),
         verdict: found.verdict().as_str().to_string(),
         evidence: found.evidence(),
         warning: found.warning().map(|w| w.to_string()),
         matched: found.matched.clone(),
         unmatched: found.unmatched.clone(),
         both_halves: found.both_halves,
+    }
+}
+
+/// A `SearchDto` for a direct canvas selection rather than a ranked search —
+/// see `api::ask_engine_for_node`. Not a ranking: the seed is exact, so every
+/// "content word" (there is none) is trivially accounted for by the thing the
+/// user pointed at. Kept here, next to `search_dto`, so the two `SearchDto`
+/// constructors are read together rather than one living beside `HitDto`'s
+/// only other conversion site.
+pub fn selection_search_dto(hit: &eg_index::Hit, evidence: String) -> SearchDto {
+    SearchDto {
+        hits: vec![hit_dto(hit)],
+        verdict: "full".to_string(),
+        evidence,
+        warning: None,
+        matched: Vec::new(),
+        unmatched: Vec::new(),
+        both_halves: true,
     }
 }
 
