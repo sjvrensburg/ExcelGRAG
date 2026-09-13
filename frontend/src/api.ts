@@ -71,12 +71,24 @@ export async function postIndex(body: {
 
 // The shared chat session: a human's turn here and an agent's `chat` MCP
 // tool call run the same pipeline server-side and land in the same log,
-// broadcast to every tab as a `chat_turn` WsEvent.
-export function postChat(message: string, sessionId?: string): Promise<ChatTurnDto> {
+// broadcast to every tab as a `chat_turn` WsEvent. `context`, when given,
+// names the node the user had selected on the canvas — it settles which
+// entity the turn is about, overriding both free-text search and any
+// session scope carried from an earlier turn (see chat::EntityContext).
+export function postChat(
+  message: string,
+  sessionId?: string,
+  context?: { workbook: string; node: number },
+): Promise<ChatTurnDto> {
   return json(fetch("/api/chat", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ message, session_id: sessionId }),
+    body: JSON.stringify({
+      message,
+      session_id: sessionId,
+      workbook: context?.workbook,
+      node: context?.node,
+    }),
   }));
 }
 

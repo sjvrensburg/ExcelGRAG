@@ -300,10 +300,82 @@ pub(crate) fn ask_engine(
     })
 }
 
+/// As [`ask_engine`], but the "search" is a selection the user already made
+/// on the canvas rather than free text — the fix for a duplicate label (two
+/// "Total" regions on two sheets) or a stale session scope silently
+/// answering about the wrong entity. Skips `search_engine`/lexical or vector
+/// ranking entirely: the seed is exact, not ranked.
+pub(crate) fn ask_engine_for_node(
+    app: &App,
+    workbook: &str,
+    node_id: u32,
+    opts: &eg_retrieve::ExpandOptions,
+    render_opts: &eg_retrieve::RenderOptions,
+) -> Result<AskEngineResult, String> {
+    let hash = resolve_hash(app, workbook)?;
+    // `Corpus::get` returns an owned `StoredGraph`, not a borrow of the
+    // engine lock, so the lock only needs to be held for the read itself —
+    // matching `ask_engine`'s own scoping, not the wider span a single
+    // `drop(state)` further down used to cover.
+    let stored = {
+        let state = app.engine();
+        state
+            .corpus
+            .get(&hash)
+            .map_err(|e| format!("could not read the stored graph: {e}"))?
+            .ok_or_else(|| format!("the corpus no longer holds {hash}"))?
+    };
+    let graph = &stored.graph;
+    let index = petgraph::graph::NodeIndex::new(node_id as usize);
+    if index.index() >= graph.node_count() {
+        return Err(format!("node {node_id} is not in {hash}"));
+    }
+    let node = &graph[index];
+    // The same sheet-name map `dto::graph_dto` builds in one pass, not a
+    // `find_map` scan of every node per lookup.
+    let sheet_names = dto::sheet_names(graph);
+    let sheet_name = node.sheet().and_then(|id| sheet_names.get(&id).cloned());
+    let a1 = node.range().map(|r| dto::cite(r, &sheet_names));
+    let hit = eg_index::Hit {
+        score: 1.0,
+        workbook: hash.clone(),
+        path: stored.path.clone(),
+        node: node_id,
+        kind: node.kind(),
+        sheet: sheet_name.clone(),
+        label: node.label(),
+        a1,
+    };
+    let expanded = {
+        let state = app.engine();
+        eg_retrieve::expand(&state.corpus, std::slice::from_ref(&hit), opts)
+            .map_err(|e| format!("expansion failed: {e}"))?
+    };
+    let rendered = eg_retrieve::render(&expanded, render_opts);
+    let evidence = format!("selected: {}", hit.label);
+    Ok(AskEngineResult {
+        search_dto: dto::selection_search_dto(&hit, evidence.clone()),
+        retrieved_dto: dto::retrieved_dto(&expanded),
+        passage: rendered.text,
+        citations: rendered.citations,
+        omitted: rendered.omitted,
+        evidence,
+        workbook: Some(hash),
+        sheet: hit.sheet,
+    })
+}
+
 #[derive(Deserialize)]
 struct ChatBody {
     session_id: Option<String>,
     message: String,
+    /// A selection made on the canvas, sent alongside free text so "what is
+    /// this?" resolves to the node the user is looking at rather than to
+    /// whatever the text happens to retrieve. Both fields are required
+    /// together: a bare node id is meaningless without knowing which
+    /// workbook's graph it indexes into.
+    workbook: Option<String>,
+    node: Option<u32>,
 }
 
 /// A human's turn in the shared chat session — the same pipeline an agent's
@@ -315,7 +387,11 @@ async fn post_chat(
     let session_id = body
         .session_id
         .unwrap_or_else(|| chat::DEFAULT_SESSION.to_string());
-    chat::run_turn(&app, &session_id, TurnSource::Human, &body.message)
+    let context = match (body.workbook, body.node) {
+        (Some(workbook), Some(node)) => Some(chat::EntityContext { workbook, node }),
+        _ => None,
+    };
+    chat::run_turn(&app, &session_id, TurnSource::Human, &body.message, context)
         .await
         .map(Json)
         .map_err(internal)

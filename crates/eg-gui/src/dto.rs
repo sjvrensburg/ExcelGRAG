@@ -74,6 +74,10 @@ pub struct GraphDto {
     pub edge_kinds: HashMap<String, u64>,
     /// The sheet layer, which is also the filter-by-sheet list.
     pub sheets: Vec<SheetDto>,
+    /// What the aggregate graph omits and why — the honest scope of "every
+    /// stored node and edge" below. Not itself a bound on `nodes`/`edges`:
+    /// this endpoint always serializes the whole stored graph.
+    pub coverage: CoverageDto,
 }
 
 #[derive(Serialize, Clone)]
@@ -101,6 +105,13 @@ pub struct NodeDto {
 
 #[derive(Serialize)]
 pub struct EdgeDto {
+    /// The petgraph edge index, as a string (JSON numbers lose nothing here,
+    /// but every other id in this DTO layer is spelled as a string-safe
+    /// integer and this keeps the wire type uniform). Stable for as long as
+    /// the graph this came from is — i.e. as long as the corpus serves this
+    /// content hash — which is what lets the frontend hold an edge selection
+    /// across a `refresh()` without re-fetching the whole graph.
+    pub id: String,
     pub source: u32,
     pub target: u32,
     pub kind: String,
@@ -108,6 +119,42 @@ pub struct EdgeDto {
     /// carry 1; a lifted dependency carries its count, which is what makes it
     /// rankable.
     pub weight: u64,
+}
+
+/// What the build could not turn into an ordinary edge, so a view showing
+/// "every stored edge" can say what it is — and is not — a complete map of.
+/// Mirrors the fields of [`eg_graph::report::BuildReport`] that describe
+/// reference coverage; the rest (per-kind node/edge totals) is already
+/// visible as `node_kinds`/`edge_kinds` counts.
+#[derive(Serialize)]
+pub struct CoverageDto {
+    pub references_scanned: u64,
+    pub references_lifted: u64,
+    pub references_within_source_region: u64,
+    pub references_cross_sheet: u64,
+    pub references_external: u64,
+    pub references_dangling: u64,
+    pub references_unpopulated_target: u64,
+    pub names_resolved: u64,
+    pub names_not_defined: u64,
+    /// Missing sheet names a `#REF!`-shaped reference named, most referenced
+    /// first — see `BuildReport::unknown_sheets`.
+    pub unknown_sheets: Vec<(String, u64)>,
+}
+
+fn coverage_dto(report: &eg_graph::report::BuildReport) -> CoverageDto {
+    CoverageDto {
+        references_scanned: report.references_scanned,
+        references_lifted: report.references_lifted,
+        references_within_source_region: report.references_within_source_region,
+        references_cross_sheet: report.references_cross_sheet,
+        references_external: report.references_external,
+        references_dangling: report.references_dangling,
+        references_unpopulated_target: report.references_unpopulated_target,
+        names_resolved: report.names_resolved,
+        names_not_defined: report.names_not_defined,
+        unknown_sheets: report.unknown_sheets.clone(),
+    }
 }
 
 #[derive(Serialize)]
@@ -119,16 +166,39 @@ pub struct SheetDto {
     pub formula_cells: u64,
 }
 
+/// Sheet names by id, in one pass over the graph — the lookup every ranged
+/// node's citation and sheet label needs. Shared rather than re-scanned per
+/// node: a `node_weights().find_map(...)` per call is the one-pass-per-column
+/// mistake `eg-structure`'s docs warn about, just at the node-lookup layer
+/// instead of the cell layer.
+pub fn sheet_names(graph: &eg_graph::Graph) -> HashMap<SheetId, String> {
+    graph
+        .node_weights()
+        .filter_map(|n| match n {
+            Node::Sheet(sheet) => Some((sheet.id, sheet.name.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A range, cited the way `eg` does: `'Q3 Sales'!B2:D40`, sheet and all — or,
+/// for a sheet id this map doesn't resolve (a graph inconsistency, not the
+/// ordinary case), a citation that at least says which sheet id rather than
+/// silently guessing a name.
+pub fn cite(range: RangeRef, sheet_names: &HashMap<SheetId, String>) -> String {
+    match sheet_names.get(&range.sheet) {
+        Some(name) => range.to_a1_with_sheet(name),
+        None => format!("{}!{}", range.sheet, range.to_a1()),
+    }
+}
+
 pub fn graph_dto(stored: &StoredGraph) -> GraphDto {
     let graph = &stored.graph;
 
-    // Sheet names by id, so every ranged node can cite itself the way
-    // `eg` does: `'Q3 Sales'!B2:D40`, sheet and all.
-    let mut sheet_names: HashMap<SheetId, String> = HashMap::new();
+    let sheet_names = sheet_names(graph);
     let mut sheets = Vec::new();
     for index in graph.node_indices() {
         if let Node::Sheet(sheet) = &graph[index] {
-            sheet_names.insert(sheet.id, sheet.name.clone());
             sheets.push(SheetDto {
                 node: index.index() as u32,
                 name: sheet.name.clone(),
@@ -140,10 +210,7 @@ pub fn graph_dto(stored: &StoredGraph) -> GraphDto {
     }
     sheets.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let cite = |range: RangeRef| match sheet_names.get(&range.sheet) {
-        Some(name) => range.to_a1_with_sheet(name),
-        None => format!("{}!{}", range.sheet, range.to_a1()),
-    };
+    let cite_range = |range: RangeRef| cite(range, &sheet_names);
 
     // Containment parents first, so node flattening can point at them.
     let mut parents: HashMap<u32, u32> = HashMap::new();
@@ -167,7 +234,7 @@ pub fn graph_dto(stored: &StoredGraph) -> GraphDto {
                 id: index.index() as u32,
                 kind: node.kind().as_str().to_string(),
                 label: node.label(),
-                a1: node.range().map(&cite),
+                a1: node.range().map(&cite_range),
                 sheet: node.sheet().and_then(|id| sheet_names.get(&id).cloned()),
                 cells: match node {
                     Node::Sheet(s) => Some(s.cells),
@@ -192,6 +259,7 @@ pub fn graph_dto(stored: &StoredGraph) -> GraphDto {
                 .entry(weight.kind.as_str().to_string())
                 .or_default() += 1;
             EdgeDto {
+                id: edge.id().index().to_string(),
                 source: edge.source().index() as u32,
                 target: edge.target().index() as u32,
                 kind: weight.kind.as_str().to_string(),
@@ -210,6 +278,7 @@ pub fn graph_dto(stored: &StoredGraph) -> GraphDto {
         node_kinds,
         edge_kinds,
         sheets,
+        coverage: coverage_dto(&stored.report),
     }
 }
 
@@ -317,27 +386,45 @@ pub struct SearchDto {
     pub both_halves: bool,
 }
 
+fn hit_dto(hit: &eg_index::Hit) -> HitDto {
+    HitDto {
+        score: hit.score,
+        workbook: hit.workbook.clone(),
+        node: hit.node,
+        kind: hit.kind.as_str().to_string(),
+        sheet: hit.sheet.clone(),
+        label: hit.label.clone(),
+        a1: hit.a1.clone(),
+    }
+}
+
 pub fn search_dto(found: &Search) -> SearchDto {
     SearchDto {
-        hits: found
-            .hits
-            .iter()
-            .map(|hit| HitDto {
-                score: hit.score,
-                workbook: hit.workbook.clone(),
-                node: hit.node,
-                kind: hit.kind.as_str().to_string(),
-                sheet: hit.sheet.clone(),
-                label: hit.label.clone(),
-                a1: hit.a1.clone(),
-            })
-            .collect(),
+        hits: found.hits.iter().map(hit_dto).collect(),
         verdict: found.verdict().as_str().to_string(),
         evidence: found.evidence(),
         warning: found.warning().map(|w| w.to_string()),
         matched: found.matched.clone(),
         unmatched: found.unmatched.clone(),
         both_halves: found.both_halves,
+    }
+}
+
+/// A `SearchDto` for a direct canvas selection rather than a ranked search —
+/// see `api::ask_engine_for_node`. Not a ranking: the seed is exact, so every
+/// "content word" (there is none) is trivially accounted for by the thing the
+/// user pointed at. Kept here, next to `search_dto`, so the two `SearchDto`
+/// constructors are read together rather than one living beside `HitDto`'s
+/// only other conversion site.
+pub fn selection_search_dto(hit: &eg_index::Hit, evidence: String) -> SearchDto {
+    SearchDto {
+        hits: vec![hit_dto(hit)],
+        verdict: "full".to_string(),
+        evidence,
+        warning: None,
+        matched: Vec::new(),
+        unmatched: Vec::new(),
+        both_halves: true,
     }
 }
 
