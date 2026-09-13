@@ -31,17 +31,42 @@ export const NODE_COLORS: Record<string, string> = {
   "external workbook": "#79828f",
 };
 
-// Structural edges recede so the dependency edges they sit under can read.
+// Structural edges recede so the dependency edges they sit under can read,
+// but "recede" still means visible against the canvas background
+// (contrast ~1.9:1 for CONTAINS and ~2.6:1 for HEADER_OF, computed by WCAG
+// relative luminance against the #0b0d10 canvas background in styles.css,
+// vs ~7-8:1 for the dependency kinds) — the previous near-background values
+// (~1.25:1) made every edge on the canvas read as the same non-color
+// regardless of kind. CONTAINS in particular is still a modest improvement,
+// not a legible-on-its-own color; it reads mainly by contrast with the
+// dependency kinds around it, not in isolation.
 export const EDGE_COLORS: Record<string, string> = {
-  CONTAINS: "#272e3a",
-  HEADER_OF: "#39424f",
+  CONTAINS: "#3a4250",
+  HEADER_OF: "#4a5566",
   DEPENDS_ON: "#5aa2e8",
   CROSS_SHEET_REF: "#e2954d",
   CROSS_WORKBOOK_REF: "#e05b5b",
   REFERENCES_NAME: "#41b287",
 };
 
+// The direction convention every dependency-kind edge follows: source reads
+// target. Shown in the legend so the arrowhead's meaning doesn't have to be
+// guessed from the canvas alone.
+export const EDGE_DIRECTION_NOTE =
+  "arrows point from what depends to what it depends on";
+
 export const STRUCTURAL_EDGES = new Set(["CONTAINS", "HEADER_OF"]);
+
+export function edgeColor(kind: string): string {
+  return EDGE_COLORS[kind] ?? "#5b6373";
+}
+
+// The one place an edge kind (`DEPENDS_ON`) becomes a human sentence fragment
+// ("depends on") — was copy-pasted separately in App.tsx's edgeTooltip and
+// askAboutSelection and in DetailsPanel.tsx's describeEdge/EdgeDetails title.
+export function formatEdgeKind(kind: string): string {
+  return kind.replaceAll("_", " ").toLowerCase();
+}
 
 export function nodeColor(kind: string): string {
   return NODE_COLORS[kind] ?? "#8b94a7";

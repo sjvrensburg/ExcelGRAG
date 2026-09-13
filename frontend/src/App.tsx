@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { connectEvents, getAsk, getChatHistory, getGraph, getNodeDetail, getSearch, postChat } from "./api";
 import { NO_HIGHLIGHT, GraphView } from "./graph/GraphView";
-import type { Filters, Highlight } from "./graph/GraphView";
-import { EDGE_KINDS, NODE_KINDS } from "./graph/theme";
+import type { Filters, Highlight, Selection } from "./graph/GraphView";
+import { visibleCounts } from "./graph/visibility";
+import { EDGE_KINDS, NODE_KINDS, formatEdgeKind } from "./graph/theme";
 import { ChatPanel } from "./components/ChatPanel";
 import { DetailsPanel } from "./components/DetailsPanel";
 import { Legend } from "./components/Legend";
@@ -11,6 +12,7 @@ import { Sidebar } from "./components/Sidebar";
 import type {
   AskResponse,
   ChatTurnDto,
+  EdgeDto,
   GraphDto,
   NodeDetailDto,
   SearchDto,
@@ -19,6 +21,17 @@ import type {
 } from "./types";
 
 const DEFAULT_SESSION = "default";
+
+// What the chat box will attach to its next message, from "Explain"/"Ask
+// about this" in the details panel. Distinct from canvas selection: a
+// selection alone never sends a chat request (the workflow's own rule), and
+// this is cleared after one turn rather than sticking silently to every
+// follow-up after it.
+interface ChatContext {
+  workbook: string;
+  node: number;
+  label: string;
+}
 
 export default function App() {
   const [connected, setConnected] = useState(false);
@@ -29,14 +42,24 @@ export default function App() {
 
   const [graph, setGraph] = useState<GraphDto | null>(null);
   const [graphBusy, setGraphBusy] = useState(false);
-  const [detail, setDetail] = useState<NodeDetailDto | null>(null);
+  const [selection, setSelection] = useState<Selection | null>(null);
+  const [nodeDetail, setNodeDetail] = useState<NodeDetailDto | null>(null);
+  const [hoverEdge, setHoverEdge] = useState<EdgeDto | null>(null);
   const [focus, setFocus] = useState<{ id: number; nonce: number } | null>(null);
   const focusNonce = useRef(0);
+  // A generation counter guards every selection-triggered fetch: a slow
+  // response for a selection the user has since abandoned (clicked B, closed
+  // the panel, switched workbooks) is dropped rather than reopening the
+  // panel or overwriting what's now shown. Node ids are local to one graph,
+  // so `detail.node.id === selected` alone cannot tell a stale cross-graph
+  // response apart from a fresh one.
+  const selectionGeneration = useRef(0);
 
   const [filters, setFilters] = useState<Filters>({
     kinds: new Set(NODE_KINDS),
     edgeKinds: new Set(EDGE_KINDS),
     sheet: null,
+    sheetMode: "context",
   });
   const [highlight, setHighlight] = useState<Highlight>(NO_HIGHLIGHT);
 
@@ -52,6 +75,7 @@ export default function App() {
   const [chatTurns, setChatTurns] = useState<ChatTurnDto[]>([]);
   const [chatBusy, setChatBusy] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
+  const [chatContext, setChatContext] = useState<ChatContext | null>(null);
 
   useEffect(() => {
     getChatHistory(DEFAULT_SESSION)
@@ -62,11 +86,18 @@ export default function App() {
   const sendChat = useCallback((text: string) => {
     setChatBusy(true);
     setChatError(null);
-    postChat(text, DEFAULT_SESSION)
-      .then((turn) => setChatTurns((prev) => appendTurn(prev, turn)))
+    const context = chatContext;
+    postChat(text, DEFAULT_SESSION, context ? { workbook: context.workbook, node: context.node } : undefined)
+      .then((turn) => {
+        setChatTurns((prev) => appendTurn(prev, turn));
+        // Cleared only on success: a failed request leaves the context chip
+        // in place so retrying the same message keeps the same entity
+        // attached instead of silently falling back to a bare text search.
+        setChatContext(null);
+      })
       .catch((e) => setChatError(message(e)))
       .finally(() => setChatBusy(false));
-  }, []);
+  }, [chatContext]);
 
   const log = useCallback((line: string) => {
     setLogs((previous) => [...previous.slice(-499), line]);
@@ -144,11 +175,14 @@ export default function App() {
 
   const setGraphAndFilters = useCallback((loaded: GraphDto | null) => {
     setGraph(loaded);
-    setDetail(null);
+    selectionGeneration.current += 1;
+    setSelection(null);
+    setNodeDetail(null);
     setHighlight(NO_HIGHLIGHT);
+    setChatContext(null);
     currentHash.current = loaded?.hash ?? null;
     if (loaded) {
-      setFilters({
+      setFilters((f) => ({
         kinds: new Set(
           NODE_KINDS.filter((kind) => (loaded.node_kinds[kind] ?? 0) > 0),
         ),
@@ -156,7 +190,8 @@ export default function App() {
           EDGE_KINDS.filter((kind) => (loaded.edge_kinds[kind] ?? 0) > 0),
         ),
         sheet: null,
-      });
+        sheetMode: f.sheetMode,
+      }));
     }
   }, []);
 
@@ -179,17 +214,41 @@ export default function App() {
   };
 
   // --- Selection ------------------------------------------------------------
-  const select = useCallback(
+  const closeSelection = useCallback(() => {
+    selectionGeneration.current += 1;
+    setSelection(null);
+    setNodeDetail(null);
+  }, []);
+
+  const selectNode = useCallback(
     (id: number) => {
       const hash = currentHash.current;
       if (!hash) return;
       setFocus({ id, nonce: ++focusNonce.current });
+      setSelection({ entity: "node", id });
+      setNodeDetail(null);
+      const generation = ++selectionGeneration.current;
       getNodeDetail(hash, id)
-        .then(setDetail)
-        .catch((e) => log(`could not read the node: ${message(e)}`));
+        .then((detail) => {
+          // Dropped, not applied, if the user moved on while this was in
+          // flight (another click, a close, a workbook switch) — a late
+          // response for A must never reopen or overwrite B's panel.
+          if (generation !== selectionGeneration.current) return;
+          setNodeDetail(detail);
+        })
+        .catch((e) => {
+          if (generation !== selectionGeneration.current) return;
+          log(`could not read the node: ${message(e)}`);
+        });
     },
     [log],
   );
+
+  const selectEdge = useCallback((edge: EdgeDto) => {
+    selectionGeneration.current += 1;
+    setSelection({ entity: "edge", id: edge.id });
+    setNodeDetail(null);
+  }, []);
 
   // --- Queries ---------------------------------------------------------------
   const runSearch = useCallback(
@@ -208,7 +267,7 @@ export default function App() {
         .catch((e) => setQueryError(message(e)))
         .finally(() => setQueryBusy(false));
     },
-    [openWorkbook],
+    [],
   );
 
   const runAsk = useCallback(
@@ -229,12 +288,45 @@ export default function App() {
           if (book) {
             const apply = () => {
               const roles = new Map(book.nodes.map((n) => [n.node, n.role]));
-              const edges = new Set(
-                book.nodes
-                  .map((n) => n.edge_kind)
-                  .filter((k): k is string => k !== undefined),
-              );
-              setHighlight({ roles, edgeKinds: edges, workbook: book.hash });
+              // The exact supporting edges, not "every edge of a kind that
+              // shows up anywhere in the roles": reconstruct each retrieved
+              // node's edge to the node that pulled it in (`via`), matched
+              // against the graph's actual edges in either direction, since
+              // a dependency edge's `via` parent can be either endpoint
+              // depending on which way the walk crossed it.
+              //
+              // Two lookups, not one: a reciprocal pair (A depends on B and
+              // B depends on A, same kind) would otherwise collide on one
+              // Map key and silently lose whichever edge was indexed first —
+              // every key here maps to a list, not a single id, so both
+              // survive. A containment hop (`Role::Ancestor`/`Child`) carries
+              // no `edge_kind` at all (see `dto::retrieved_dto`), so it falls
+              // back to "the edge between these two nodes, any kind" instead
+              // of being dropped from the highlight outright.
+              const edgeIds = new Set<string>();
+              if (currentGraph.current) {
+                const push = (m: Map<string, string[]>, key: string, id: string) => {
+                  const list = m.get(key);
+                  if (list) list.push(id);
+                  else m.set(key, [id]);
+                };
+                const byKindPair = new Map<string, string[]>();
+                const byPair = new Map<string, string[]>();
+                for (const e of currentGraph.current.edges) {
+                  push(byKindPair, `${e.source}:${e.target}:${e.kind}`, e.id);
+                  push(byKindPair, `${e.target}:${e.source}:${e.kind}`, e.id);
+                  push(byPair, `${e.source}:${e.target}`, e.id);
+                  push(byPair, `${e.target}:${e.source}`, e.id);
+                }
+                for (const n of book.nodes) {
+                  if (n.via === undefined) continue;
+                  const ids = n.edge_kind
+                    ? byKindPair.get(`${n.node}:${n.via}:${n.edge_kind}`)
+                    : byPair.get(`${n.node}:${n.via}`);
+                  ids?.forEach((id) => edgeIds.add(id));
+                }
+              }
+              setHighlight({ roles, edgeIds, workbook: book.hash });
               const seed = book.nodes.find((n) => n.role === "seed");
               if (seed) setFocus({ id: seed.node, nonce: ++focusNonce.current });
             };
@@ -254,6 +346,12 @@ export default function App() {
     [openWorkbook],
   );
 
+  // Kept in a ref alongside `graph` state so `runAsk`'s closure (memoized on
+  // `openWorkbook` alone) always reads the graph current at apply-time,
+  // not the one current when the callback was created.
+  const currentGraph = useRef<GraphDto | null>(null);
+  currentGraph.current = graph;
+
   const pendingAsk = useRef<(() => void) | null>(null);
   useEffect(() => {
     if (graph && pendingAsk.current) {
@@ -262,6 +360,13 @@ export default function App() {
       apply();
     }
   }, [graph]);
+
+  const clearHighlight = useCallback(() => {
+    setHighlight(NO_HIGHLIGHT);
+    setMode(null);
+    setSearch(null);
+    setAsk(null);
+  }, []);
 
   // --- Filters ---------------------------------------------------------------
   const toggleKind = useCallback((kind: string) => {
@@ -286,7 +391,45 @@ export default function App() {
     setFilters((f) => ({ ...f, sheet }));
   }, []);
 
+  const setSheetMode = useCallback((sheetMode: "only" | "context") => {
+    setFilters((f) => ({ ...f, sheetMode }));
+  }, []);
+
+  const resetFilters = useCallback(() => {
+    if (!graph) return;
+    setFilters({
+      kinds: new Set(NODE_KINDS.filter((kind) => (graph.node_kinds[kind] ?? 0) > 0)),
+      edgeKinds: new Set(EDGE_KINDS.filter((kind) => (graph.edge_kinds[kind] ?? 0) > 0)),
+      sheet: null,
+      sheetMode: "context",
+    });
+  }, [graph]);
+
+  const askAboutSelection = useCallback(() => {
+    const hash = currentHash.current;
+    if (!hash || !selection || !graph) return;
+    if (selection.entity === "node") {
+      const node = graph.nodes.find((n) => n.id === selection.id);
+      setChatContext({ workbook: hash, node: selection.id, label: node?.label ?? `node ${selection.id}` });
+      return;
+    }
+    // No edge-scoped entity resolution on the server (see chat::EntityContext
+    // — it takes a node, not an edge). The source node — the region whose
+    // formula the edge came from — is the closer of the two endpoints to
+    // "explain this relationship", and the edge's own description already
+    // named both ends deterministically before this button was even shown.
+    const edge = graph.edges.find((e) => e.id === selection.id);
+    if (!edge) return;
+    const source = graph.nodes.find((n) => n.id === edge.source);
+    const target = graph.nodes.find((n) => n.id === edge.target);
+    const label = `${source?.label ?? edge.source} → ${target?.label ?? edge.target} (${formatEdgeKind(edge.kind)})`;
+    setChatContext({ workbook: hash, node: edge.source, label });
+  }, [graph, selection]);
+
   const current = workbooks.find((w) => w.hash === currentHash.current) ?? null;
+  // Computed once per render, not once per topbar stat: `visibleCounts` walks
+  // every node and edge, and the two figures used to each redo that walk.
+  const counts = graph ? visibleCounts(graph, filters) : null;
 
   return (
     <div className="app">
@@ -305,10 +448,10 @@ export default function App() {
         mode={mode}
         onHit={(workbook, node) => {
           if (workbook !== currentHash.current) {
-            pendingAsk.current = () => select(node);
+            pendingAsk.current = () => selectNode(node);
             openWorkbook(workbook);
           } else {
-            select(node);
+            selectNode(node);
           }
         }}
         logs={logs}
@@ -320,10 +463,23 @@ export default function App() {
           <div className="topbar-title">
             {current ? fileName(current.path) : graphBusy ? "opening…" : "no workbook open"}
           </div>
-          {graph && (
+          {graph && counts && (
             <div className="topbar-stats">
-              {fmt(graph.nodes.length)} nodes · {fmt(graph.edges.length)} edges
-              {!graph.formula_groups && " · formula groups on demand"}
+              {fmt(counts.nodes)}/{fmt(graph.nodes.length)} nodes ·{" "}
+              {fmt(counts.edges)}/{fmt(graph.edges.length)} edges
+              {!graph.formula_groups && " · formula groups omitted above the storage cap"}
+              {(filters.kinds.size < NODE_KINDS.length ||
+                filters.edgeKinds.size < EDGE_KINDS.length ||
+                filters.sheet !== null) && (
+                <button className="link-button" onClick={resetFilters} title="Show every kind, every sheet">
+                  reset filters
+                </button>
+              )}
+              {highlight.roles.size > 0 && (
+                <button className="link-button" onClick={clearHighlight} title="Clear the answer/search highlight">
+                  clear highlight
+                </button>
+              )}
             </div>
           )}
           <div className={"connection" + (connected ? "" : " down")}>
@@ -337,10 +493,12 @@ export default function App() {
                 graph={graph}
                 filters={filters}
                 highlight={highlight}
-                selected={detail?.node.id ?? null}
+                selection={selection}
                 focus={focus}
-                onClear={() => setDetail(null)}
-                onSelect={select}
+                onClear={closeSelection}
+                onSelectNode={selectNode}
+                onSelectEdge={selectEdge}
+                onHoverEdge={setHoverEdge}
                 onReady={() => undefined}
               />
               <Legend
@@ -349,7 +507,11 @@ export default function App() {
                 onToggleKind={toggleKind}
                 onToggleEdgeKind={toggleEdgeKind}
                 onSheet={setSheet}
+                onSheetMode={setSheetMode}
               />
+              {hoverEdge && !selection && (
+                <div className="edge-tooltip">{edgeTooltip(graph, hoverEdge)}</div>
+              )}
             </>
           ) : (
             <div className="stage-empty">
@@ -362,16 +524,27 @@ export default function App() {
         </div>
       </main>
 
-      {detail && (
+      {selection && graph && (
         <DetailsPanel
-          detail={detail}
-          onSelect={select}
-          onClose={() => setDetail(null)}
+          graph={graph}
+          selection={selection}
+          nodeDetail={selection.entity === "node" ? nodeDetail : null}
+          onSelectNode={selectNode}
+          onSelectEdge={selectEdge}
+          onClose={closeSelection}
+          onAskAboutSelection={askAboutSelection}
         />
       )}
 
       <aside className="side chat-dock">
-        <ChatPanel turns={chatTurns} busy={chatBusy} error={chatError} onSend={sendChat} />
+        <ChatPanel
+          turns={chatTurns}
+          busy={chatBusy}
+          error={chatError}
+          onSend={sendChat}
+          context={chatContext}
+          onClearContext={() => setChatContext(null)}
+        />
       </aside>
     </div>
   );
@@ -390,7 +563,14 @@ function applyHighlightFromSearch(
       .filter((hit) => hit.workbook === openHash)
       .map((hit) => [hit.node, "seed"]),
   );
-  setHighlight({ roles, edgeKinds: new Set(), workbook: openHash });
+  setHighlight({ roles, edgeIds: new Set(), workbook: openHash });
+}
+
+function edgeTooltip(graph: GraphDto, edge: EdgeDto): string {
+  const source = graph.nodes.find((n) => n.id === edge.source);
+  const target = graph.nodes.find((n) => n.id === edge.target);
+  const weight = edge.weight > 1 ? ` ×${edge.weight.toLocaleString("en-US")}` : "";
+  return `${source?.label ?? edge.source} — ${formatEdgeKind(edge.kind)}${weight} → ${target?.label ?? edge.target}`;
 }
 
 function message(e: unknown): string {
