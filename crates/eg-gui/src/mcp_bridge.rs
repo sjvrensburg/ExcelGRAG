@@ -27,6 +27,7 @@ use serde_json::{json, Value};
 
 use crate::app::App;
 use crate::chat::{self, TurnSource};
+use crate::dto::ChatTurnDto;
 
 const GUI_TOOL_NAMES: &[&str] = &["chat", "gui_show"];
 
@@ -37,12 +38,18 @@ fn gui_tools() -> Vec<Tool> {
             "Talk to this workbook's shared chat session — the same conversation a human sees \
              in the GUI's browser tab. Use this instead of `context`/`search` when you want \
              your question and its answer to show up live for whoever is watching the GUI, with \
-             multi-turn memory (follow-ups carry forward the last workbook/sheet and citations).",
+             multi-turn memory (follow-ups carry forward the last workbook/sheet and citations). \
+             Every call also returns any questions a human routed to you (the \"ask my agent\" \
+             toggle in the browser) that no one has answered yet — there is no push channel, so \
+             this is how you notice them. Answer one with a *second* call passing `reply_to` set \
+             to its id and `message` set to your answer text; that skips the search pipeline \
+             entirely and posts your words directly as the reply.",
             schema_object(json!({
                 "type": "object",
                 "properties": {
-                    "message": { "type": "string", "description": "What to ask, in words." },
+                    "message": { "type": "string", "description": "Normally, what to ask, in words. With `reply_to` set, this is instead your own answer text to that turn — posted as-is, without running search." },
                     "session_id": { "type": "string", "description": "Which chat session — default \"default\", the one the GUI's browser tab shows unless told otherwise." },
+                    "reply_to": { "type": "integer", "description": "The id of a turn a human routed to you (from an earlier call's `pending_for_you`), to answer instead of asking a new question." },
                 },
                 "required": ["message"],
                 "additionalProperties": false,
@@ -71,6 +78,26 @@ fn schema_object(value: Value) -> JsonObject {
     value.as_object().cloned().unwrap_or_default()
 }
 
+/// Prefix an answer with any questions a human routed to the agent that are
+/// still open, so a call that only meant to ask something of its own still
+/// surfaces them — the only "notice" mechanism available without a push
+/// channel from the GUI to the agent (see `chat::Directed`).
+fn with_pending_note(answer: String, pending: &[ChatTurnDto]) -> String {
+    if pending.is_empty() {
+        return answer;
+    }
+    let mut note = String::from(
+        "[pending_for_you: question(s) routed to you in this chat, unanswered — reply with \
+         `chat`'s `reply_to` set to the id]\n",
+    );
+    for turn in pending {
+        note.push_str(&format!("  #{}: {}\n", turn.id, turn.message));
+    }
+    note.push('\n');
+    note.push_str(&answer);
+    note
+}
+
 #[derive(Clone)]
 pub struct McpBridge {
     app: Arc<App>,
@@ -93,9 +120,24 @@ impl McpBridge {
                     .get("session_id")
                     .and_then(Value::as_str)
                     .unwrap_or(chat::DEFAULT_SESSION);
+
+                if let Some(reply_to) = args.get("reply_to").and_then(Value::as_u64) {
+                    return match chat::reply_to_agent_turn(&self.app, session_id, reply_to, message)
+                    {
+                        Ok(turn) => CallToolResult::success(vec![ContentBlock::text(turn.answer)]),
+                        Err(message) => CallToolResult::error(vec![ContentBlock::text(message)]),
+                    };
+                }
+
                 match chat::run_turn(&self.app, session_id, TurnSource::Agent, message, None).await
                 {
-                    Ok(turn) => CallToolResult::success(vec![ContentBlock::text(turn.answer)]),
+                    Ok(turn) => {
+                        let pending = chat::pending_for_agent(&self.app, session_id);
+                        CallToolResult::success(vec![ContentBlock::text(with_pending_note(
+                            turn.answer,
+                            &pending,
+                        ))])
+                    }
                     Err(message) => CallToolResult::error(vec![ContentBlock::text(message)]),
                 }
             }

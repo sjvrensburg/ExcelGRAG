@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{self, SearchParams};
 use crate::app::App;
-use crate::dto::{ChatTurnDto, TurnSourceDto, WsEvent};
+use crate::dto::{ChatTurnDto, DirectedDto, TurnSourceDto, WsEvent};
 
 pub const DEFAULT_SESSION: &str = "default";
 
@@ -56,6 +56,27 @@ impl From<TurnSource> for TurnSourceDto {
     }
 }
 
+/// Who a turn is addressed to, when it is not the built-in find→expand→
+/// render/LLM pipeline that should answer it. The only case today is a human
+/// routing a message to whichever agent is attached over the MCP bridge
+/// instead of the configured LLM — see [[gui-chat-agent-vs-llm-toggle]] in
+/// project memory for why this is asynchronous rather than a synchronous
+/// hand-off: MCP has no client-implemented reverse channel
+/// (`sampling/createMessage`) an agent's Claude Code client can answer today.
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Directed {
+    Agent,
+}
+
+impl From<Directed> for DirectedDto {
+    fn from(directed: Directed) -> Self {
+        match directed {
+            Directed::Agent => DirectedDto::Agent,
+        }
+    }
+}
+
 /// One turn, as persisted. Deliberately the same shape regardless of which
 /// LLM privacy tier produced it: `answer` is either the LLM's composed reply
 /// or, with no LLM configured, the rendered passage itself. Even in
@@ -63,6 +84,14 @@ impl From<TurnSource> for TurnSourceDto {
 /// one request are never written here — only the passage/citations/reply
 /// are, so a corpus's persisted chat history carries no more than `render()`
 /// ever puts in a passage.
+///
+/// A turn directed at the agent (`directed_to = Some(Agent)`) skips all of
+/// that: it is appended with an empty `answer` and no citations, and stays
+/// that way — turns are never mutated in place — until the attached agent
+/// posts a separate turn with `reply_to` set to this one's `id`. Nothing
+/// pushes that reply; the agent notices the open question because `chat`
+/// hands back the session's unanswered ones every time it is called, the
+/// same way a human's own turns already show up live in the browser.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChatTurn {
     pub id: u64,
@@ -73,6 +102,10 @@ pub struct ChatTurn {
     pub citations: Vec<String>,
     pub answer: String,
     pub timestamp: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directed_to: Option<Directed>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<u64>,
 }
 
 impl ChatTurn {
@@ -86,7 +119,15 @@ impl ChatTurn {
             citations: self.citations.clone(),
             answer: self.answer.clone(),
             timestamp: self.timestamp,
+            directed_to: self.directed_to.map(Into::into),
+            reply_to: self.reply_to,
         }
+    }
+
+    /// A turn is waiting on the agent when it was addressed to one and no
+    /// later turn in the session has replied to it yet.
+    fn awaiting_agent(&self) -> bool {
+        matches!(self.directed_to, Some(Directed::Agent))
     }
 }
 
@@ -258,15 +299,7 @@ pub async fn run_turn(
     };
 
     // 5. Re-lock sessions, append, persist, update sticky scope.
-    //
-    // The fallback for a hit that carried no workbook/sheet of its own is
-    // the session's *current* sticky scope, read fresh under this same lock
-    // acquisition — not the `workbook`/`sheet` captured back in step 1. Two
-    // turns can race on one session between step 1 and here (another tab,
-    // or an agent and a human at once); falling back to a step-1 snapshot
-    // would let a slower turn silently revert a faster turn's already
-    // -committed scope update.
-    let mut turn = ChatTurn {
+    let turn = ChatTurn {
         id: 0,
         source,
         message: message.to_string(),
@@ -275,7 +308,36 @@ pub async fn run_turn(
         citations: engine_result.citations,
         answer,
         timestamp: now(),
+        directed_to: None,
+        reply_to: None,
     };
+    commit_turn(
+        app,
+        session_id,
+        turn,
+        Some((engine_result.workbook, engine_result.sheet)),
+    )
+}
+
+/// Append a turn to a session, persist it, and broadcast it — the tail every
+/// kind of turn shares (an engine-answered one, a human's directed-at-agent
+/// one, and an agent's reply to it).
+///
+/// The fallback for a hit that carried no workbook/sheet of its own is the
+/// session's *current* sticky scope, read fresh under this same lock
+/// acquisition — not a snapshot taken earlier in the caller. Two turns can
+/// race on one session between an earlier read and here (another tab, or an
+/// agent and a human at once); falling back to an earlier snapshot would let
+/// a slower turn silently revert a faster turn's already-committed scope
+/// update. `sticky` is `None` for turns that never touch scope (a
+/// directed-at-agent turn and an agent's reply to one neither ran the engine
+/// nor should move where a plain follow-up lands).
+fn commit_turn(
+    app: &Arc<App>,
+    session_id: &str,
+    mut turn: ChatTurn,
+    sticky: Option<(Option<String>, Option<String>)>,
+) -> Result<ChatTurnDto, String> {
     let session_snapshot = {
         let mut sessions = app.sessions();
         let session = sessions
@@ -286,25 +348,107 @@ pub async fn run_turn(
             });
         turn.id = session.turns.last().map(|t| t.id + 1).unwrap_or(1);
         session.turns.push(turn.clone());
-        session.workbook = engine_result
-            .workbook
-            .clone()
-            .or_else(|| session.workbook.clone());
-        session.sheet = engine_result
-            .sheet
-            .clone()
-            .or_else(|| session.sheet.clone());
+        if let Some((workbook, sheet)) = sticky {
+            session.workbook = workbook.or_else(|| session.workbook.clone());
+            session.sheet = sheet.or_else(|| session.sheet.clone());
+        }
         session.clone()
     };
     save_session(&app.dir, &session_snapshot)?;
 
-    // 6. Broadcast (no lock held).
     let dto = turn.to_dto();
     app.send(WsEvent::ChatTurn {
         session_id: session_id.to_string(),
         turn: dto.clone(),
     });
     Ok(dto)
+}
+
+/// Route a human's message to the attached agent instead of the built-in
+/// pipeline: append it with an empty answer and `directed_to = Agent`, and
+/// stop — no search, no LLM. It stays unanswered in the persisted session
+/// until an agent posts a reply (see [`reply_to_agent_turn`]); nothing pages
+/// the agent, so a corpus with no MCP client attached simply shows the
+/// question as permanently pending, which is visible in the browser rather
+/// than silently dropped.
+pub fn direct_to_agent(
+    app: &Arc<App>,
+    session_id: &str,
+    message: &str,
+) -> Result<ChatTurnDto, String> {
+    let turn = ChatTurn {
+        id: 0,
+        source: TurnSource::Human,
+        message: message.to_string(),
+        resolved_query: None,
+        evidence: String::new(),
+        citations: Vec::new(),
+        answer: String::new(),
+        timestamp: now(),
+        directed_to: Some(Directed::Agent),
+        reply_to: None,
+    };
+    commit_turn(app, session_id, turn, None)
+}
+
+/// Turns in a session addressed to the agent that no later turn has replied
+/// to yet — what `chat` hands back alongside its own answer so an attached
+/// agent notices a pending question without a push channel to tell it.
+pub fn pending_for_agent(app: &App, session_id: &str) -> Vec<ChatTurnDto> {
+    let mut sessions = app.sessions();
+    let session = sessions
+        .entry(session_id.to_string())
+        .or_insert_with(|| load_session(&app.dir, session_id));
+    let replied_to: std::collections::HashSet<u64> =
+        session.turns.iter().filter_map(|t| t.reply_to).collect();
+    session
+        .turns
+        .iter()
+        .filter(|t| t.awaiting_agent() && !replied_to.contains(&t.id))
+        .map(ChatTurn::to_dto)
+        .collect()
+}
+
+/// An agent answering a turn a human directed at it. Appended as its own
+/// `Agent`-sourced turn — the log is append-only, so this never rewrites the
+/// question it answers — carrying the original question's text forward so
+/// the pair reads as one exchange, and `reply_to` so [`pending_for_agent`]
+/// stops counting the question as open.
+pub fn reply_to_agent_turn(
+    app: &Arc<App>,
+    session_id: &str,
+    reply_to: u64,
+    answer: &str,
+) -> Result<ChatTurnDto, String> {
+    let question = {
+        let mut sessions = app.sessions();
+        let session = sessions
+            .entry(session_id.to_string())
+            .or_insert_with(|| load_session(&app.dir, session_id));
+        session
+            .turns
+            .iter()
+            .find(|t| t.id == reply_to)
+            .map(|t| t.message.clone())
+    };
+    let Some(question) = question else {
+        return Err(format!(
+            "no turn {reply_to} in session {session_id:?} to reply to"
+        ));
+    };
+    let turn = ChatTurn {
+        id: 0,
+        source: TurnSource::Agent,
+        message: question,
+        resolved_query: None,
+        evidence: String::new(),
+        citations: Vec::new(),
+        answer: answer.to_string(),
+        timestamp: now(),
+        directed_to: None,
+        reply_to: Some(reply_to),
+    };
+    commit_turn(app, session_id, turn, None)
 }
 
 /// Best-effort cell values for a turn's citations, for `--llm-privacy
@@ -460,5 +604,68 @@ mod tests {
             "an explicit selection should be recorded as what the turn actually answered, got {:?}",
             turn.resolved_query
         );
+    }
+
+    fn bare_app() -> (Arc<App>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let app = Arc::new(
+            App::new(dir.path().to_str().expect("utf-8 path"), false, None).expect("engine opens"),
+        );
+        (app, dir)
+    }
+
+    #[test]
+    fn a_turn_directed_at_the_agent_skips_the_engine_and_stays_open() {
+        let (app, _dir) = bare_app();
+        let turn = direct_to_agent(&app, DEFAULT_SESSION, "what should we do about this?")
+            .expect("directing a turn does not need the engine");
+        assert_eq!(turn.answer, "", "a directed turn has no answer yet");
+        assert!(turn.citations.is_empty());
+
+        let pending = pending_for_agent(&app, DEFAULT_SESSION);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, turn.id);
+    }
+
+    #[test]
+    fn a_reply_clears_the_pending_question_without_mutating_it() {
+        let (app, _dir) = bare_app();
+        let question = direct_to_agent(&app, DEFAULT_SESSION, "which sheet has it?")
+            .expect("directing a turn does not need the engine");
+
+        let reply = reply_to_agent_turn(&app, DEFAULT_SESSION, question.id, "It's on RATES.")
+            .expect("replying to an open question succeeds");
+        assert_eq!(reply.reply_to, Some(question.id));
+        assert_eq!(reply.answer, "It's on RATES.");
+        assert_eq!(
+            reply.message, question.message,
+            "the reply carries the question forward"
+        );
+
+        assert!(
+            pending_for_agent(&app, DEFAULT_SESSION).is_empty(),
+            "a replied-to question is no longer pending"
+        );
+
+        // The original turn itself is untouched — the log is append-only.
+        let history = history(&app, DEFAULT_SESSION);
+        let original = history
+            .iter()
+            .find(|t| t.id == question.id)
+            .expect("the original turn is still there");
+        assert_eq!(
+            original.answer, "",
+            "the question's own record never gets an answer written into it"
+        );
+    }
+
+    #[test]
+    fn replying_to_an_unknown_turn_is_refused() {
+        let (app, _dir) = bare_app();
+        let result = reply_to_agent_turn(&app, DEFAULT_SESSION, 999, "answer");
+        let Err(err) = result else {
+            panic!("no turn 999 exists");
+        };
+        assert!(err.contains("999"));
     }
 }

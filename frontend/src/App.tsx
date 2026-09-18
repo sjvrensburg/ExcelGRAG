@@ -83,11 +83,19 @@ export default function App() {
       .catch(() => undefined);
   }, []);
 
-  const sendChat = useCallback((text: string) => {
+  const sendChat = useCallback((text: string, toAgent: boolean) => {
     setChatBusy(true);
     setChatError(null);
     const context = chatContext;
-    postChat(text, DEFAULT_SESSION, context ? { workbook: context.workbook, node: context.node } : undefined)
+    // A directed-at-agent turn carries no engine context of its own — the
+    // engine never ran for it — so the canvas selection is dropped along
+    // with the free text rather than sent nowhere.
+    postChat(
+      text,
+      DEFAULT_SESSION,
+      !toAgent && context ? { workbook: context.workbook, node: context.node } : undefined,
+      toAgent,
+    )
       .then((turn) => {
         setChatTurns((prev) => appendTurn(prev, turn));
         // Cleared only on success: a failed request leaves the context chip
@@ -96,6 +104,10 @@ export default function App() {
         setChatContext(null);
       })
       .catch((e) => setChatError(message(e)))
+      // A turn directed at the agent returns immediately (no engine, no
+      // LLM) — this only ever reflects the network round-trip, never "the
+      // agent is thinking"; the turn itself shows "waiting for an agent to
+      // answer…" until a reply lands.
       .finally(() => setChatBusy(false));
   }, [chatContext]);
 

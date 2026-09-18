@@ -6,7 +6,7 @@ interface Props {
   turns: ChatTurnDto[];
   busy: boolean;
   error: string | null;
-  onSend: (message: string) => void;
+  onSend: (message: string, toAgent: boolean) => void;
   // A canvas selection explicitly attached via "Ask about this" in the
   // details panel. Settles which entity the next message is about outright
   // — see chat::EntityContext — and is cleared after one turn rather than
@@ -19,15 +19,25 @@ interface Props {
 // call run the same pipeline and land in this same list, tagged by source —
 // this is "tell the agent to show me something" and "chat with the
 // workbook" as one feature rather than two.
+//
+// "ask my agent" routes a message past the built-in pipeline entirely (see
+// chat::direct_to_agent) and leaves it pending until an attached MCP client
+// notices and replies — there is no synchronous hand-off (no MCP client
+// implements `sampling/createMessage` today; see project memory
+// gui-chat-agent-vs-llm-toggle), so a directed turn can sit open for a
+// while, or forever if nothing is attached. That is shown, not hidden.
 export function ChatPanel({ turns, busy, error, onSend, context, onClearContext }: Props) {
   const [message, setMessage] = useState("");
+  const [toAgent, setToAgent] = useState(false);
 
   const submit = () => {
     const text = message.trim();
     if (busy || (!text && !context)) return;
-    onSend(text || `what is ${context?.label ?? "this"}?`);
+    onSend(text || `what is ${context?.label ?? "this"}?`, toAgent);
     setMessage("");
   };
+
+  const repliesTo = (id: number) => turns.some((t) => t.reply_to === id);
 
   return (
     <section className="side-section chat-section grow">
@@ -39,18 +49,38 @@ export function ChatPanel({ turns, busy, error, onSend, context, onClearContext 
             tool — both show up here, live.
           </div>
         )}
-        {turns.map((turn) => (
-          <div key={turn.id} className={"chat-turn source-" + turn.source}>
-            <div className="chat-turn-message">
-              <span className="chat-source-tag">{turn.source === "agent" ? "agent" : "you"}</span>
-              {turn.message}
+        {turns.map((turn) => {
+          const pending = turn.directed_to === "agent" && !repliesTo(turn.id);
+          return (
+            <div
+              key={turn.id}
+              className={
+                "chat-turn source-" + turn.source + (pending ? " pending-agent" : "")
+              }
+            >
+              <div className="chat-turn-message">
+                <span className="chat-source-tag">
+                  {turn.source === "agent" ? "agent" : "you"}
+                </span>
+                {turn.reply_to != null && <span className="chat-reply-tag">reply</span>}
+                {turn.message}
+                {turn.directed_to === "agent" && (
+                  <span className="chat-directed-tag">→ your agent</span>
+                )}
+              </div>
+              {pending ? (
+                <div className="chat-turn-answer chat-turn-waiting">
+                  waiting for an agent to answer…
+                </div>
+              ) : (
+                <div className="chat-turn-answer">{turn.answer}</div>
+              )}
+              {turn.citations.length > 0 && (
+                <div className="chat-turn-citations">{turn.citations.join(" · ")}</div>
+              )}
             </div>
-            <div className="chat-turn-answer">{turn.answer}</div>
-            {turn.citations.length > 0 && (
-              <div className="chat-turn-citations">{turn.citations.join(" · ")}</div>
-            )}
-          </div>
-        ))}
+          );
+        })}
       </div>
       {context && (
         <div className="context-chip">
@@ -60,10 +90,24 @@ export function ChatPanel({ turns, busy, error, onSend, context, onClearContext 
           </button>
         </div>
       )}
+      <label className="to-agent-toggle" title="Route this message to whichever agent is attached over MCP instead of asking the workbook directly. It won't get an instant reply.">
+        <input
+          type="checkbox"
+          checked={toAgent}
+          onChange={(e) => setToAgent(e.target.checked)}
+        />
+        ask my agent
+      </label>
       <div className="query-row">
         <input
           value={message}
-          placeholder={context ? `ask about ${context.label}…` : "ask a follow-up…"}
+          placeholder={
+            toAgent
+              ? "ask your attached agent…"
+              : context
+                ? `ask about ${context.label}…`
+                : "ask a follow-up…"
+          }
           onChange={(e) => setMessage(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") submit();
