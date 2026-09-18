@@ -143,6 +143,13 @@ export interface ChatTurnDto {
   citations: string[];
   answer: string;
   timestamp: number;
+  // Set when a human routed this turn to the attached agent instead of the
+  // built-in search/LLM pipeline. An empty `answer` alongside this means the
+  // question is still open — no MCP client attached, or it hasn't replied.
+  directed_to?: "agent";
+  // Set on an agent's turn that answers a `directed_to` one — the id of the
+  // question it answers.
+  reply_to?: number;
 }
 
 export type WsEvent =

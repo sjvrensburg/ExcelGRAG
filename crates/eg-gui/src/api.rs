@@ -376,10 +376,18 @@ struct ChatBody {
     /// workbook's graph it indexes into.
     workbook: Option<String>,
     node: Option<u32>,
+    /// Route this turn to the attached agent instead of the built-in
+    /// find→expand→render/LLM pipeline — see `chat::direct_to_agent`. When
+    /// set, `workbook`/`node` are ignored: a directed turn carries no engine
+    /// context of its own to hand an agent that never ran the engine.
+    #[serde(default)]
+    to_agent: bool,
 }
 
 /// A human's turn in the shared chat session — the same pipeline an agent's
 /// `chat` MCP tool call drives, so the log is genuinely one conversation.
+/// `to_agent` skips that pipeline entirely and leaves the turn for the
+/// attached agent to pick up asynchronously.
 async fn post_chat(
     State(app): State<SharedApp>,
     Json(body): Json<ChatBody>,
@@ -387,6 +395,11 @@ async fn post_chat(
     let session_id = body
         .session_id
         .unwrap_or_else(|| chat::DEFAULT_SESSION.to_string());
+    if body.to_agent {
+        return chat::direct_to_agent(&app, &session_id, &body.message)
+            .map(Json)
+            .map_err(internal);
+    }
     let context = match (body.workbook, body.node) {
         (Some(workbook), Some(node)) => Some(chat::EntityContext { workbook, node }),
         _ => None,

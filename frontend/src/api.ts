@@ -79,6 +79,7 @@ export function postChat(
   message: string,
   sessionId?: string,
   context?: { workbook: string; node: number },
+  toAgent?: boolean,
 ): Promise<ChatTurnDto> {
   return json(fetch("/api/chat", {
     method: "POST",
@@ -88,6 +89,7 @@ export function postChat(
       session_id: sessionId,
       workbook: context?.workbook,
       node: context?.node,
+      to_agent: toAgent,
     }),
   }));
 }
