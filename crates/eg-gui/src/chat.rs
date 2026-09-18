@@ -109,6 +109,28 @@ pub struct ChatTurn {
 }
 
 impl ChatTurn {
+    /// A bare turn: an id `commit_turn` will overwrite, `now()` for the
+    /// timestamp, and every other field at its empty/absent default. The
+    /// three call sites that build a `ChatTurn` (an engine-answered one, a
+    /// directed-at-agent one, and an agent's reply) each set only the
+    /// handful of fields that differ, via struct-update syntax, rather than
+    /// listing all ten fields by hand — which had let a turn kind silently
+    /// omit a field a future one added.
+    fn new(source: TurnSource, message: impl Into<String>) -> ChatTurn {
+        ChatTurn {
+            id: 0,
+            source,
+            message: message.into(),
+            resolved_query: None,
+            evidence: String::new(),
+            citations: Vec::new(),
+            answer: String::new(),
+            timestamp: now(),
+            directed_to: None,
+            reply_to: None,
+        }
+    }
+
     fn to_dto(&self) -> ChatTurnDto {
         ChatTurnDto {
             id: self.id,
@@ -300,16 +322,11 @@ pub async fn run_turn(
 
     // 5. Re-lock sessions, append, persist, update sticky scope.
     let turn = ChatTurn {
-        id: 0,
-        source,
-        message: message.to_string(),
         resolved_query,
         evidence: engine_result.evidence,
         citations: engine_result.citations,
         answer,
-        timestamp: now(),
-        directed_to: None,
-        reply_to: None,
+        ..ChatTurn::new(source, message)
     };
     commit_turn(
         app,
@@ -340,12 +357,16 @@ fn commit_turn(
 ) -> Result<ChatTurnDto, String> {
     let session_snapshot = {
         let mut sessions = app.sessions();
+        // Hydrate from disk on first touch, exactly like `history`/
+        // `pending_for_agent`/`run_turn`'s own step 1 — never a blank
+        // `ChatSession::default()`. `direct_to_agent` calls straight into
+        // this with no prior read of the session, so getting this wrong
+        // here (as opposed to only in `run_turn`'s already-hydrated case)
+        // would silently overwrite a session's persisted history the first
+        // time a directed turn reaches a process that hasn't loaded it yet.
         let session = sessions
             .entry(session_id.to_string())
-            .or_insert_with(|| ChatSession {
-                id: session_id.to_string(),
-                ..Default::default()
-            });
+            .or_insert_with(|| load_session(&app.dir, session_id));
         turn.id = session.turns.last().map(|t| t.id + 1).unwrap_or(1);
         session.turns.push(turn.clone());
         if let Some((workbook, sheet)) = sticky {
@@ -377,16 +398,8 @@ pub fn direct_to_agent(
     message: &str,
 ) -> Result<ChatTurnDto, String> {
     let turn = ChatTurn {
-        id: 0,
-        source: TurnSource::Human,
-        message: message.to_string(),
-        resolved_query: None,
-        evidence: String::new(),
-        citations: Vec::new(),
-        answer: String::new(),
-        timestamp: now(),
         directed_to: Some(Directed::Agent),
-        reply_to: None,
+        ..ChatTurn::new(TurnSource::Human, message)
     };
     commit_turn(app, session_id, turn, None)
 }
@@ -425,28 +438,31 @@ pub fn reply_to_agent_turn(
         let session = sessions
             .entry(session_id.to_string())
             .or_insert_with(|| load_session(&app.dir, session_id));
+        // The id must name a turn that is actually open for a reply: one
+        // directed at the agent, and not already answered — not just any
+        // turn id. Without this, a stale `pending_for_you` id, a typo, or
+        // two agents racing to answer the same question would each succeed
+        // silently: the first check catches replying to an ordinary
+        // engine-answered turn or another reply; the second catches two
+        // replies to the one open question landing as two contradictory
+        // answers in the shared session.
+        let already_replied = session.turns.iter().any(|t| t.reply_to == Some(reply_to));
         session
             .turns
             .iter()
             .find(|t| t.id == reply_to)
+            .filter(|t| t.awaiting_agent() && !already_replied)
             .map(|t| t.message.clone())
     };
     let Some(question) = question else {
         return Err(format!(
-            "no turn {reply_to} in session {session_id:?} to reply to"
+            "turn {reply_to} in session {session_id:?} is not an open question directed at the agent"
         ));
     };
     let turn = ChatTurn {
-        id: 0,
-        source: TurnSource::Agent,
-        message: question,
-        resolved_query: None,
-        evidence: String::new(),
-        citations: Vec::new(),
         answer: answer.to_string(),
-        timestamp: now(),
-        directed_to: None,
         reply_to: Some(reply_to),
+        ..ChatTurn::new(TurnSource::Agent, question)
     };
     commit_turn(app, session_id, turn, None)
 }
@@ -667,5 +683,71 @@ mod tests {
             panic!("no turn 999 exists");
         };
         assert!(err.contains("999"));
+    }
+
+    #[test]
+    fn replying_to_a_turn_that_was_never_directed_at_the_agent_is_refused() {
+        let (app, _dir) = bare_app();
+        // An ordinary directed turn's own id names a real turn, but it was
+        // never *addressed to* the agent — `reply_to` must still refuse it,
+        // not just check the id exists.
+        let question = direct_to_agent(&app, DEFAULT_SESSION, "q").expect("directs fine");
+        let bystander =
+            reply_to_agent_turn(&app, DEFAULT_SESSION, question.id, "first reply").expect("ok");
+        let result = reply_to_agent_turn(&app, DEFAULT_SESSION, bystander.id, "answer to a reply");
+        assert!(
+            result.is_err(),
+            "a reply turn is not itself open for a reply"
+        );
+    }
+
+    #[test]
+    fn a_second_reply_to_an_already_answered_question_is_refused() {
+        let (app, _dir) = bare_app();
+        let question =
+            direct_to_agent(&app, DEFAULT_SESSION, "which sheet?").expect("directs fine");
+        reply_to_agent_turn(&app, DEFAULT_SESSION, question.id, "RATES")
+            .expect("the first reply succeeds");
+        let second = reply_to_agent_turn(&app, DEFAULT_SESSION, question.id, "actually, LOOKUP");
+        assert!(
+            second.is_err(),
+            "two agents racing to answer the same question should not both succeed"
+        );
+    }
+
+    #[test]
+    fn a_directed_turn_does_not_clobber_history_already_on_disk() {
+        // Regression: `commit_turn` must hydrate an unseen session from disk
+        // before appending, the same as `run_turn`'s own step 1 — not start
+        // it from `ChatSession::default()`, which would silently overwrite
+        // whatever `save_session` had already written for this session id.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let existing = ChatSession {
+            id: DEFAULT_SESSION.to_string(),
+            workbook: Some("some-workbook".to_string()),
+            sheet: None,
+            turns: vec![ChatTurn {
+                answer: "an earlier, already-persisted answer".to_string(),
+                ..ChatTurn::new(TurnSource::Human, "an earlier question")
+            }],
+        };
+        save_session(dir.path().to_str().unwrap(), &existing).expect("seed the session file");
+
+        // A *fresh* App — its in-memory session map has never touched this
+        // session id, matching a freshly started `eg gui` process where a
+        // directed turn is the first thing to reach this session.
+        let app =
+            Arc::new(App::new(dir.path().to_str().unwrap(), false, None).expect("engine opens"));
+        direct_to_agent(&app, DEFAULT_SESSION, "a brand new directed question")
+            .expect("directing a turn does not need the engine");
+
+        let persisted = load_session(dir.path().to_str().unwrap(), DEFAULT_SESSION);
+        assert_eq!(
+            persisted.turns.len(),
+            2,
+            "the earlier turn must survive alongside the new one, not be overwritten"
+        );
+        assert_eq!(persisted.turns[0].message, "an earlier question");
+        assert_eq!(persisted.turns[1].message, "a brand new directed question");
     }
 }

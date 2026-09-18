@@ -78,24 +78,26 @@ fn schema_object(value: Value) -> JsonObject {
     value.as_object().cloned().unwrap_or_default()
 }
 
-/// Prefix an answer with any questions a human routed to the agent that are
-/// still open, so a call that only meant to ask something of its own still
-/// surfaces them — the only "notice" mechanism available without a push
-/// channel from the GUI to the agent (see `chat::Directed`).
-fn with_pending_note(answer: String, pending: &[ChatTurnDto]) -> String {
+/// A content block naming any questions a human routed to the agent that are
+/// still open, prepended to a `chat` call's own answer so a call that only
+/// meant to ask something of its own still surfaces them — the only
+/// "notice" mechanism available without a push channel from the GUI to the
+/// agent (see `chat::Directed`). A separate block rather than a text prefix:
+/// a caller that treats the answer text as opaque display content can still
+/// tell the two apart structurally, and an answer that happens to start the
+/// same way as the marker can't be confused with it.
+fn pending_note_block(pending: &[ChatTurnDto]) -> Option<ContentBlock> {
     if pending.is_empty() {
-        return answer;
+        return None;
     }
     let mut note = String::from(
-        "[pending_for_you: question(s) routed to you in this chat, unanswered — reply with \
-         `chat`'s `reply_to` set to the id]\n",
+        "pending_for_you: question(s) routed to you in this chat, unanswered — reply with \
+         `chat`'s `reply_to` set to the id\n",
     );
     for turn in pending {
         note.push_str(&format!("  #{}: {}\n", turn.id, turn.message));
     }
-    note.push('\n');
-    note.push_str(&answer);
-    note
+    Some(ContentBlock::text(note))
 }
 
 #[derive(Clone)]
@@ -133,10 +135,10 @@ impl McpBridge {
                 {
                     Ok(turn) => {
                         let pending = chat::pending_for_agent(&self.app, session_id);
-                        CallToolResult::success(vec![ContentBlock::text(with_pending_note(
-                            turn.answer,
-                            &pending,
-                        ))])
+                        let mut blocks = Vec::new();
+                        blocks.extend(pending_note_block(&pending));
+                        blocks.push(ContentBlock::text(turn.answer));
+                        CallToolResult::success(blocks)
                     }
                     Err(message) => CallToolResult::error(vec![ContentBlock::text(message)]),
                 }
