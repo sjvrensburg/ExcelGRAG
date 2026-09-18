@@ -43,13 +43,16 @@ fn gui_tools() -> Vec<Tool> {
              toggle in the browser) that no one has answered yet — there is no push channel, so \
              this is how you notice them. Answer one with a *second* call passing `reply_to` set \
              to its id and `message` set to your answer text; that skips the search pipeline \
-             entirely and posts your words directly as the reply.",
+             entirely and posts your words directly as the reply. Refused on a corpus started \
+             with `--redact-values`: your reply text is posted as-is, with nothing here able to \
+             tell whether it quotes a cell value, so that corpus's guarantee that no value leaves \
+             the machine can't be kept for it.",
             schema_object(json!({
                 "type": "object",
                 "properties": {
                     "message": { "type": "string", "description": "Normally, what to ask, in words. With `reply_to` set, this is instead your own answer text to that turn — posted as-is, without running search." },
                     "session_id": { "type": "string", "description": "Which chat session — default \"default\", the one the GUI's browser tab shows unless told otherwise." },
-                    "reply_to": { "type": "integer", "description": "The id of a turn a human routed to you (from an earlier call's `pending_for_you`), to answer instead of asking a new question." },
+                    "reply_to": { "type": "integer", "description": "The id of a turn a human routed to you (from an earlier call's `pending_for_you`), to answer instead of asking a new question. Refused if this corpus was started with --redact-values." },
                 },
                 "required": ["message"],
                 "additionalProperties": false,

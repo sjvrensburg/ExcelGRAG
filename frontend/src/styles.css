@@ -773,6 +773,12 @@ button.close:hover {
   user-select: none;
 }
 
+.to-agent-redact-note {
+  font-size: 11px;
+  color: var(--danger);
+  margin-bottom: 6px;
+}
+
 /* -- Topbar filter/highlight controls ------------------------------------ */
 
 .link-button {

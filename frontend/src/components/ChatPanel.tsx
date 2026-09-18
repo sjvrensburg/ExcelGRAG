@@ -13,6 +13,14 @@ interface Props {
   // sticking silently to every follow-up after it.
   context?: { label: string } | null;
   onClearContext?: () => void;
+  // This corpus was started with `--redact-values`. Directing a question to
+  // the agent is still fine (the question is free text the human typed, no
+  // different from an ordinary message) — but the server refuses any
+  // *reply* to one, since an agent's reply text can't be checked for cell
+  // values and this corpus promises none leave the machine. Shown here so a
+  // directed question doesn't read as "waiting" when it can, in fact, never
+  // be answered.
+  redactValues?: boolean;
 }
 
 // The shared session: a human's message here and an agent's `chat` MCP tool
@@ -26,7 +34,15 @@ interface Props {
 // implements `sampling/createMessage` today; see project memory
 // gui-chat-agent-vs-llm-toggle), so a directed turn can sit open for a
 // while, or forever if nothing is attached. That is shown, not hidden.
-export function ChatPanel({ turns, busy, error, onSend, context, onClearContext }: Props) {
+export function ChatPanel({
+  turns,
+  busy,
+  error,
+  onSend,
+  context,
+  onClearContext,
+  redactValues,
+}: Props) {
   const [message, setMessage] = useState("");
   const [toAgent, setToAgent] = useState(false);
 
@@ -76,7 +92,9 @@ export function ChatPanel({ turns, busy, error, onSend, context, onClearContext 
               </div>
               {pending ? (
                 <div className="chat-turn-answer chat-turn-waiting">
-                  waiting for an agent to answer…
+                  {redactValues
+                    ? "an agent's reply is refused on this corpus (--redact-values) — this will stay pending"
+                    : "waiting for an agent to answer…"}
                 </div>
               ) : (
                 <div className="chat-turn-answer">{turn.answer}</div>
@@ -96,7 +114,14 @@ export function ChatPanel({ turns, busy, error, onSend, context, onClearContext 
           </button>
         </div>
       )}
-      <label className="to-agent-toggle" title="Route this message to whichever agent is attached over MCP instead of asking the workbook directly. It won't get an instant reply.">
+      <label
+        className="to-agent-toggle"
+        title={
+          redactValues
+            ? "Route this message to whichever agent is attached over MCP instead of asking the workbook directly. This corpus was indexed with --redact-values, so an agent's reply is refused — the question will sit pending."
+            : "Route this message to whichever agent is attached over MCP instead of asking the workbook directly. It won't get an instant reply."
+        }
+      >
         <input
           type="checkbox"
           checked={toAgent}
@@ -104,6 +129,12 @@ export function ChatPanel({ turns, busy, error, onSend, context, onClearContext 
         />
         ask my agent
       </label>
+      {toAgent && redactValues && (
+        <div className="to-agent-redact-note">
+          this corpus was indexed with --redact-values: an agent's reply would be refused, so this
+          will stay pending
+        </div>
+      )}
       <div className="query-row">
         <input
           value={message}
