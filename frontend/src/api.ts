@@ -39,6 +39,7 @@ export interface QueryParams {
   workbook?: string;
   sheet?: string;
   lexicalOnly?: boolean;
+  limit?: number;
 }
 
 function query(params: QueryParams, extra: Record<string, string> = {}): string {
@@ -46,6 +47,7 @@ function query(params: QueryParams, extra: Record<string, string> = {}): string 
   if (params.workbook) search.set("workbook", params.workbook);
   if (params.sheet) search.set("sheet", params.sheet);
   if (params.lexicalOnly) search.set("lexical_only", "true");
+  if (params.limit) search.set("limit", String(params.limit));
   return search.toString();
 }
 
