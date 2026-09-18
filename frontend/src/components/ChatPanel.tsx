@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import type { ChatTurnDto } from "../types";
 
@@ -37,7 +37,13 @@ export function ChatPanel({ turns, busy, error, onSend, context, onClearContext 
     setMessage("");
   };
 
-  const repliesTo = (id: number) => turns.some((t) => t.reply_to === id);
+  // Which turn ids already have a reply, built once per `turns` change
+  // rather than rescanned per rendered turn (an O(n^2) scan on a long
+  // session otherwise).
+  const repliedTo = useMemo(
+    () => new Set(turns.map((t) => t.reply_to).filter((id): id is number => id != null)),
+    [turns],
+  );
 
   return (
     <section className="side-section chat-section grow">
@@ -50,7 +56,7 @@ export function ChatPanel({ turns, busy, error, onSend, context, onClearContext 
           </div>
         )}
         {turns.map((turn) => {
-          const pending = turn.directed_to === "agent" && !repliesTo(turn.id);
+          const pending = turn.directed_to === "agent" && !repliedTo.has(turn.id);
           return (
             <div
               key={turn.id}
