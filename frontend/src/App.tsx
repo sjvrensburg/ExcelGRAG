@@ -8,6 +8,7 @@ import { EDGE_KINDS, NODE_KINDS, formatEdgeKind } from "./graph/theme";
 import { ChatPanel } from "./components/ChatPanel";
 import { DetailsPanel } from "./components/DetailsPanel";
 import { Legend } from "./components/Legend";
+import { QuickSearch } from "./components/QuickSearch";
 import { Sidebar } from "./components/Sidebar";
 import type {
   AskResponse,
@@ -417,6 +418,22 @@ export default function App() {
     });
   }, [graph]);
 
+  // Shared by the sidebar's hit list and the topbar's quick search: open the
+  // hit's workbook first if it isn't the one on screen, then select the node
+  // once that graph has loaded (via `pendingAsk`, the same relay `runAsk`
+  // uses for a cross-workbook answer).
+  const jumpToHit = useCallback(
+    (workbook: string, node: number) => {
+      if (workbook !== currentHash.current) {
+        pendingAsk.current = () => selectNode(node);
+        openWorkbook(workbook);
+      } else {
+        selectNode(node);
+      }
+    },
+    [openWorkbook, selectNode],
+  );
+
   const askAboutSelection = useCallback(() => {
     const hash = currentHash.current;
     if (!hash || !selection || !graph) return;
@@ -458,14 +475,7 @@ export default function App() {
         search={search}
         ask={ask}
         mode={mode}
-        onHit={(workbook, node) => {
-          if (workbook !== currentHash.current) {
-            pendingAsk.current = () => selectNode(node);
-            openWorkbook(workbook);
-          } else {
-            selectNode(node);
-          }
-        }}
+        onHit={jumpToHit}
         logs={logs}
         indexing={indexing}
       />
@@ -475,6 +485,7 @@ export default function App() {
           <div className="topbar-title">
             {current ? fileName(current.path) : graphBusy ? "opening…" : "no workbook open"}
           </div>
+          <QuickSearch workbook={currentHash.current} onSelect={jumpToHit} />
           {graph && counts && (
             <div className="topbar-stats">
               {fmt(counts.nodes)}/{fmt(graph.nodes.length)} nodes ·{" "}

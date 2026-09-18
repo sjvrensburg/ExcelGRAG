@@ -385,6 +385,62 @@ code {
   color: var(--text-faint);
 }
 
+.quick-search {
+  position: relative;
+  width: 220px;
+}
+
+.quick-search-input {
+  width: 100%;
+  font-size: 12px;
+}
+
+.quick-search-results,
+.quick-search-empty {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  background: var(--bg-raise);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.quick-search-results {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.quick-search-hit {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: 3px;
+}
+
+.quick-search-hit:hover,
+.quick-search-hit.active {
+  background: var(--bg-hover);
+}
+
+.quick-search-empty {
+  padding: 8px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.quick-search-error-row {
+  padding: 8px;
+  font-size: 12px;
+  color: var(--danger);
+}
+
 .connection {
   margin-left: auto;
   font-size: 11px;
