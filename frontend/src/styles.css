@@ -742,6 +742,43 @@ button.close:hover {
   color: var(--text-faint);
 }
 
+.chat-turn.pending-agent {
+  box-shadow: inset 2px 0 0 var(--accent);
+  border: 1px dashed var(--accent);
+}
+
+.chat-turn-waiting {
+  font-style: italic;
+}
+
+.chat-directed-tag,
+.chat-reply-tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  margin-left: 6px;
+}
+
+.to-agent-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.to-agent-redact-note {
+  font-size: 11px;
+  color: var(--danger);
+  margin-bottom: 6px;
+}
+
 /* -- Topbar filter/highlight controls ------------------------------------ */
 
 .link-button {

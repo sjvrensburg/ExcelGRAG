@@ -511,6 +511,14 @@ pub enum TurnSourceDto {
     Agent,
 }
 
+/// Who a turn is addressed to, when it isn't the built-in pipeline — see
+/// `chat::Directed`.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectedDto {
+    Agent,
+}
+
 /// One turn of a chat session, as the wire sees it. Deliberately the same
 /// shape regardless of which LLM privacy tier produced it — `answer` is
 /// either the LLM's composed reply or, with no LLM configured, the rendered
@@ -530,6 +538,16 @@ pub struct ChatTurnDto {
     pub citations: Vec<String>,
     pub answer: String,
     pub timestamp: u64,
+    /// Set when a human routed this turn to the attached agent instead of
+    /// the built-in pipeline. An empty `answer` alongside this means the
+    /// question is still open — no turn in the session has replied to it
+    /// yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directed_to: Option<DirectedDto>,
+    /// Set on an agent's turn that answers a `directed_to` one — the id of
+    /// the question it answers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<u64>,
 }
 
 /// What the WebSocket sends. One JSON object per message, tagged by `type`.
