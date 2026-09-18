@@ -556,6 +556,7 @@ export default function App() {
           onSend={sendChat}
           context={chatContext}
           onClearContext={() => setChatContext(null)}
+          redactValues={redactValues}
         />
       </aside>
     </div>

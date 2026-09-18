@@ -91,7 +91,11 @@ impl From<Directed> for DirectedDto {
 /// posts a separate turn with `reply_to` set to this one's `id`. Nothing
 /// pushes that reply; the agent notices the open question because `chat`
 /// hands back the session's unanswered ones every time it is called, the
-/// same way a human's own turns already show up live in the browser.
+/// same way a human's own turns already show up live in the browser. Such a
+/// reply's `answer` is the one exception to the no-cell-values guarantee
+/// above — it is free text an agent chose to type, not something `render()`
+/// or `--llm-privacy` constrained — which is why [`reply_to_agent_turn`]
+/// refuses it outright under `--redact-values` rather than trusting it.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChatTurn {
     pub id: u64,
@@ -427,12 +431,30 @@ pub fn pending_for_agent(app: &App, session_id: &str) -> Vec<ChatTurnDto> {
 /// question it answers — carrying the original question's text forward so
 /// the pair reads as one exchange, and `reply_to` so [`pending_for_agent`]
 /// stops counting the question as open.
+///
+/// Refused outright under `--redact-values`. Every other path into
+/// `ChatTurn.answer` is either the rendered passage (which `render()`
+/// guarantees never carries a cell value) or an LLM's `compose()`, gated by
+/// `--llm-privacy`; this one is free text an agent typed, with nothing in
+/// this process able to tell whether it quotes a cell value or not. A corpus
+/// indexed with `--redact-values` exists so that nothing about a workbook's
+/// contents leaves the machine — accepting arbitrary agent text into the
+/// persisted `chat/<session>.json` would make that promise unenforceable,
+/// so the reply is refused rather than accepted and trusted.
 pub fn reply_to_agent_turn(
     app: &Arc<App>,
     session_id: &str,
     reply_to: u64,
     answer: &str,
 ) -> Result<ChatTurnDto, String> {
+    if app.redact_values {
+        return Err(
+            "this corpus was indexed with --redact-values; an agent's reply text can't be \
+             checked for cell values, so replying to a directed chat turn is refused here — \
+             use `read_cells`/`what_if` etc. against the corpus directly instead"
+                .to_string(),
+        );
+    }
     let question = {
         let mut sessions = app.sessions();
         let session = sessions
@@ -630,6 +652,14 @@ mod tests {
         (app, dir)
     }
 
+    fn redacted_app() -> (Arc<App>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let app = Arc::new(
+            App::new(dir.path().to_str().expect("utf-8 path"), true, None).expect("engine opens"),
+        );
+        (app, dir)
+    }
+
     #[test]
     fn a_turn_directed_at_the_agent_skips_the_engine_and_stays_open() {
         let (app, _dir) = bare_app();
@@ -712,6 +742,42 @@ mod tests {
         assert!(
             second.is_err(),
             "two agents racing to answer the same question should not both succeed"
+        );
+    }
+
+    #[test]
+    fn a_reply_is_refused_on_a_redact_values_corpus() {
+        let (app, _dir) = redacted_app();
+        let question = direct_to_agent(&app, DEFAULT_SESSION, "which sheet has it?")
+            .expect("directing a question is still fine under --redact-values — it's the reply that's gated");
+
+        let result = reply_to_agent_turn(
+            &app,
+            DEFAULT_SESSION,
+            question.id,
+            "It's 1,612 on RATES!B4.",
+        );
+        let Err(err) = result else {
+            panic!("a reply must be refused on a --redact-values corpus");
+        };
+        assert!(
+            err.contains("redact-values"),
+            "the refusal should name why, got {err:?}"
+        );
+
+        // Refused before anything is appended — no half-written reply, and
+        // the question is still open (not silently marked answered).
+        assert!(
+            pending_for_agent(&app, DEFAULT_SESSION)
+                .iter()
+                .any(|t| t.id == question.id),
+            "the question must still be pending after a refused reply"
+        );
+        let history = history(&app, DEFAULT_SESSION);
+        assert_eq!(
+            history.len(),
+            1,
+            "a refused reply must not be appended to the session"
         );
     }
 
