@@ -20,8 +20,10 @@ interface Props {
   indexing: boolean;
   onIndexStarted: () => void;
   // The last job's outcome (nonce distinguishes two runs of one path):
-  // a success clears the path field, since the same path re-submitted is
-  // the one thing the field can no longer usefully hold.
+  // a success clears the path field if it still holds that path, since the
+  // same path re-submitted is the one thing the field can no longer
+  // usefully hold. The field stays editable while a job runs, so a path
+  // typed in the meantime is not the finished one and is kept.
   indexResult: { path: string; ok: boolean; nonce: number } | null;
 }
 
@@ -49,7 +51,9 @@ export function Sidebar(props: Props) {
   const [indexError, setIndexError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (props.indexResult?.ok) setPath("");
+    const result = props.indexResult;
+    if (!result?.ok) return;
+    setPath((current) => (current.trim() === result.path ? "" : current));
   }, [props.indexResult]);
 
   const submit = (what: "search" | "ask") => {

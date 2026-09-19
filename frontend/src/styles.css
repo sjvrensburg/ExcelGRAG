@@ -826,6 +826,7 @@ button.close:hover {
   font-family: var(--mono);
   font-size: 11px;
   color: var(--text-faint);
+  overflow-wrap: anywhere;
 }
 
 .chat-turn.pending-agent {
@@ -854,10 +855,6 @@ button.close:hover {
 .chat-reply-tag {
   margin-left: 0;
   margin-right: 6px;
-}
-
-.chat-turn-citations {
-  overflow-wrap: anywhere;
 }
 
 .to-agent-toggle {

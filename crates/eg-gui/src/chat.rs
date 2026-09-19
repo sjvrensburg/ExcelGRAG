@@ -292,25 +292,34 @@ pub async fn run_turn(
             // "tax rate" answered with the Rates sheet's "Discount Rate"
             // because an earlier turn had pinned the scope to Rates, while
             // `Tax_Rate` — the exact answer — sat unstarred at [14]. So when
-            // the scoped top hit does not carry every content word, widen to
-            // the whole workbook and let that result set the scope instead.
-            let hidden_by_scope = matches!(
-                scoped.verdict,
-                eg_retrieve::Verdict::Nothing
-                    | eg_retrieve::Verdict::Blind
-                    | eg_retrieve::Verdict::Partial
-            );
-            if params.sheet.is_some() && hidden_by_scope {
-                let unscoped = SearchParams {
+            // the scoped top hit does not carry every content word, search
+            // the whole workbook too — and keep that result only if its top
+            // hit carries strictly *more* of the question's words. The
+            // verdict alone is not enough: a question with one word the
+            // corpus never indexed ("the total here") is `Partial` on both
+            // searches, and adopting the unscoped one on the verdict would
+            // hop the scope to whichever sheet's "Total" ranks first
+            // corpus-wide, exactly the follow-up the sticky sheet is for.
+            let scope_may_hide = params.sheet.is_some()
+                && !matches!(
+                    scoped.verdict,
+                    eg_retrieve::Verdict::Full | eg_retrieve::Verdict::NoContentWords
+                );
+            if scope_may_hide {
+                let unscoped_params = SearchParams {
                     sheet: None,
                     ..params
                 };
-                return api::ask_engine(
+                let unscoped = api::ask_engine(
                     &app_for_engine,
-                    &unscoped,
+                    &unscoped_params,
                     &eg_retrieve::ExpandOptions::default(),
                     &eg_retrieve::RenderOptions::default(),
-                );
+                )?;
+                let scoped_found_nothing = matches!(scoped.verdict, eg_retrieve::Verdict::Nothing);
+                if unscoped.covered > scoped.covered || scoped_found_nothing {
+                    return Ok(unscoped);
+                }
             }
             Ok(scoped)
         }
@@ -661,6 +670,47 @@ mod tests {
         assert!(
             second.answer.contains("* defined name \"Tax_Rate\""),
             "the sticky sheet hid the defined name:\n{}",
+            second.answer
+        );
+    }
+
+    #[tokio::test]
+    async fn sticky_scope_survives_a_word_the_corpus_never_indexed() {
+        let (app, _dir) = indexed_app().await;
+        run_turn(
+            &app,
+            DEFAULT_SESSION,
+            TurnSource::Human,
+            "rates lookup table",
+            None,
+        )
+        .await
+        .expect("the first turn runs");
+        let pinned = app
+            .sessions()
+            .get(DEFAULT_SESSION)
+            .and_then(|s| s.sheet.clone())
+            .expect("the first turn pins a sheet");
+
+        // "qwertyuiop" is in no column name, so the scoped and the unscoped
+        // search are both `Partial` — widening on the verdict alone would
+        // adopt the workbook-wide ranking, whose "rate" is the Debtors
+        // column, and hop the scope off the sheet just discussed. The scoped
+        // top hit carries "rate" just as well, so nothing was hidden and
+        // the sticky sheet must hold.
+        let second = run_turn(
+            &app,
+            DEFAULT_SESSION,
+            TurnSource::Human,
+            "rate qwertyuiop",
+            None,
+        )
+        .await
+        .expect("the second turn runs");
+        let citation = second.citations.first().expect("a citation");
+        assert!(
+            citation.starts_with(&format!("{pinned}!")),
+            "follow-up citation {citation:?} should stay on {pinned:?}:\n{}",
             second.answer
         );
     }
