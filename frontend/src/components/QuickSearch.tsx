@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { getSearch } from "../api";
-import type { HitDto } from "../types";
+import type { HitDto, WorkbookDto } from "../types";
 
 interface Props {
   // The workbook on screen, or null if none is open yet. Scopes the search
@@ -9,6 +9,11 @@ interface Props {
   // has covers the no-workbook case, and a hit from elsewhere still opens
   // its own workbook via `onSelect`.
   workbook: string | null;
+  // Every workbook in the corpus, to name the one a hit came from when the
+  // search wasn't scoped to the open workbook — two workbooks with the same
+  // sheet names (the demo's .ods and .xlsx twins) otherwise produce
+  // identical-looking rows.
+  workbooks: WorkbookDto[];
   onSelect: (workbook: string, node: number) => void;
 }
 
@@ -20,9 +25,14 @@ const LIMIT = 8;
 // This one is just `getSearch` plus a dropdown, for the common case of
 // knowing roughly what you're looking for and wanting the graph to jump
 // there.
-export function QuickSearch({ workbook, onSelect }: Props) {
+export function QuickSearch({ workbook, workbooks, onSelect }: Props) {
   const [q, setQ] = useState("");
   const [hits, setHits] = useState<HitDto[] | null>(null);
+  // `Search::evidence()` for the current hits: the vector half always
+  // returns *something*, so a nonsense query still gets a full dropdown of
+  // low-scored sheets. The sidebar prints the evidence line above every hit
+  // list for exactly this reason; the bar must not drop it.
+  const [evidence, setEvidence] = useState<{ verdict: string; text: string } | null>(null);
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -33,6 +43,7 @@ export function QuickSearch({ workbook, onSelect }: Props) {
     const query = q.trim();
     if (!query) {
       setHits(null);
+      setEvidence(null);
       setError(null);
       return;
     }
@@ -42,6 +53,7 @@ export function QuickSearch({ workbook, onSelect }: Props) {
         .then((found) => {
           if (id !== requestId.current) return;
           setHits(found.hits);
+          setEvidence({ verdict: found.verdict, text: found.evidence });
           setActive(0);
           setError(null);
           setOpen(true);
@@ -71,7 +83,15 @@ export function QuickSearch({ workbook, onSelect }: Props) {
     setOpen(false);
     setQ("");
     setHits(null);
+    setEvidence(null);
   };
+
+  // A blind verdict means no hit was found on any word of the query — what
+  // follows is nearest-by-meaning filler, shown dimmed rather than hidden so
+  // a near-miss spelling can still be picked.
+  const blind = evidence !== null && evidence.verdict !== "full" && evidence.verdict !== "partial";
+  const nameOf = (hash: string) =>
+    (workbooks.find((w) => w.hash === hash)?.path ?? hash).split("/").pop() ?? hash;
 
   return (
     <div className="quick-search" ref={rootRef}>
@@ -101,8 +121,14 @@ export function QuickSearch({ workbook, onSelect }: Props) {
         }}
       />
       {open && (error || (hits && hits.length > 0)) && (
-        <ul className="quick-search-results">
+        <ul className={"quick-search-results" + (blind ? " blind" : "")}>
           {error && <li className="quick-search-error-row">{error}</li>}
+          {!error && evidence && (
+            <li className="quick-search-evidence">
+              {blind ? "no match — nearest by meaning only; " : ""}
+              {evidence.text}
+            </li>
+          )}
           {!error &&
             hits!.map((hit, i) => (
               <li key={`${hit.workbook}:${hit.node}`}>
@@ -113,6 +139,7 @@ export function QuickSearch({ workbook, onSelect }: Props) {
                 >
                   <span className="hit-top">
                     <span className="hit-kind">{hit.kind}</span>
+                    {!workbook && <span className="hit-workbook">{nameOf(hit.workbook)}</span>}
                     <span className="hit-score">{hit.score.toFixed(2)}</span>
                   </span>
                   <span className="hit-label">{hit.label}</span>

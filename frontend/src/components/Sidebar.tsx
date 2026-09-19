@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { postIndex } from "../api";
 import type { AskResponse, SearchDto, WorkbookDto } from "../types";
@@ -19,6 +19,10 @@ interface Props {
   logs: string[];
   indexing: boolean;
   onIndexStarted: () => void;
+  // The last job's outcome (nonce distinguishes two runs of one path):
+  // a success clears the path field, since the same path re-submitted is
+  // the one thing the field can no longer usefully hold.
+  indexResult: { path: string; ok: boolean; nonce: number } | null;
 }
 
 export function Sidebar(props: Props) {
@@ -43,6 +47,10 @@ export function Sidebar(props: Props) {
   const [profiles, setProfiles] = useState(true);
   const [lexicalOnly, setLexicalOnly] = useState(false);
   const [indexError, setIndexError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (props.indexResult?.ok) setPath("");
+  }, [props.indexResult]);
 
   const submit = (what: "search" | "ask") => {
     const query = q.trim();

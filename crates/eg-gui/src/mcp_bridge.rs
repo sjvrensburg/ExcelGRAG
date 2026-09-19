@@ -156,10 +156,34 @@ impl McpBridge {
                     .get("session_id")
                     .and_then(Value::as_str)
                     .unwrap_or(chat::DEFAULT_SESSION);
-                let workbook = args
-                    .get("workbook")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
+                // Resolve to the content hash here: the browser decides
+                // whether it must reload by comparing this against the hash
+                // of the workbook it has open, so a file name or path — both
+                // valid per the schema — passed through verbatim made every
+                // `gui_show` reload the graph (new layout, selection and
+                // highlight lost) even when that workbook was already open.
+                let workbook = match args.get("workbook").and_then(Value::as_str) {
+                    None => None,
+                    Some(wanted) => {
+                        let app = Arc::clone(&self.app);
+                        let wanted = wanted.to_string();
+                        match tokio::task::spawn_blocking(move || {
+                            crate::app::resolve_hash(&app, &wanted)
+                        })
+                        .await
+                        {
+                            Ok(Ok(hash)) => Some(hash),
+                            Ok(Err(message)) => {
+                                return CallToolResult::error(vec![ContentBlock::text(message)]);
+                            }
+                            Err(e) => {
+                                return CallToolResult::error(vec![ContentBlock::text(format!(
+                                    "resolving the workbook panicked: {e}"
+                                ))]);
+                            }
+                        }
+                    }
+                };
                 chat::navigate(&self.app, session_id, node as u32, workbook);
                 CallToolResult::success(vec![ContentBlock::text("shown")])
             }

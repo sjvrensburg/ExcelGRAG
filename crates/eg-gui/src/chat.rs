@@ -279,12 +279,40 @@ pub async fn run_turn(
                 limit: None,
                 lexical_only: None,
             };
-            api::ask_engine(
+            let scoped = api::ask_engine(
                 &app_for_engine,
                 &params,
                 &eg_retrieve::ExpandOptions::default(),
                 &eg_retrieve::RenderOptions::default(),
-            )
+            )?;
+            // The sticky sheet is a tiebreak for a follow-up ("total" on the
+            // sheet just discussed), not a filter: `find_in` scoped to a
+            // sheet cannot see a workbook-scoped defined name at all, and
+            // hides every other sheet's better match. Live-testing found
+            // "tax rate" answered with the Rates sheet's "Discount Rate"
+            // because an earlier turn had pinned the scope to Rates, while
+            // `Tax_Rate` — the exact answer — sat unstarred at [14]. So when
+            // the scoped top hit does not carry every content word, widen to
+            // the whole workbook and let that result set the scope instead.
+            let hidden_by_scope = matches!(
+                scoped.verdict,
+                eg_retrieve::Verdict::Nothing
+                    | eg_retrieve::Verdict::Blind
+                    | eg_retrieve::Verdict::Partial
+            );
+            if params.sheet.is_some() && hidden_by_scope {
+                let unscoped = SearchParams {
+                    sheet: None,
+                    ..params
+                };
+                return api::ask_engine(
+                    &app_for_engine,
+                    &unscoped,
+                    &eg_retrieve::ExpandOptions::default(),
+                    &eg_retrieve::RenderOptions::default(),
+                );
+            }
+            Ok(scoped)
         }
     })
     .await
@@ -436,8 +464,8 @@ pub fn pending_for_agent(app: &App, session_id: &str) -> Vec<ChatTurnDto> {
 /// `ChatTurn.answer` is either the rendered passage (which `render()`
 /// guarantees never carries a cell value) or an LLM's `compose()`, gated by
 /// `--llm-privacy`; this one is free text an agent typed, with nothing in
-/// this process able to tell whether it quotes a cell value or not. A corpus
-/// indexed with `--redact-values` exists so that nothing about a workbook's
+/// this process able to tell whether it quotes a cell value or not. A server
+/// started with `--redact-values` exists so that nothing about a workbook's
 /// contents leaves the machine — accepting arbitrary agent text into the
 /// persisted `chat/<session>.json` would make that promise unenforceable,
 /// so the reply is refused rather than accepted and trusted.
@@ -449,7 +477,7 @@ pub fn reply_to_agent_turn(
 ) -> Result<ChatTurnDto, String> {
     if app.redact_values {
         return Err(
-            "this corpus was indexed with --redact-values; an agent's reply text can't be \
+            "this server was started with --redact-values; an agent's reply text can't be \
              checked for cell values, so replying to a directed chat turn is refused here — \
              use `read_cells`/`what_if` etc. against the corpus directly instead"
                 .to_string(),
@@ -606,6 +634,35 @@ mod tests {
                 "follow-up citation {citation:?} should stay on {first_sheet:?} via sticky scope"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn sticky_scope_widens_when_the_answer_is_on_another_sheet() {
+        let (app, _dir) = indexed_app().await;
+        // Pins the sticky sheet to wherever "Discount Rate" ranks first.
+        let first = run_turn(
+            &app,
+            DEFAULT_SESSION,
+            TurnSource::Human,
+            "discount rate",
+            None,
+        )
+        .await
+        .expect("the first turn runs");
+        assert!(first.citations[0].contains('!'), "a citation names a sheet");
+
+        // `Tax_Rate` is a workbook-scoped defined name: a sheet-scoped search
+        // cannot return it at all, so the scoped top hit for this question
+        // carries "rate" but not "tax". That must widen to the workbook and
+        // star the name, not answer with the pinned sheet's nearest column.
+        let second = run_turn(&app, DEFAULT_SESSION, TurnSource::Human, "tax rate", None)
+            .await
+            .expect("the second turn runs");
+        assert!(
+            second.answer.contains("* defined name \"Tax_Rate\""),
+            "the sticky sheet hid the defined name:\n{}",
+            second.answer
+        );
     }
 
     #[tokio::test]
