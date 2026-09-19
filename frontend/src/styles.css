@@ -441,6 +441,32 @@ code {
   color: var(--danger);
 }
 
+.quick-search-evidence {
+  padding: 4px 8px 6px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-faint);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.quick-search-results.blind .quick-search-evidence {
+  color: var(--danger);
+}
+
+.quick-search-results.blind .quick-search-hit {
+  opacity: 0.55;
+}
+
+.quick-search-hit .hit-workbook {
+  font-size: 10px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin: 0 6px;
+}
+
 .connection {
   margin-left: auto;
   font-size: 11px;
@@ -764,6 +790,7 @@ button.close:hover {
   border-radius: 6px;
   padding: 8px 10px;
   background: var(--bg-hover);
+  min-width: 0;
 }
 
 .chat-turn.source-agent {
@@ -789,6 +816,9 @@ button.close:hover {
   font-size: 12px;
   color: var(--text-dim);
   white-space: pre-wrap;
+  /* A passage opens with the workbook's full path on one line; without this
+     it widens the pane and gives the whole log a horizontal scrollbar. */
+  overflow-wrap: anywhere;
 }
 
 .chat-turn-citations {
@@ -816,6 +846,18 @@ button.close:hover {
   letter-spacing: 0.04em;
   color: var(--accent);
   margin-left: 6px;
+}
+
+/* Precedes the quoted question rather than following the message, so it
+   needs its gap on the other side — without it the badge ran straight into
+   the first word ("REPLYagent, what is…"). */
+.chat-reply-tag {
+  margin-left: 0;
+  margin-right: 6px;
+}
+
+.chat-turn-citations {
+  overflow-wrap: anywhere;
 }
 
 .to-agent-toggle {

@@ -3,7 +3,13 @@ import Graph from "graphology";
 import forceAtlas2 from "graphology-layout-forceatlas2";
 import Sigma from "sigma";
 import type { DisplayData } from "sigma/types";
-import { EdgeArrowProgram, EdgeLineProgram } from "sigma/rendering";
+import type { RenderParams } from "sigma/types";
+import {
+  EdgeRectangleProgram,
+  createEdgeArrowHeadProgram,
+  createEdgeClampedProgram,
+  createEdgeCompoundProgram,
+} from "sigma/rendering";
 
 import type { EdgeDto, GraphDto } from "../types";
 import {
@@ -38,8 +44,59 @@ export type { Filters } from "./visibility";
 // programs below, which render correctly; parallel-edge separation is
 // deferred rather than shipped half-verified. See the GUI review response
 // for the reasoning.
-const DEPENDENCY_EDGE_PROGRAM = EdgeArrowProgram;
-const STRUCTURAL_EDGE_PROGRAM = EdgeLineProgram;
+//
+// Both are built from Sigma's own program pieces, wrapped so that the
+// *picking* pass — the offscreen render Sigma reads a click's pixel back
+// from — draws every edge at least `PICK_MIN_THICKNESS` px wide while the
+// visible pass keeps its true width. Without this an edge is clickable only
+// across the pixels it paints, and a dependency edge of weight 1 is
+// ~1.3 px: live-testing found only the heaviest edge on the demo canvas
+// could be selected by mouse at all. The structural kinds used Sigma's
+// `EdgeLineProgram` (GL_LINES, always one pixel, no thickness uniform to
+// widen) and were unclickable outright; the rectangle program is what
+// Sigma itself uses for its default "line" type and looks the same at these
+// sizes.
+const PICK_MIN_THICKNESS = 9;
+
+// Room around a fitted graph, per side, so the outermost nodes and their
+// labels don't sit on the edge of the canvas (a node's radius and label
+// extend past its centre, which is all the extent below measures).
+const FIT_MARGIN_PX = 48;
+
+type EdgeProgramClass = ReturnType<typeof createEdgeClampedProgram>;
+
+// What the wrapper below needs of a program: Sigma's public `EdgeProgramType`
+// hides `setUniforms`, so the class is widened to this shape and narrowed
+// back, both as casts — the runtime classes do have the method.
+interface UniformSetter {
+  setUniforms(params: RenderParams, programInfo: { isPicking: boolean }): void;
+}
+
+function withPickTolerance(Base: EdgeProgramClass): EdgeProgramClass {
+  // `setUniforms(params, programInfo)` is called once per pass with
+  // `programInfo.isPicking` telling the two apart; `minEdgeThickness` is
+  // the same setting Sigma reads from `settings.minEdgeThickness`, only
+  // raised for the pass nobody sees.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const Widened = Base as unknown as new (...args: any[]) => UniformSetter;
+  class Tolerant extends Widened {
+    setUniforms(params: RenderParams, programInfo: { isPicking: boolean }): void {
+      super.setUniforms(
+        programInfo.isPicking
+          ? { ...params, minEdgeThickness: Math.max(params.minEdgeThickness, PICK_MIN_THICKNESS) }
+          : params,
+        programInfo,
+      );
+    }
+  }
+  return Tolerant as unknown as EdgeProgramClass;
+}
+
+const DEPENDENCY_EDGE_PROGRAM = createEdgeCompoundProgram([
+  withPickTolerance(createEdgeClampedProgram()),
+  withPickTolerance(createEdgeArrowHeadProgram()),
+]);
+const STRUCTURAL_EDGE_PROGRAM = withPickTolerance(EdgeRectangleProgram);
 
 export type Selection =
   | { entity: "node"; id: number }
@@ -410,8 +467,25 @@ export function GraphView({
     if (!any) return;
     const x = (minX + maxX) / 2;
     const y = (minY + maxY) / 2;
-    const spread = Math.max(maxX - minX, maxY - minY, 0.05);
-    sigma.getCamera().animate({ x, y, ratio: spread * 0.65 }, { duration: 300 });
+    // Sigma's camera `ratio` is a zoom-out factor (larger shows more), in
+    // units of its own normalised graph space, and it is not the fraction
+    // of the stage a graph fills — a previous `spread * 0.65` here *cropped*
+    // a freshly loaded graph on every press, the one button that promises
+    // to show everything showing about two thirds of it. Rather than
+    // reproduce Sigma's matrix (stage padding, aspect correction), measure
+    // the visible extent in pixels under the *current* camera and scale
+    // that camera's ratio by how far the extent overshoots the stage on
+    // its worse axis. Whatever the transform is, it is linear in `ratio`.
+    const camera = sigma.getCamera();
+    const { width, height } = sigma.getDimensions();
+    const a = sigma.framedGraphToViewport({ x: minX, y: minY });
+    const b = sigma.framedGraphToViewport({ x: maxX, y: maxY });
+    const spanX = Math.max(Math.abs(b.x - a.x), 1);
+    const spanY = Math.max(Math.abs(b.y - a.y), 1);
+    const usableX = Math.max(width - 2 * FIT_MARGIN_PX, 1);
+    const usableY = Math.max(height - 2 * FIT_MARGIN_PX, 1);
+    const ratio = camera.ratio * Math.max(spanX / usableX, spanY / usableY);
+    camera.animate({ x, y, ratio: camera.getBoundedRatio(ratio) }, { duration: 300 });
   };
 
   return (

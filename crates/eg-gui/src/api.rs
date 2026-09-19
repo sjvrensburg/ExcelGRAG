@@ -267,6 +267,9 @@ pub(crate) struct AskEngineResult {
     /// values from in `--llm-privacy values` mode.
     pub workbook: Option<String>,
     pub sheet: Option<String>,
+    /// What the top hit was found on — `chat::run_turn` reads it to decide
+    /// whether a sticky sheet scope helped or hid the answer.
+    pub verdict: eg_retrieve::Verdict,
 }
 
 pub(crate) fn ask_engine(
@@ -278,6 +281,7 @@ pub(crate) fn ask_engine(
     let found = search_engine(app, search_params)?;
     let search_dto = dto::search_dto(&found);
     let evidence = found.evidence();
+    let verdict = found.verdict();
     let workbook = found.hits.first().map(|h| h.workbook.clone());
     let sheet = found.hits.first().and_then(|h| h.sheet.clone());
 
@@ -297,6 +301,7 @@ pub(crate) fn ask_engine(
         evidence,
         workbook,
         sheet,
+        verdict,
     })
 }
 
@@ -362,6 +367,7 @@ pub(crate) fn ask_engine_for_node(
         evidence,
         workbook: Some(hash),
         sheet: hit.sheet,
+        verdict: eg_retrieve::Verdict::Full,
     })
 }
 
