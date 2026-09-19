@@ -65,6 +65,7 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/index", post(index))
         .route("/api/chat", post(post_chat))
         .route("/api/chat/{session_id}", get(get_chat))
+        .route("/api/llm", get(get_llm).post(post_llm))
         .route("/ws", get(ws_upgrade))
         .fallback(static_handler)
         .with_state(app)
@@ -93,6 +94,22 @@ async fn workbooks(State(app): State<SharedApp>) -> Json<WorkbooksResponse> {
         redact_values: app.redact_values,
         workbooks,
     })
+}
+
+/// The chat model's connection, key omitted.
+async fn get_llm(State(app): State<SharedApp>) -> Json<dto::LlmStatusDto> {
+    Json(app.llm_status())
+}
+
+/// Reconfigure the chat model from the settings panel. `null` turns it off;
+/// otherwise the same rules as the startup flags (`LlmSettings::check`),
+/// and the key is read from the named environment variable of *this*
+/// process — a browser never sends one.
+async fn post_llm(
+    State(app): State<SharedApp>,
+    Json(settings): Json<Option<crate::llm::LlmSettings>>,
+) -> Result<Json<dto::LlmStatusDto>, ApiError> {
+    app.set_llm(settings).map(Json).map_err(bad_request)
 }
 
 /// A stored graph, flattened for layout and rendering.
@@ -508,6 +525,7 @@ async fn handle_socket(app: SharedApp, mut socket: WebSocket) {
                 dir: app.dir.clone(),
                 redact_values: app.redact_values,
                 workbooks: WorkbookDto::list(&app),
+                llm: app.llm_status(),
             })
             .expect("the hello event serialises")
         }

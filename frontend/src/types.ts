@@ -152,8 +152,32 @@ export interface ChatTurnDto {
   reply_to?: number;
 }
 
+export type LlmPrivacy = "off" | "passage" | "values";
+
+export interface LlmSettings {
+  base_url: string;
+  model: string;
+  privacy: LlmPrivacy;
+  // The *name* of the environment variable holding the key, read by the
+  // server; the key itself never passes through the browser.
+  api_key_env?: string;
+}
+
+export interface LlmStatusDto {
+  settings: LlmSettings | null;
+  key_present: boolean;
+  redact_values: boolean;
+}
+
 export type WsEvent =
-  | { type: "hello"; dir: string; redact_values: boolean; workbooks: WorkbookDto[] }
+  | {
+      type: "hello";
+      dir: string;
+      redact_values: boolean;
+      workbooks: WorkbookDto[];
+      llm: LlmStatusDto;
+    }
+  | { type: "llm"; status: LlmStatusDto }
   | {
       type: "corpus";
       added: string[];

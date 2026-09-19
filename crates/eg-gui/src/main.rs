@@ -48,9 +48,13 @@ async fn main() {
     let cli = Cli::parse();
     let llm = cli.llm_base_url.map(|base_url| LlmConfig {
         base_url,
-        api_key: cli.llm_api_key_env.and_then(|var| std::env::var(var).ok()),
+        api_key: cli
+            .llm_api_key_env
+            .as_ref()
+            .and_then(|var| std::env::var(var).ok()),
         model: cli.llm_model,
         privacy: cli.llm_privacy,
+        api_key_env: cli.llm_api_key_env,
     });
 
     if let Err(message) = eg_gui::run(GuiOptions {

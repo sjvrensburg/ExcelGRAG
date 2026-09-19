@@ -1114,3 +1114,77 @@ button.close:hover {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+.section-action {
+  float: right;
+  font-size: 11px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.llm-summary {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-summary.values {
+  color: var(--danger);
+}
+
+.llm-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.llm-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.llm-form input[type="text"],
+.llm-form input:not([type]) {
+  width: 100%;
+  font-size: 12px;
+}
+
+.llm-privacy {
+  display: flex;
+  gap: 12px;
+}
+
+.llm-privacy label {
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.llm-privacy label.refused {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.llm-note {
+  font-size: 11px;
+  color: var(--text-faint);
+  line-height: 1.35;
+}
+
+.chat-model-line {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin: -6px 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

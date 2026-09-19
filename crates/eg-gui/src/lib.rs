@@ -54,24 +54,13 @@ pub async fn run(opts: GuiOptions) -> Result<(), String> {
         )
         .try_init();
 
-    if opts.redact_values {
-        if let Some(llm) = &opts.llm {
-            if llm.privacy.allows_values() {
-                return Err(
-                    "eg gui: --redact-values and --llm-privacy values contradict each other — \
-                     a corpus told not to show cell values cannot also send them to an LLM"
-                        .to_string(),
-                );
-            }
-        }
-    }
+    // The same two checks `App::set_llm` runs for the settings panel, so
+    // the flags and the panel cannot drift apart on what is allowed.
     if let Some(llm) = &opts.llm {
-        if llm.privacy.allows_values() {
-            eprintln!(
-                "eg gui: --llm-privacy values is active — cited cell contents may be sent to {}",
-                llm.base_url
-            );
-        }
+        llm.settings()
+            .check(opts.redact_values)
+            .map_err(|e| format!("eg gui: {e}"))?;
+        llm.announce();
     }
 
     let llm_client = opts.llm.map(llm::Client::new);
@@ -127,6 +116,7 @@ mod tests {
                 api_key: None,
                 model: "test".to_string(),
                 privacy: llm::Privacy::Values,
+                api_key_env: None,
             }),
         })
         .await;

@@ -244,7 +244,10 @@ pub async fn run_turn(
     // resolve a follow-up against, and no explicit selection: a structured
     // context already says exactly what the turn is about, so condensing
     // free text against it would be answering a question nobody asked.
-    let resolved_query = match &app.llm {
+    // Cloned out once per turn: the panel may swap the model mid-session,
+    // and a turn should condense and compose with the same one.
+    let llm = app.llm();
+    let resolved_query = match &llm {
         Some(llm) if context.is_none() && llm.privacy.allows_llm() && !history.is_empty() => {
             Some(llm.condense(&history, message).await)
         }
@@ -336,7 +339,7 @@ pub async fn run_turn(
     // existing, tested `read_cells` MCP tool rather than re-deriving A1
     // parsing here — one more blocking engine call, locked and released on
     // its own.
-    let answer = match &app.llm {
+    let answer = match &llm {
         Some(llm) if llm.privacy.allows_llm() => {
             let values = if llm.privacy.allows_values() {
                 let app_for_values = Arc::clone(app);

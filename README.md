@@ -214,7 +214,11 @@ Chat works fully offline by default — a turn without an LLM configured is
 (any OpenAI-chat-completions-compatible endpoint, local or hosted) plus
 `--llm-privacy {off|passage|values}` add query-rewriting for follow-ups and a
 composed natural-language reply, with `off` as the default and `values`
-refused together with `--redact-values`.
+refused together with `--redact-values`. The same four settings can be
+changed while the server runs, from the sidebar's *Chat model* panel: it
+takes the *name* of the environment variable holding the API key (as
+`--llm-api-key-env` does), the server reads it, and nothing typed there is
+persisted — a restart starts from the flags again.
 
 ## How it works
 

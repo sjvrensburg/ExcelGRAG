@@ -17,6 +17,8 @@ use eg_retrieve::{Retrieved, Role, Search};
 use petgraph::visit::EdgeRef;
 use serde::Serialize;
 
+use crate::llm::LlmSettings;
+
 use crate::app::App;
 
 /// One workbook as the corpus lists it.
@@ -550,6 +552,19 @@ pub struct ChatTurnDto {
     pub reply_to: Option<u64>,
 }
 
+/// The chat model as the browser sees it. `settings` is `None` when no
+/// model has ever been configured; `privacy: off` inside it is a model
+/// configured but switched off. The key is never here — only whether one
+/// was found behind `api_key_env`.
+#[derive(Clone, Debug, Serialize)]
+pub struct LlmStatusDto {
+    pub settings: Option<LlmSettings>,
+    pub key_present: bool,
+    /// Repeated here so the panel can refuse `values` before the server
+    /// has to.
+    pub redact_values: bool,
+}
+
 /// What the WebSocket sends. One JSON object per message, tagged by `type`.
 #[derive(Serialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -559,7 +574,11 @@ pub enum WsEvent {
         dir: String,
         redact_values: bool,
         workbooks: Vec<WorkbookDto>,
+        llm: LlmStatusDto,
     },
+    /// The chat model was reconfigured from a settings panel; every tab
+    /// shows the same connection, as with everything else in the session.
+    Llm { status: LlmStatusDto },
     /// The corpus changed on disk — possibly underneath an open graph.
     Corpus {
         added: Vec<String>,
