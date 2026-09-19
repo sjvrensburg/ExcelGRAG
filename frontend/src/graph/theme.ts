@@ -113,6 +113,27 @@ export const DIM_EDGE = "#20242c";
 // unreadable. This draws the same style of pill with a fixed dark text
 // color instead, so a highlighted or selected node's label stays legible
 // regardless of what `labelColor` is set to.
+//
+// Pills drawn in one pass also avoid each other: a selected edge highlights
+// both its endpoints, and when those sit close (a defined name beside the
+// workbook node that contains it) the second pill landed on top of the
+// first and both were unreadable. Sigma draws every highlighted node's
+// label in one synchronous sweep, so the boxes placed so far are kept until
+// the microtask after that sweep and each new pill is nudged below any it
+// would cover.
+interface Box {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+const pillsThisPass: Box[] = [];
+let resetScheduled = false;
+
+function overlaps(a: Box, b: Box): boolean {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
 export function drawHighlightedLabel(
   context: CanvasRenderingContext2D,
   data: { x: number; y: number; size: number; label?: string | null },
@@ -125,10 +146,27 @@ export function drawHighlightedLabel(
   const paddingY = 2;
   const textWidth = context.measureText(data.label).width;
   const boxX = data.x + data.size + 3;
-  const boxY = data.y - size / 2 - paddingY;
+  let boxY = data.y - size / 2 - paddingY;
   const boxWidth = textWidth + paddingX * 2;
   const boxHeight = size + paddingY * 2;
   const radius = 3;
+
+  if (!resetScheduled) {
+    resetScheduled = true;
+    queueMicrotask(() => {
+      pillsThisPass.length = 0;
+      resetScheduled = false;
+    });
+  }
+  const box: Box = { x: boxX, y: boxY, w: boxWidth, h: boxHeight };
+  // Bounded: a pathological cluster stops nudging after a few rows rather
+  // than walking off the canvas.
+  for (let attempt = 0; attempt < 6 && pillsThisPass.some((p) => overlaps(p, box)); attempt++) {
+    box.y += boxHeight + 2;
+  }
+  boxY = box.y;
+  pillsThisPass.push(box);
+  const textY = boxY + paddingY + size / 2 + size / 3;
   context.fillStyle = "#f2f4f8";
   context.beginPath();
   if (context.roundRect) {
@@ -138,5 +176,5 @@ export function drawHighlightedLabel(
   }
   context.fill();
   context.fillStyle = "#12151a";
-  context.fillText(data.label, boxX + paddingX, data.y + size / 3);
+  context.fillText(data.label, boxX + paddingX, textY);
 }

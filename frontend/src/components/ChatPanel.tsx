@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { ChatTurnDto } from "../types";
+import type { ChatTurnDto, LlmStatusDto } from "../types";
 
 interface Props {
   turns: ChatTurnDto[];
@@ -13,7 +13,7 @@ interface Props {
   // sticking silently to every follow-up after it.
   context?: { label: string } | null;
   onClearContext?: () => void;
-  // This corpus was started with `--redact-values`. Directing a question to
+  // This server was started with `--redact-values`. Directing a question to
   // the agent is still fine (the question is free text the human typed, no
   // different from an ordinary message) — but the server refuses any
   // *reply* to one, since an agent's reply text can't be checked for cell
@@ -21,6 +21,9 @@ interface Props {
   // directed question doesn't read as "waiting" when it can, in fact, never
   // be answered.
   redactValues?: boolean;
+  // Shown under the title so a reply's provenance is never a guess: which
+  // model phrased it, or that none did.
+  llm?: LlmStatusDto | null;
 }
 
 // The shared session: a human's message here and an agent's `chat` MCP tool
@@ -42,9 +45,39 @@ export function ChatPanel({
   context,
   onClearContext,
   redactValues,
+  llm,
 }: Props) {
   const [message, setMessage] = useState("");
   const [toAgent, setToAgent] = useState(false);
+  const logRef = useRef<HTMLDivElement>(null);
+  // Whether the reader was at (or near) the bottom of the log before the
+  // latest change — the only case where a new turn should pull the view
+  // down. Someone scrolled up reading an old passage keeps their place when
+  // an agent's turn lands; someone who just sent a message sees the answer.
+  const stickToBottom = useRef(true);
+
+  useEffect(() => {
+    const log = logRef.current;
+    if (!log) return;
+    const onScroll = () => {
+      stickToBottom.current = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+    };
+    log.addEventListener("scroll", onScroll);
+    return () => log.removeEventListener("scroll", onScroll);
+  }, []);
+
+  const lastTurn = turns[turns.length - 1];
+  useEffect(() => {
+    const log = logRef.current;
+    if (!log || !lastTurn) return;
+    if (stickToBottom.current || lastTurn.source === "human") {
+      log.scrollTop = log.scrollHeight;
+      stickToBottom.current = true;
+    }
+    // A turn's answer can arrive after its id does (a directed turn's reply
+    // is a separate turn; the waiting placeholder becomes an answer), so
+    // the id and the answer are both triggers.
+  }, [lastTurn?.id, lastTurn?.answer, turns.length]);
 
   const submit = () => {
     const text = message.trim();
@@ -64,7 +97,12 @@ export function ChatPanel({
   return (
     <section className="side-section chat-section grow">
       <div className="section-title">Chat</div>
-      <div className="chat-log">
+      <div className="chat-model-line">
+        {llm?.settings && llm.settings.privacy !== "off"
+          ? `${llm.settings.model} · ${llm.settings.privacy}`
+          : "no model — replies are the rendered passage"}
+      </div>
+      <div className="chat-log" ref={logRef}>
         {turns.length === 0 && (
           <div className="empty-note">
             Ask the workbook something, or have an agent call the `chat` MCP
@@ -84,7 +122,7 @@ export function ChatPanel({
                 <span className="chat-source-tag">
                   {turn.source === "agent" ? "agent" : "you"}
                 </span>
-                {turn.reply_to != null && <span className="chat-reply-tag">reply</span>}
+                {turn.reply_to != null && <span className="chat-reply-tag">reply to</span>}
                 {turn.message}
                 {turn.directed_to === "agent" && (
                   <span className="chat-directed-tag">→ your agent</span>
@@ -93,7 +131,7 @@ export function ChatPanel({
               {pending ? (
                 <div className="chat-turn-answer chat-turn-waiting">
                   {redactValues
-                    ? "an agent's reply is refused on this corpus (--redact-values) — this will stay pending"
+                    ? "an agent's reply is refused while this server runs --redact-values — this will stay pending"
                     : "waiting for an agent to answer…"}
                 </div>
               ) : (
@@ -118,7 +156,7 @@ export function ChatPanel({
         className="to-agent-toggle"
         title={
           redactValues
-            ? "Route this message to whichever agent is attached over MCP instead of asking the workbook directly. This corpus was indexed with --redact-values, so an agent's reply is refused — the question will sit pending."
+            ? "Route this message to whichever agent is attached over MCP instead of asking the workbook directly. This server was started with --redact-values, so an agent's reply is refused — the question will sit pending."
             : "Route this message to whichever agent is attached over MCP instead of asking the workbook directly. It won't get an instant reply."
         }
       >
@@ -131,7 +169,7 @@ export function ChatPanel({
       </label>
       {toAgent && redactValues && (
         <div className="to-agent-redact-note">
-          this corpus was indexed with --redact-values: an agent's reply would be refused, so this
+          this server was started with --redact-values: an agent's reply would be refused, so this
           will stay pending
         </div>
       )}

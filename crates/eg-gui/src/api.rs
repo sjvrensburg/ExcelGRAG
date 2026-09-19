@@ -65,6 +65,7 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/index", post(index))
         .route("/api/chat", post(post_chat))
         .route("/api/chat/{session_id}", get(get_chat))
+        .route("/api/llm", get(get_llm).post(post_llm))
         .route("/ws", get(ws_upgrade))
         .fallback(static_handler)
         .with_state(app)
@@ -93,6 +94,22 @@ async fn workbooks(State(app): State<SharedApp>) -> Json<WorkbooksResponse> {
         redact_values: app.redact_values,
         workbooks,
     })
+}
+
+/// The chat model's connection, key omitted.
+async fn get_llm(State(app): State<SharedApp>) -> Json<dto::LlmStatusDto> {
+    Json(app.llm_status())
+}
+
+/// Reconfigure the chat model from the settings panel. `null` turns it off;
+/// otherwise the same rules as the startup flags (`LlmSettings::check`),
+/// and the key is read from the named environment variable of *this*
+/// process — a browser never sends one.
+async fn post_llm(
+    State(app): State<SharedApp>,
+    Json(settings): Json<Option<crate::llm::LlmSettings>>,
+) -> Result<Json<dto::LlmStatusDto>, ApiError> {
+    app.set_llm(settings).map(Json).map_err(bad_request)
 }
 
 /// A stored graph, flattened for layout and rendering.
@@ -267,6 +284,14 @@ pub(crate) struct AskEngineResult {
     /// values from in `--llm-privacy values` mode.
     pub workbook: Option<String>,
     pub sheet: Option<String>,
+    /// What the top hit was found on — `chat::run_turn` reads it to decide
+    /// whether a sticky sheet scope helped or hid the answer.
+    pub verdict: eg_retrieve::Verdict,
+    /// How many of the question's words the top hit carries
+    /// (`Search::covered`). The verdict alone cannot tell a scope that hid
+    /// the answer from a question with a word the corpus never indexed —
+    /// both are `Partial` — so `chat::run_turn` compares this instead.
+    pub covered: usize,
 }
 
 pub(crate) fn ask_engine(
@@ -278,6 +303,8 @@ pub(crate) fn ask_engine(
     let found = search_engine(app, search_params)?;
     let search_dto = dto::search_dto(&found);
     let evidence = found.evidence();
+    let verdict = found.verdict();
+    let covered = found.covered.len();
     let workbook = found.hits.first().map(|h| h.workbook.clone());
     let sheet = found.hits.first().and_then(|h| h.sheet.clone());
 
@@ -297,6 +324,8 @@ pub(crate) fn ask_engine(
         evidence,
         workbook,
         sheet,
+        verdict,
+        covered,
     })
 }
 
@@ -362,6 +391,10 @@ pub(crate) fn ask_engine_for_node(
         evidence,
         workbook: Some(hash),
         sheet: hit.sheet,
+        verdict: eg_retrieve::Verdict::Full,
+        // A selection carries no question words to cover; nothing reads
+        // this on the selected-node path.
+        covered: 0,
     })
 }
 
@@ -492,6 +525,7 @@ async fn handle_socket(app: SharedApp, mut socket: WebSocket) {
                 dir: app.dir.clone(),
                 redact_values: app.redact_values,
                 workbooks: WorkbookDto::list(&app),
+                llm: app.llm_status(),
             })
             .expect("the hello event serialises")
         }

@@ -484,9 +484,12 @@ fn main() {
                     privacy.redact_values,
                     llm_base_url.map(|base_url| eg_gui::llm::LlmConfig {
                         base_url,
-                        api_key: llm_api_key_env.and_then(|var| std::env::var(var).ok()),
+                        api_key: llm_api_key_env
+                            .as_ref()
+                            .and_then(|var| std::env::var(var).ok()),
                         model: llm_model,
                         privacy: llm_privacy,
+                        api_key_env: llm_api_key_env,
                     }),
                 )
             }

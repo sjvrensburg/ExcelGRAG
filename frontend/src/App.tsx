@@ -15,6 +15,7 @@ import type {
   ChatTurnDto,
   EdgeDto,
   GraphDto,
+  LlmStatusDto,
   NodeDetailDto,
   SearchDto,
   WorkbookDto,
@@ -38,8 +39,10 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [dir, setDir] = useState("");
   const [redactValues, setRedactValues] = useState(false);
+  const [llm, setLlm] = useState<LlmStatusDto | null>(null);
   const [workbooks, setWorkbooks] = useState<WorkbookDto[]>([]);
   const [indexing, setIndexing] = useState(false);
+  const [indexResult, setIndexResult] = useState<{ path: string; ok: boolean; nonce: number } | null>(null);
 
   const [graph, setGraph] = useState<GraphDto | null>(null);
   const [graphBusy, setGraphBusy] = useState(false);
@@ -117,10 +120,15 @@ export default function App() {
   }, []);
 
   // --- WebSocket -----------------------------------------------------------
+  const jumpToHitRef = useRef<((workbook: string, node: number) => void) | null>(null);
   const onWsEvent = useCallback(
     (event: WsEvent) => {
       switch (event.type) {
+        case "llm":
+          setLlm(event.status);
+          break;
         case "hello":
+          setLlm(event.llm);
           setDir(event.dir);
           setRedactValues(event.redact_values);
           setWorkbooks(event.workbooks);
@@ -144,6 +152,7 @@ export default function App() {
           break;
         case "index_done":
           setIndexing(false);
+          setIndexResult((prev) => ({ path: event.path, ok: event.ok, nonce: (prev?.nonce ?? 0) + 1 }));
           log(
             event.ok
               ? `indexed ${event.path}`
@@ -166,13 +175,15 @@ export default function App() {
           }
           break;
         case "navigate":
+          // An agent's `gui_show`: the same open-then-select as clicking a
+          // search hit, not a bare camera move — centring on an unlabelled
+          // dot in a cluster of identical ones told the human nothing about
+          // *which* node the agent meant. `event.workbook` arrives as a
+          // content hash (the bridge resolves a name or path before
+          // sending), so comparing it to the open workbook is meaningful.
           if (event.session_id === DEFAULT_SESSION) {
-            if (event.workbook && event.workbook !== currentHash.current) {
-              pendingAsk.current = () => setFocus({ id: event.node, nonce: ++focusNonce.current });
-              openWorkbook(event.workbook);
-            } else {
-              setFocus({ id: event.node, nonce: ++focusNonce.current });
-            }
+            const target = event.workbook ?? currentHash.current;
+            if (target) jumpToHitRef.current?.(target, event.node);
           }
           break;
       }
@@ -433,6 +444,12 @@ export default function App() {
     },
     [openWorkbook, selectNode],
   );
+  // `onWsEvent` is created above `jumpToHit` and memoised on `log` alone;
+  // the ref lets a `navigate` event reach the current `jumpToHit` without
+  // re-subscribing the socket on every render that changes it.
+  useEffect(() => {
+    jumpToHitRef.current = jumpToHit;
+  }, [jumpToHit]);
 
   const askAboutSelection = useCallback(() => {
     const hash = currentHash.current;
@@ -478,6 +495,9 @@ export default function App() {
         onHit={jumpToHit}
         logs={logs}
         indexing={indexing}
+        indexResult={indexResult}
+        llm={llm}
+        onLlmChanged={setLlm}
       />
 
       <main className="main">
@@ -485,7 +505,7 @@ export default function App() {
           <div className="topbar-title">
             {current ? fileName(current.path) : graphBusy ? "opening…" : "no workbook open"}
           </div>
-          <QuickSearch workbook={currentHash.current} onSelect={jumpToHit} />
+          <QuickSearch workbook={currentHash.current} workbooks={workbooks} onSelect={jumpToHit} />
           {graph && counts && (
             <div className="topbar-stats">
               {fmt(counts.nodes)}/{fmt(graph.nodes.length)} nodes ·{" "}
@@ -568,6 +588,7 @@ export default function App() {
           context={chatContext}
           onClearContext={() => setChatContext(null)}
           redactValues={redactValues}
+          llm={llm}
         />
       </aside>
     </div>
