@@ -70,7 +70,13 @@ with `--redact-values`, since sending values contradicts a corpus told not to
 show them. `values` mode is this codebase's one deliberate, opt-in exception
 to "nothing about a workbook leaves the machine" (below) — `eg gui` logs
 which base URL will receive them the moment the mode is active, so it is
-never a silent behavior.
+never a silent behavior. The browser's *Chat model* panel (`GET`/`POST
+/api/llm`, `App::set_llm`) changes all of this at runtime and goes through
+the same `LlmSettings::check` and announcement the flags do; it names the
+key's environment variable rather than carrying the key, and holds the
+settings in memory only. The condense step's rewrite is shape-checked
+(`accept_rewrite`) because a local model was seen answering the question
+instead of restating it, and the answer then became the search query.
 
 `eg-fixtures` generates the demo workbook every one of those can be run
 against — a fictional distributor's trade debtor impairment, deterministic

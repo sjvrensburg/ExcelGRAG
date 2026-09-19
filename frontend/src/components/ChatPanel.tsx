@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { ChatTurnDto } from "../types";
+import type { ChatTurnDto, LlmStatusDto } from "../types";
 
 interface Props {
   turns: ChatTurnDto[];
@@ -21,6 +21,9 @@ interface Props {
   // directed question doesn't read as "waiting" when it can, in fact, never
   // be answered.
   redactValues?: boolean;
+  // Shown under the title so a reply's provenance is never a guess: which
+  // model phrased it, or that none did.
+  llm?: LlmStatusDto | null;
 }
 
 // The shared session: a human's message here and an agent's `chat` MCP tool
@@ -42,6 +45,7 @@ export function ChatPanel({
   context,
   onClearContext,
   redactValues,
+  llm,
 }: Props) {
   const [message, setMessage] = useState("");
   const [toAgent, setToAgent] = useState(false);
@@ -93,6 +97,11 @@ export function ChatPanel({
   return (
     <section className="side-section chat-section grow">
       <div className="section-title">Chat</div>
+      <div className="chat-model-line">
+        {llm?.settings && llm.settings.privacy !== "off"
+          ? `${llm.settings.model} · ${llm.settings.privacy}`
+          : "no model — replies are the rendered passage"}
+      </div>
       <div className="chat-log" ref={logRef}>
         {turns.length === 0 && (
           <div className="empty-note">

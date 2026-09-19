@@ -15,6 +15,7 @@ import type {
   ChatTurnDto,
   EdgeDto,
   GraphDto,
+  LlmStatusDto,
   NodeDetailDto,
   SearchDto,
   WorkbookDto,
@@ -38,6 +39,7 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [dir, setDir] = useState("");
   const [redactValues, setRedactValues] = useState(false);
+  const [llm, setLlm] = useState<LlmStatusDto | null>(null);
   const [workbooks, setWorkbooks] = useState<WorkbookDto[]>([]);
   const [indexing, setIndexing] = useState(false);
   const [indexResult, setIndexResult] = useState<{ path: string; ok: boolean; nonce: number } | null>(null);
@@ -122,7 +124,11 @@ export default function App() {
   const onWsEvent = useCallback(
     (event: WsEvent) => {
       switch (event.type) {
+        case "llm":
+          setLlm(event.status);
+          break;
         case "hello":
+          setLlm(event.llm);
           setDir(event.dir);
           setRedactValues(event.redact_values);
           setWorkbooks(event.workbooks);
@@ -490,6 +496,8 @@ export default function App() {
         logs={logs}
         indexing={indexing}
         indexResult={indexResult}
+        llm={llm}
+        onLlmChanged={setLlm}
       />
 
       <main className="main">
@@ -580,6 +588,7 @@ export default function App() {
           context={chatContext}
           onClearContext={() => setChatContext(null)}
           redactValues={redactValues}
+          llm={llm}
         />
       </aside>
     </div>
