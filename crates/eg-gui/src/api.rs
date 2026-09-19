@@ -270,6 +270,11 @@ pub(crate) struct AskEngineResult {
     /// What the top hit was found on — `chat::run_turn` reads it to decide
     /// whether a sticky sheet scope helped or hid the answer.
     pub verdict: eg_retrieve::Verdict,
+    /// How many of the question's words the top hit carries
+    /// (`Search::covered`). The verdict alone cannot tell a scope that hid
+    /// the answer from a question with a word the corpus never indexed —
+    /// both are `Partial` — so `chat::run_turn` compares this instead.
+    pub covered: usize,
 }
 
 pub(crate) fn ask_engine(
@@ -282,6 +287,7 @@ pub(crate) fn ask_engine(
     let search_dto = dto::search_dto(&found);
     let evidence = found.evidence();
     let verdict = found.verdict();
+    let covered = found.covered.len();
     let workbook = found.hits.first().map(|h| h.workbook.clone());
     let sheet = found.hits.first().and_then(|h| h.sheet.clone());
 
@@ -302,6 +308,7 @@ pub(crate) fn ask_engine(
         workbook,
         sheet,
         verdict,
+        covered,
     })
 }
 
@@ -368,6 +375,9 @@ pub(crate) fn ask_engine_for_node(
         workbook: Some(hash),
         sheet: hit.sheet,
         verdict: eg_retrieve::Verdict::Full,
+        // A selection carries no question words to cover; nothing reads
+        // this on the selected-node path.
+        covered: 0,
     })
 }
 

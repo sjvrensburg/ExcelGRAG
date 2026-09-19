@@ -90,8 +90,7 @@ export function QuickSearch({ workbook, workbooks, onSelect }: Props) {
   // follows is nearest-by-meaning filler, shown dimmed rather than hidden so
   // a near-miss spelling can still be picked.
   const blind = evidence !== null && evidence.verdict !== "full" && evidence.verdict !== "partial";
-  const nameOf = (hash: string) =>
-    (workbooks.find((w) => w.hash === hash)?.path ?? hash).split("/").pop() ?? hash;
+  const nameOf = (hash: string) => fileName(workbooks.find((w) => w.hash === hash)?.path ?? hash);
 
   return (
     <div className="quick-search" ref={rootRef}>
@@ -154,4 +153,11 @@ export function QuickSearch({ workbook, workbooks, onSelect }: Props) {
       )}
     </div>
   );
+}
+
+// Either separator: a corpus can be indexed from a Windows path, and the
+// sidebar and topbar already show such a workbook by its file name.
+function fileName(path: string): string {
+  const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return slash >= 0 ? path.slice(slash + 1) : path;
 }
