@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::broadcast;
 
 use crate::chat::ChatSession;
-use crate::dto::WsEvent;
+use crate::dto::{LlmStatusDto, WsEvent};
 use crate::llm;
 
 pub struct App {
@@ -40,8 +40,19 @@ pub struct App {
     /// Chat sessions, keyed by id. A second, independent lock from `engine` —
     /// `chat::run_turn` never holds both at once (see its doc comment).
     sessions: Mutex<HashMap<String, ChatSession>>,
-    /// The chat model, if `--llm-privacy` is anything but `off`.
-    pub llm: Option<llm::Client>,
+    /// The chat model. A lock rather than a field fixed at startup because
+    /// the GUI's settings panel can change it (`set_llm`); readers clone
+    /// the `Client` out (`llm()`) so nothing holds this across an `.await`.
+    llm: Mutex<LlmSlot>,
+}
+
+/// The connection as configured, and the live client when the privacy tier
+/// is anything but `off`. Settings outlive the client so that switching to
+/// `off` and back doesn't lose the URL and model typed in.
+#[derive(Default)]
+struct LlmSlot {
+    settings: Option<llm::LlmSettings>,
+    client: Option<llm::Client>,
 }
 
 impl App {
@@ -55,8 +66,68 @@ impl App {
             events,
             indexing: Mutex::new(None),
             sessions: Mutex::new(HashMap::new()),
-            llm,
+            llm: Mutex::new(LlmSlot {
+                settings: llm.as_ref().map(|c| c.settings().clone()),
+                client: llm,
+            }),
         })
+    }
+
+    fn llm_slot(&self) -> MutexGuard<'_, LlmSlot> {
+        self.llm
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The chat model to use for a turn, if any — a clone, so the caller
+    /// holds no lock while it awaits the network.
+    pub fn llm(&self) -> Option<llm::Client> {
+        self.llm_slot().client.clone()
+    }
+
+    /// The connection as the GUI shows it: settings (never the key) plus
+    /// whether a key was found behind the named variable.
+    pub fn llm_status(&self) -> LlmStatusDto {
+        let slot = self.llm_slot();
+        LlmStatusDto {
+            settings: slot.settings.clone(),
+            key_present: slot.client.as_ref().is_some_and(|c| c.key_present()),
+            redact_values: self.redact_values,
+        }
+    }
+
+    /// Replace the chat model from the GUI. Goes through the same checks
+    /// startup does (`LlmSettings::check`), reads the key from the named
+    /// variable now so a missing one is refused here rather than failing
+    /// every turn, and announces `values` mode on stderr exactly as the
+    /// flag would — the browser being the origin of the change makes it no
+    /// less something the person at the terminal should see. `None` turns
+    /// the model off and forgets the settings.
+    pub fn set_llm(&self, settings: Option<llm::LlmSettings>) -> Result<LlmStatusDto, String> {
+        let (settings, client) = match settings {
+            None => (None, None),
+            Some(settings) => {
+                settings.check(self.redact_values)?;
+                let client = if settings.privacy.allows_llm() {
+                    let config = settings.resolve()?;
+                    config.announce();
+                    Some(llm::Client::new(config))
+                } else {
+                    None
+                };
+                (Some(settings), client)
+            }
+        };
+        {
+            let mut slot = self.llm_slot();
+            slot.settings = settings;
+            slot.client = client;
+        }
+        let status = self.llm_status();
+        self.send(WsEvent::Llm {
+            status: status.clone(),
+        });
+        Ok(status)
     }
 
     /// The engine, recovering from a poisoned lock rather than propagating
@@ -129,3 +200,84 @@ pub fn resolve_hash_optional(app: &App, wanted: &Option<String>) -> Result<Optio
 
 /// Everything a handler needs, in one Arc.
 pub type SharedApp = Arc<App>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::{LlmSettings, Privacy};
+
+    fn app(redact_values: bool) -> (App, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let app = App::new(dir.path().to_str().unwrap(), redact_values, None).expect("opens");
+        (app, dir)
+    }
+
+    fn settings(privacy: Privacy, api_key_env: Option<&str>) -> LlmSettings {
+        LlmSettings {
+            base_url: "http://127.0.0.1:1/v1".to_string(),
+            model: "test".to_string(),
+            privacy,
+            api_key_env: api_key_env.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn values_is_refused_under_redact_values_from_the_panel_too() {
+        let (app, _dir) = app(true);
+        let err = app
+            .set_llm(Some(settings(Privacy::Values, None)))
+            .expect_err("the same rule as the startup flags");
+        assert!(err.contains("redact-values"), "{err}");
+        assert!(
+            app.llm().is_none(),
+            "a refused change leaves no client behind"
+        );
+    }
+
+    #[test]
+    fn a_missing_key_variable_is_refused_at_apply_time() {
+        let (app, _dir) = app(false);
+        let err = app
+            .set_llm(Some(settings(
+                Privacy::Passage,
+                Some("EG_TEST_KEY_THAT_IS_NOT_SET"),
+            )))
+            .expect_err("an unset variable must not become a keyless client");
+        assert!(err.contains("EG_TEST_KEY_THAT_IS_NOT_SET"), "{err}");
+    }
+
+    #[test]
+    fn off_keeps_the_settings_but_no_client() {
+        let (app, _dir) = app(false);
+        let status = app
+            .set_llm(Some(settings(Privacy::Off, None)))
+            .expect("off needs nothing");
+        assert!(app.llm().is_none());
+        assert_eq!(status.settings.map(|s| s.privacy), Some(Privacy::Off));
+    }
+
+    #[test]
+    fn passage_with_a_present_key_builds_a_client_and_never_reports_the_key() {
+        let (app, _dir) = app(false);
+        // Set for this process only; the name is what the panel sends.
+        std::env::set_var("EG_TEST_LLM_KEY", "sk-not-a-real-key");
+        let status = app
+            .set_llm(Some(settings(Privacy::Passage, Some("EG_TEST_LLM_KEY"))))
+            .expect("a resolvable key");
+        assert!(status.key_present);
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(
+            !json.contains("sk-not-a-real-key"),
+            "the key leaked: {json}"
+        );
+        assert!(
+            json.contains("EG_TEST_LLM_KEY"),
+            "the variable name is reported"
+        );
+        assert!(app.llm().is_some_and(|c| c.privacy.allows_llm()));
+
+        // And back off again forgets the client, not the URL.
+        let status = app.set_llm(None).expect("off");
+        assert!(status.settings.is_none() && app.llm().is_none());
+    }
+}

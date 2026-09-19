@@ -2,6 +2,8 @@ import type {
   AskResponse,
   ChatTurnDto,
   GraphDto,
+  LlmSettings,
+  LlmStatusDto,
   NodeDetailDto,
   SearchDto,
   WorkbookDto,
@@ -68,6 +70,21 @@ export async function postIndex(body: {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
+  }));
+}
+
+export function getLlm(): Promise<LlmStatusDto> {
+  return json(fetch("/api/llm"));
+}
+
+// `null` turns the model off. The server applies the same checks the
+// startup flags get (values under --redact-values, a missing key
+// variable) and answers 400 with the reason.
+export function postLlm(settings: LlmSettings | null): Promise<LlmStatusDto> {
+  return json(fetch("/api/llm", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(settings),
   }));
 }
 

@@ -244,7 +244,10 @@ pub async fn run_turn(
     // resolve a follow-up against, and no explicit selection: a structured
     // context already says exactly what the turn is about, so condensing
     // free text against it would be answering a question nobody asked.
-    let resolved_query = match &app.llm {
+    // Cloned out once per turn: the panel may swap the model mid-session,
+    // and a turn should condense and compose with the same one.
+    let llm = app.llm();
+    let resolved_query = match &llm {
         Some(llm) if context.is_none() && llm.privacy.allows_llm() && !history.is_empty() => {
             Some(llm.condense(&history, message).await)
         }
@@ -279,12 +282,49 @@ pub async fn run_turn(
                 limit: None,
                 lexical_only: None,
             };
-            api::ask_engine(
+            let scoped = api::ask_engine(
                 &app_for_engine,
                 &params,
                 &eg_retrieve::ExpandOptions::default(),
                 &eg_retrieve::RenderOptions::default(),
-            )
+            )?;
+            // The sticky sheet is a tiebreak for a follow-up ("total" on the
+            // sheet just discussed), not a filter: `find_in` scoped to a
+            // sheet cannot see a workbook-scoped defined name at all, and
+            // hides every other sheet's better match. Live-testing found
+            // "tax rate" answered with the Rates sheet's "Discount Rate"
+            // because an earlier turn had pinned the scope to Rates, while
+            // `Tax_Rate` — the exact answer — sat unstarred at [14]. So when
+            // the scoped top hit does not carry every content word, search
+            // the whole workbook too — and keep that result only if its top
+            // hit carries strictly *more* of the question's words. The
+            // verdict alone is not enough: a question with one word the
+            // corpus never indexed ("the total here") is `Partial` on both
+            // searches, and adopting the unscoped one on the verdict would
+            // hop the scope to whichever sheet's "Total" ranks first
+            // corpus-wide, exactly the follow-up the sticky sheet is for.
+            let scope_may_hide = params.sheet.is_some()
+                && !matches!(
+                    scoped.verdict,
+                    eg_retrieve::Verdict::Full | eg_retrieve::Verdict::NoContentWords
+                );
+            if scope_may_hide {
+                let unscoped_params = SearchParams {
+                    sheet: None,
+                    ..params
+                };
+                let unscoped = api::ask_engine(
+                    &app_for_engine,
+                    &unscoped_params,
+                    &eg_retrieve::ExpandOptions::default(),
+                    &eg_retrieve::RenderOptions::default(),
+                )?;
+                let scoped_found_nothing = matches!(scoped.verdict, eg_retrieve::Verdict::Nothing);
+                if unscoped.covered > scoped.covered || scoped_found_nothing {
+                    return Ok(unscoped);
+                }
+            }
+            Ok(scoped)
         }
     })
     .await
@@ -299,7 +339,7 @@ pub async fn run_turn(
     // existing, tested `read_cells` MCP tool rather than re-deriving A1
     // parsing here — one more blocking engine call, locked and released on
     // its own.
-    let answer = match &app.llm {
+    let answer = match &llm {
         Some(llm) if llm.privacy.allows_llm() => {
             let values = if llm.privacy.allows_values() {
                 let app_for_values = Arc::clone(app);
@@ -436,8 +476,8 @@ pub fn pending_for_agent(app: &App, session_id: &str) -> Vec<ChatTurnDto> {
 /// `ChatTurn.answer` is either the rendered passage (which `render()`
 /// guarantees never carries a cell value) or an LLM's `compose()`, gated by
 /// `--llm-privacy`; this one is free text an agent typed, with nothing in
-/// this process able to tell whether it quotes a cell value or not. A corpus
-/// indexed with `--redact-values` exists so that nothing about a workbook's
+/// this process able to tell whether it quotes a cell value or not. A server
+/// started with `--redact-values` exists so that nothing about a workbook's
 /// contents leaves the machine — accepting arbitrary agent text into the
 /// persisted `chat/<session>.json` would make that promise unenforceable,
 /// so the reply is refused rather than accepted and trusted.
@@ -449,7 +489,7 @@ pub fn reply_to_agent_turn(
 ) -> Result<ChatTurnDto, String> {
     if app.redact_values {
         return Err(
-            "this corpus was indexed with --redact-values; an agent's reply text can't be \
+            "this server was started with --redact-values; an agent's reply text can't be \
              checked for cell values, so replying to a directed chat turn is refused here — \
              use `read_cells`/`what_if` etc. against the corpus directly instead"
                 .to_string(),
@@ -606,6 +646,76 @@ mod tests {
                 "follow-up citation {citation:?} should stay on {first_sheet:?} via sticky scope"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn sticky_scope_widens_when_the_answer_is_on_another_sheet() {
+        let (app, _dir) = indexed_app().await;
+        // Pins the sticky sheet to wherever "Discount Rate" ranks first.
+        let first = run_turn(
+            &app,
+            DEFAULT_SESSION,
+            TurnSource::Human,
+            "discount rate",
+            None,
+        )
+        .await
+        .expect("the first turn runs");
+        assert!(first.citations[0].contains('!'), "a citation names a sheet");
+
+        // `Tax_Rate` is a workbook-scoped defined name: a sheet-scoped search
+        // cannot return it at all, so the scoped top hit for this question
+        // carries "rate" but not "tax". That must widen to the workbook and
+        // star the name, not answer with the pinned sheet's nearest column.
+        let second = run_turn(&app, DEFAULT_SESSION, TurnSource::Human, "tax rate", None)
+            .await
+            .expect("the second turn runs");
+        assert!(
+            second.answer.contains("* defined name \"Tax_Rate\""),
+            "the sticky sheet hid the defined name:\n{}",
+            second.answer
+        );
+    }
+
+    #[tokio::test]
+    async fn sticky_scope_survives_a_word_the_corpus_never_indexed() {
+        let (app, _dir) = indexed_app().await;
+        run_turn(
+            &app,
+            DEFAULT_SESSION,
+            TurnSource::Human,
+            "rates lookup table",
+            None,
+        )
+        .await
+        .expect("the first turn runs");
+        let pinned = app
+            .sessions()
+            .get(DEFAULT_SESSION)
+            .and_then(|s| s.sheet.clone())
+            .expect("the first turn pins a sheet");
+
+        // "qwertyuiop" is in no column name, so the scoped and the unscoped
+        // search are both `Partial` — widening on the verdict alone would
+        // adopt the workbook-wide ranking, whose "rate" is the Debtors
+        // column, and hop the scope off the sheet just discussed. The scoped
+        // top hit carries "rate" just as well, so nothing was hidden and
+        // the sticky sheet must hold.
+        let second = run_turn(
+            &app,
+            DEFAULT_SESSION,
+            TurnSource::Human,
+            "rate qwertyuiop",
+            None,
+        )
+        .await
+        .expect("the second turn runs");
+        let citation = second.citations.first().expect("a citation");
+        assert!(
+            citation.starts_with(&format!("{pinned}!")),
+            "follow-up citation {citation:?} should stay on {pinned:?}:\n{}",
+            second.answer
+        );
     }
 
     #[tokio::test]
