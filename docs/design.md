@@ -45,6 +45,7 @@ the invariants and working rules that fall out of everything below.
 - [Recomputing a number](#recomputing-a-number)
 - [What if this number were different](#what-if-this-number-were-different)
 - [Serving it to an agent](#serving-it-to-an-agent)
+- [Letting the model drive](#letting-the-model-drive)
 - [How this is tested](#how-this-is-tested)
 
 
@@ -945,6 +946,134 @@ stays at the `passage` shape regardless of which tier produced a turn, so a
 `values`-mode answer does not leave a copy of the values it was allowed to
 see, for that one request, sitting on disk afterward.
 
+
+## Letting the model drive
+
+`eg gui`'s chat and `eg ask` are one pipeline with a model at either end:
+condense the question, `find → expand → render`, phrase the passage. The
+model never chooses what to look at. That is the right shape for "where is
+the provision" and the wrong one for "why does this total disagree with
+last month's" — the second is an investigation, and an investigation is a
+sequence of tool calls whose next step depends on the last result. `eg-agent`
+is that: the model is given the thirteen `eg-mcp` tools and drives them
+itself, and the harness's job is to make every step visible and to keep the
+model within a budget.
+
+It is built on Rig's `AgentRun` rather than Rig's `Agent`. The two do the
+same loop; the difference is who holds it. `Agent` runs the loop inside the
+framework and reports through hooks. `AgentRun` is sans-IO — it hands back
+"call the model with these messages" or "run these tool calls", the caller
+does that and feeds the result in, and the machine is a plain `serde` value
+between steps. The second is what this project needs. The corpus lock
+discipline `chat.rs` keeps (taken, used, released before any model
+`.await`) is trivial to keep when the harness makes every call itself, and
+would be an argument with a hook stack otherwise; a run that is a value can
+be written into `corpus/chat/<id>.json` mid-investigation and resumed by
+another process — which is how a browser tab and an MCP-attached agent get
+to share one; and a policy that sits between the model's intent and the
+tool's execution is a `match` rather than a plug-in.
+
+The policy is about cost, not permission. Nothing in `eg` writes to a
+workbook — `what_if` is an overlay — so there is no tool a model should be
+forbidden. There are two it should be rationed: `dependents` and
+`find_value` scan every formula or every cell, tens of millions on the
+reference file, and a model that has not found what it wants will call one
+per turn until stopped. The budget is small and the refusal is a sentence
+the model reads as the tool's result, in the same register as the tools'
+own refusals, so it changes course instead of failing. The other rule is
+that a call repeated verbatim is refused: a model that asks the same thing
+twice has stopped reading the answer, and telling it so costs one turn
+where letting it run costs the rest.
+
+The tools are not declared a second time. `eg-gui`'s bridge iterates
+`eg_mcp::tools::TOOLS`; so does this. Rig's own `Tool` trait was not used
+for them — it wants one type per tool with a `const NAME`, which is the
+right shape for a tool written in Rust for a model and the wrong one for a
+table of thirteen that already exists — and Rig's MCP client (`rig-rmcp`)
+was not used either: the engine is in the same process, and going out over
+MCP to reach it would add a protocol round trip to every call and pin a
+second `rmcp` major version next to the one `eg-gui` uses.
+
+One thing about depending on Rig is worth writing down because it cost an
+afternoon to see: use `rig-agent` and `rig-core` directly, not the `rig`
+facade. The facade lists every integration as an optional dependency, and
+Cargo resolves optional dependencies whether or not their feature is on —
+so `rig-fastembed`'s pin on fastembed 4 / ort rc.9 lands in the lockfile
+beside `eg-index`'s fastembed 6 / ort rc.13, `ort` pins exact versions, and
+the workspace refuses to resolve at all. That is the friendly failure. The
+unfriendly one, had the versions been compatible, is two ONNX runtimes
+linked into one binary.
+
+The model is any OpenAI-chat-completions-compatible endpoint, the same
+choice `eg gui` made and for the same reason: a local `llama-server` and a
+hosted API are one client. What that means for a standalone app is that
+"bundled model" is a sidecar process and a download, not a link-time
+dependency — Candle in-process (`rig-candle`) was looked at and set aside,
+because its quantized cache caps the context at 4096 tokens and thirteen
+tool schemas plus a preamble plus one rendered passage is most of that
+before the model has said anything, and because it has no Vulkan or ROCm
+backend, so on the machine this was developed on it would run on the CPU
+beside an idle GPU.
+
+Whether a local model can actually navigate a workbook with these tools is
+not something to reason about; `eg-agent --score` measures it, against the
+demo corpus and `tests/fixtures/demo/answers.json`, marking whether the
+agent's *final reply* names an answer. That is a different mark from the
+retrieval scorer's, which asks whether the right node was *ranked*: here
+the model chose the tools, read the results, and wrote the sentence. The
+mark is *grounded*: the reply must name an answer **and** a tool the model
+called must have returned it. The first version of the scorer checked the
+reply alone and credited a 4B model with 14 of 17 — four of them replies
+that never called a tool and simply echoed the question's own words back,
+and one that described "the `find_value` scan that was performed" with no
+call made. The scorer now reports those as `ECHO`, and the harness sends
+an answer given before any tool has run back to the model with the reason
+(`Policy::max_ungrounded_retries`), because `tool_choice: required` turned
+out to be best-effort on a local server: llama.cpp's Qwen3 template binds a
+lazy grammar that only takes hold once the model has started a
+`<tool_call>`, and a model that starts with prose is never constrained.
+Two more rules came out of the same trail. A model call carries
+`max_tokens` — a 4B model under forced tool choice generated twenty
+thousand tokens for a one-word question and would still be going — and
+the preamble carries the corpus's workbook listing, because every tool
+takes a workbook argument and a model that does not know the names
+invents one (`"default"`) and then reasons from the refusal.
+
+With those in place, a 4-billion-parameter model (Qwen3-4B-Instruct,
+Q4_K_M, on `llama-server`) answered 14 of the demo workbook's 17 questions
+grounded, in one to four tool calls each. The three it missed are
+instructive rather than random: twice it read a plausible region instead
+of the right one (the summary rather than the banding table; the sheet
+of notes never opened), and once it was handed the evidence line that
+says in so many words to scan the cells with `find_value` for a number
+the index cannot hold — and did not take the hint. That last is the case
+the evidence system exists for, and a harness rule that turns a `Blind`
+verdict on a numeric question into a scan is the obvious next step.
+
+A 30-billion-parameter mixture model (Qwen3-30B-A3B-Instruct, Q4_K_M, 3B
+active) on the same server answered 15 of 17 grounded, in one to three
+tool calls each, and its two misses are not the 4B's. It *did* take the
+evidence hint: `search` for the number came back `Blind`, it called
+`find_value`, and it named the one cell holding the figure with the
+formula that computed it — the right answer, marked a miss only because
+the answer file names the column and the model named the address. That
+question is the retrieval scorer's recorded gap, and an agent with the
+scan tool closes it. Its other miss is the sheet of notes: asked how the
+calculation works, it traced `precedents` through the formula columns
+and explained the arithmetic instead of opening the prose, reading two
+thousand-row columns whole on the way — eighty thousand tokens for a
+question one `search` answers. That is the case for steering a full-column
+`read_cells` toward the profile, and for a second answer file whose marks
+are written for an agent's reply rather than a ranked node.
+
+Reading the trails also found a tool bug no unit test had: `tables` prints
+each table's body (`Debtors!B2:M2001`, the rows under the header) while
+`query_table` matched the caller's range against the detected region
+(`A1:M2001`, header and label column included), so the exact range one
+tool had just listed was the one the other refused. A model spent three
+turns on that before guessing the enclosing region; a larger one spent a
+whole turn budget on it. `table_at` now accepts either spelling, and the
+test that pins it fails on the old code.
 
 ## How this is tested
 

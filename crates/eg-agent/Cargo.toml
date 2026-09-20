@@ -1,0 +1,31 @@
+[package]
+name = "eg-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "An agent harness over an ExcelGRAG corpus: a model drives the eg-mcp tools itself, one step at a time, under a policy the host sets."
+
+[dependencies]
+# Not workspace-aliased, matching eg-cli/eg-gui's convention for this
+# downstream, non-pipeline crate.
+eg-mcp = { path = "../eg-mcp" }
+
+anyhow.workspace = true
+clap.workspace = true
+rig-agent.workspace = true
+rig-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[[bin]]
+name = "eg-agent"
+path = "src/main.rs"
+
+[dev-dependencies]
+eg-model.workspace = true
+eg-graph.workspace = true
+eg-index.workspace = true
+tempfile = "3"
