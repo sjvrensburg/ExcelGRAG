@@ -33,6 +33,9 @@ pub struct Policy {
     /// runs out mid-thought answers with nothing.
     pub max_output_tokens: u64,
     /// How long one model call may take before the run gives up on it.
+    /// Generous, because a local server shared with other work queues the
+    /// call behind whatever it is already generating, and a reasoning
+    /// model can spend minutes thinking before its first token.
     pub model_timeout: std::time::Duration,
     /// How many times a reply given before any tool has run is sent back.
     /// Zero accepts such a reply as the answer.
@@ -46,7 +49,7 @@ impl Default for Policy {
             max_scans: 2,
             max_identical_calls: 1,
             max_output_tokens: 4096,
-            model_timeout: std::time::Duration::from_secs(300),
+            model_timeout: std::time::Duration::from_secs(600),
             max_ungrounded_retries: 2,
         }
     }

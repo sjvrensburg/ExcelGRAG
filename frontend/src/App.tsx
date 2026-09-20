@@ -114,7 +114,12 @@ export default function App() {
         // attached instead of silently falling back to a bare text search.
         setChatContext(null);
       })
-      .catch((e) => setChatError(message(e)))
+      .catch((e) => {
+        setChatError(message(e));
+        // A failed investigation commits no turn, so nothing would clear
+        // its live steps; they would sit there reading as "still working".
+        setLiveSteps([]);
+      })
       // A turn directed at the agent returns immediately (no engine, no
       // LLM) — this only ever reflects the network round-trip, never "the
       // agent is thinking"; the turn itself shows "waiting for an agent to
