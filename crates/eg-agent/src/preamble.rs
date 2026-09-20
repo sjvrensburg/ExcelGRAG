@@ -36,5 +36,8 @@ a cell — `find_value` is the scan that settles it.
 has given you a finding. Report it; do not guess around it.
 - Stop as soon as you can answer. One good `search` and one `context` answer \
 most questions. Do not repeat a call whose result you already have.
+- \"Which rows are…\" over a large table is answered with a count and the filter \
+that selects them (`query_table`), plus where the rows live — never by \
+reading the table out. Nobody wants three hundred account numbers in a reply.
 - Reply in a few plain sentences: the answer, where it lives, and anything \
 the tools could not settle.";

@@ -572,6 +572,15 @@ fn located(
     Ok((loaded, range, note))
 }
 
+fn unwrap_quotes(text: &str) -> &str {
+    for quote in ['"', '\'', '`'] {
+        if text.len() >= 2 && text.starts_with(quote) && text.ends_with(quote) {
+            return &text[1..text.len() - 1];
+        }
+    }
+    text
+}
+
 /// A citation is an A1 range, or a workbook-scoped defined name: the tools
 /// themselves print `defined name "Tax_Rate"`, and an agent handed that
 /// vocabulary used it as a `what_if` target and was told it was "not an A1
@@ -579,7 +588,11 @@ fn located(
 /// evaluator applies; a name that refers to something no tool can address
 /// (another workbook, a 3-D span, a whole column) says which.
 fn resolve_range(workbook: &Workbook, citation: &str) -> Result<RangeRef, String> {
-    let bare = citation.trim();
+    // A model quoting a name the way the tools print it — `"Tax_Rate"` —
+    // means the name. Only a citation wrapped whole in one matching pair is
+    // unwrapped: `'Sales'!B2` starts with a quote too, and that one is the
+    // sheet's.
+    let bare = unwrap_quotes(citation.trim());
     if let Some(defined) = workbook
         .defined_names
         .iter()
@@ -605,7 +618,7 @@ fn resolve_range(workbook: &Workbook, citation: &str) -> Result<RangeRef, String
         }
         return resolve_range(workbook, refers_to);
     }
-    let parsed = parse_a1(citation).map_err(|e| format!("{citation:?} is not an A1 range: {e}"))?;
+    let parsed = parse_a1(bare).map_err(|e| format!("{citation:?} is not an A1 range: {e}"))?;
     let Some(name) = &parsed.sheet_name else {
         return Err(format!(
             "{citation:?} names no sheet. A citation needs one, e.g. \"Sheet1!B2\"."
@@ -1681,6 +1694,12 @@ mod tests {
         let by_name = resolve_range(&wb, "north_revenue").expect("a name resolves");
         let by_address = resolve_range(&wb, "Sales!B2").expect("an address resolves");
         assert_eq!(by_name, by_address);
+        let quoted =
+            resolve_range(&wb, "\"North_Revenue\"").expect("quotes are not part of a name");
+        assert_eq!(quoted, by_address);
+        assert_eq!(resolve_range(&wb, "`Sales!B2`").unwrap(), by_address);
+        // A quoted *sheet name* is not a wrapped citation.
+        assert_eq!(resolve_range(&wb, "'Sales'!B2").unwrap(), by_address);
         let refused = resolve_range(&wb, "Elsewhere").unwrap_err();
         assert!(refused.contains("another workbook"), "{refused}");
         assert!(resolve_range(&wb, "No_Such_Name").is_err());

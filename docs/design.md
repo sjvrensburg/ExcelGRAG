@@ -1112,6 +1112,26 @@ instructive in a different way: asked the what-if, it explained the
 formula, named `what_if` as the tool that would answer, and did not call
 it. That is a habit no tool fix reaches.
 
+Two things the small models taught. A 9B model asked "which accounts are
+in Ironwood" paged the two-thousand-row table out in five-hundred-row
+reads, scanned it twice with `find_value`, and ran out of turns having
+replied nothing — the only failure mode in the whole file that every
+model below 35B shared. An enumeration over a large table is not a
+question the reply can answer by listing; the preamble now says so, and
+the same model then answered with the count, the column and the filter
+in seven turns. And the tools' own habit of printing a name in quotes —
+`defined name "Tax_Rate"` — came back as a citation with the quotes on,
+and was refused; a citation wrapped whole in one pair of quotes is now
+unwrapped, without touching the quote that belongs to `'Sales'!B2`.
+
+One template finding is worth recording because it runs against the
+grain of where the template came from. A "terse" chat-template splice
+that measurably shortens shell-tool turns for a coding agent cost this
+workload about a fifth *more* tokens per question, at the same score —
+it flips tool selection toward compound calls, and a workbook
+investigation is not a shell session. `--extra-params` is how that
+switch is flipped per run, so it stays a measurement rather than a fork.
+
 ## How this is tested
 
 The commands are in the README. What follows is what each check is *for* —
