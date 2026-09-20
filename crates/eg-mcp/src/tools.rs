@@ -593,6 +593,17 @@ fn resolve_range(workbook: &Workbook, citation: &str) -> Result<RangeRef, String
     // unwrapped: `'Sales'!B2` starts with a quote too, and that one is the
     // sheet's.
     let bare = unwrap_quotes(citation.trim());
+    // A sheet name in double quotes — `"Rates"!A3:E8` — is a model's
+    // spelling, never Excel's: A1 quotes a sheet with single quotes only,
+    // so a leading `"…"!` is unambiguous and is respelled rather than
+    // refused as a sheet called `"Rates"`.
+    let respelled;
+    let bare = if bare.starts_with('"') && bare.contains("\"!") {
+        respelled = format!("'{}", bare[1..].replacen("\"!", "'!", 1));
+        respelled.as_str()
+    } else {
+        bare
+    };
     if let Some(defined) = workbook
         .defined_names
         .iter()
@@ -1753,6 +1764,8 @@ mod tests {
         assert_eq!(resolve_range(&wb, "`Sales!B2`").unwrap(), by_address);
         // A quoted *sheet name* is not a wrapped citation.
         assert_eq!(resolve_range(&wb, "'Sales'!B2").unwrap(), by_address);
+        // A double-quoted sheet name is a model's spelling of a single-quoted one.
+        assert_eq!(resolve_range(&wb, "\"Sales\"!B2").unwrap(), by_address);
         let refused = resolve_range(&wb, "Elsewhere").unwrap_err();
         assert!(refused.contains("another workbook"), "{refused}");
         assert!(resolve_range(&wb, "No_Such_Name").is_err());
