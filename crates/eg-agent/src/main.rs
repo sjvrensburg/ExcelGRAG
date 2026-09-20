@@ -205,6 +205,9 @@ async fn main() -> Result<()> {
 fn print_event(event: &Event, verbose: bool) {
     match event {
         Event::ModelCall { turn } => println!("→ model call #{turn}"),
+        Event::ModelReasoning { text, .. } => {
+            println!("  thinking: {}", first_lines(text, 2, verbose))
+        }
         Event::ModelText { text, .. } => println!("  model: {}", first_lines(text, 3, verbose)),
         Event::ToolCall { name, args, .. } => println!("  → {name} {args}"),
         Event::ToolResult {

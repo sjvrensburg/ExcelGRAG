@@ -1206,3 +1206,7 @@ button.close:hover {
 .sidecar-row select { flex: 1; min-width: 0; }
 .sidecar-note { font-size: 12px; opacity: 0.8; margin-top: 4px; }
 .sidecar-status { font-size: 12px; opacity: 0.85; }
+.chat-trail-steps li.model-reasoning { opacity: 0.7; list-style: none; margin-left: -18px; }
+.chat-trail-steps li.model-reasoning summary { cursor: pointer; font-style: italic; }
+.reasoning-text { white-space: pre-wrap; font-size: 11px; opacity: 0.85; max-height: 240px; overflow: auto; margin-top: 4px; }
+.since-last-step { opacity: 0.6; font-weight: normal; }

@@ -441,7 +441,11 @@ function SidecarSection({ status }: { status: SidecarStatus }) {
     getSidecar()
       .then((i) => {
         setInfo(i);
-        setChoice((c) => c || i.models.find((m) => m.downloaded)?.id || i.models[0]?.id || "");
+        // Default to what this machine can run best, then to whatever is
+        // already on disk, then to the top of the list.
+        setChoice(
+          (c) => c || i.recommended || i.models.find((m) => m.downloaded)?.id || i.models[0]?.id || "",
+        );
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, [status.state]);
@@ -486,6 +490,8 @@ function SidecarSection({ status }: { status: SidecarStatus }) {
             <option key={m.id} value={m.id}>
               {m.id} · {m.tier} · {gb(m.size)}
               {m.downloaded ? " · on disk" : ""}
+              {info?.recommended === m.id ? " · recommended" : ""}
+              {info?.memory_bytes != null && m.needs_bytes > info.memory_bytes ? " · too big for this machine" : ""}
             </option>
           ))}
         </select>

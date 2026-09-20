@@ -259,6 +259,10 @@ fn summarise(calls: &[eg_agent::CallRecord]) -> String {
 fn step_dto(event: Event) -> AgentStepDto {
     match event {
         Event::ModelCall { turn } => AgentStepDto::ModelCall { turn },
+        Event::ModelReasoning { turn, text } => AgentStepDto::ModelReasoning {
+            turn,
+            text: clip(&text, LIVE_RESULT_CHARS),
+        },
         Event::ModelText { turn, text } => AgentStepDto::ModelText { turn, text },
         Event::ToolCall { turn, name, args } => AgentStepDto::ToolCall { turn, name, args },
         Event::ToolResult {
