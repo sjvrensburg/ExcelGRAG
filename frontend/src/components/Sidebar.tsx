@@ -435,6 +435,12 @@ function SidecarSection({ status }: { status: SidecarStatus }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // The select follows the sidecar: while one is being set up or running,
+  // it names that model, whatever the reader had picked before.
+  useEffect(() => {
+    if ("model" in status && status.state !== "failed") setChoice(status.model);
+  }, [status]);
+
   // Refresh what is on disk whenever the sidecar changes state: a finished
   // download flips a model's `downloaded`.
   useEffect(() => {
