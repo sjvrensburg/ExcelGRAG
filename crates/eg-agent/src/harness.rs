@@ -88,6 +88,9 @@ pub struct Harness<M: CompletionModel + Clone> {
     /// Provider-specific fields merged into every request body — a local
     /// server's chat-template switches, say. `None` sends nothing extra.
     extra_params: Option<Value>,
+    /// Show the model values as their kinds, whatever the engine was opened
+    /// with. See [`tools::execute`].
+    redact_values: bool,
 }
 
 impl<M: CompletionModel + Clone> Harness<M> {
@@ -99,7 +102,15 @@ impl<M: CompletionModel + Clone> Harness<M> {
             names: tools::names().map(str::to_string).collect(),
             preamble: PREAMBLE.to_string(),
             extra_params: None,
+            redact_values: false,
         }
+    }
+
+    /// Never let a cell value reach the model: every tool result is
+    /// redacted to kinds for this harness, as under `--redact-values`.
+    pub fn with_redacted_values(mut self, redact: bool) -> Self {
+        self.redact_values = redact;
+        self
     }
 
     /// Merge these fields into every request body. What they mean is the
@@ -125,7 +136,7 @@ impl<M: CompletionModel + Clone> Harness<M> {
         &self,
         engine: Arc<Mutex<eg_mcp::State>>,
         question: &str,
-        sink: &mut dyn FnMut(Event),
+        sink: &mut (dyn FnMut(Event) + Send),
     ) -> Result<Outcome, PromptError> {
         let mut run = AgentRun::new(question)
             .max_turns(self.policy.max_turns)
@@ -139,11 +150,17 @@ impl<M: CompletionModel + Clone> Harness<M> {
         // anything. Every tool takes a workbook argument and a model that
         // does not know the names invents one — `"default"` was seen — and
         // then reasons from the refusal as if it were a finding.
-        let preamble =
-            match tools::execute(Arc::clone(&engine), "workbooks".into(), json!({})).await {
-                Ok(Ok(listing)) => format!("{}\n\nThe corpus holds:\n{listing}", self.preamble),
-                _ => self.preamble.clone(),
-            };
+        let preamble = match tools::execute(
+            Arc::clone(&engine),
+            "workbooks".into(),
+            json!({}),
+            self.redact_values,
+        )
+        .await
+        {
+            Ok(Ok(listing)) => format!("{}\n\nThe corpus holds:\n{listing}", self.preamble),
+            _ => self.preamble.clone(),
+        };
 
         loop {
             let step = match run.next_step() {
@@ -308,6 +325,7 @@ impl<M: CompletionModel + Clone> Harness<M> {
                                 Arc::clone(&engine),
                                 name.clone(),
                                 args.clone(),
+                                self.redact_values,
                             )
                             .await
                             {

@@ -22,9 +22,11 @@
 //! value its kind, and no tool here can talk its way past that.
 
 pub mod harness;
+pub mod model;
 pub mod policy;
 pub mod preamble;
 pub mod tools;
 
-pub use harness::{Event, Harness, Outcome};
+pub use harness::{CallRecord, Event, Harness, Outcome};
+pub use model::{openai_compatible, OpenAiCompatible};
 pub use policy::Policy;

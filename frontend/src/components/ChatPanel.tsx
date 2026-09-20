@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { ChatTurnDto, LlmStatusDto } from "../types";
+import type { AgentStepDto, ChatTurnDto, LlmStatusDto, TrailStepDto } from "../types";
 
 interface Props {
   turns: ChatTurnDto[];
   busy: boolean;
   error: string | null;
-  onSend: (message: string, toAgent: boolean) => void;
+  onSend: (message: string, toAgent: boolean, investigate: boolean) => void;
   // A canvas selection explicitly attached via "Ask about this" in the
   // details panel. Settles which entity the next message is about outright
   // — see chat::EntityContext — and is cleared after one turn rather than
@@ -24,6 +24,8 @@ interface Props {
   // Shown under the title so a reply's provenance is never a guess: which
   // model phrased it, or that none did.
   llm?: LlmStatusDto | null;
+  // The investigation in flight, step by step, until its turn lands.
+  liveSteps?: AgentStepDto[];
 }
 
 // The shared session: a human's message here and an agent's `chat` MCP tool
@@ -46,9 +48,12 @@ export function ChatPanel({
   onClearContext,
   redactValues,
   llm,
+  liveSteps = [],
 }: Props) {
   const [message, setMessage] = useState("");
   const [toAgent, setToAgent] = useState(false);
+  const [investigate, setInvestigate] = useState(false);
+  const modelOn = !!llm?.settings && llm.settings.privacy !== "off";
   const logRef = useRef<HTMLDivElement>(null);
   // Whether the reader was at (or near) the bottom of the log before the
   // latest change — the only case where a new turn should pull the view
@@ -77,12 +82,12 @@ export function ChatPanel({
     // A turn's answer can arrive after its id does (a directed turn's reply
     // is a separate turn; the waiting placeholder becomes an answer), so
     // the id and the answer are both triggers.
-  }, [lastTurn?.id, lastTurn?.answer, turns.length]);
+  }, [lastTurn?.id, lastTurn?.answer, turns.length, liveSteps.length]);
 
   const submit = () => {
     const text = message.trim();
     if (busy || (!text && !context)) return;
-    onSend(text || `what is ${context?.label ?? "this"}?`, toAgent);
+    onSend(text || `what is ${context?.label ?? "this"}?`, toAgent, investigate && !toAgent);
     setMessage("");
   };
 
@@ -140,9 +145,19 @@ export function ChatPanel({
               {turn.citations.length > 0 && (
                 <div className="chat-turn-citations">{turn.citations.join(" · ")}</div>
               )}
+              {turn.trail && turn.trail.length > 0 && <Trail steps={turn.trail} />}
             </div>
           );
         })}
+        {liveSteps.length > 0 && (
+          <div className="chat-turn source-human investigating">
+            <div className="chat-turn-message">
+              <span className="chat-source-tag">investigating</span>
+              {describeLive(liveSteps)}
+            </div>
+            <LiveSteps steps={liveSteps} />
+          </div>
+        )}
       </div>
       {context && (
         <div className="context-chip">
@@ -167,6 +182,22 @@ export function ChatPanel({
         />
         ask my agent
       </label>
+      <label
+        className="to-agent-toggle"
+        title={
+          modelOn
+            ? "Let the chat model drive the workbook tools itself — search, read cells, trace, recompute, what-if — and answer from what they return. Every step shows here and the canvas follows each citation."
+            : "Needs a chat model with privacy above `off` — set one in the Chat model panel, or start a bundled model."
+        }
+      >
+        <input
+          type="checkbox"
+          checked={investigate && !toAgent}
+          disabled={!modelOn || toAgent}
+          onChange={(e) => setInvestigate(e.target.checked)}
+        />
+        investigate (the model drives the tools)
+      </label>
       {toAgent && redactValues && (
         <div className="to-agent-redact-note">
           this server was started with --redact-values: an agent's reply would be refused, so this
@@ -179,6 +210,8 @@ export function ChatPanel({
           placeholder={
             toAgent
               ? "ask your attached agent…"
+              : investigate
+                ? "ask, and watch the model work it out…"
               : context
                 ? `ask about ${context.label}…`
                 : "ask a follow-up…"
@@ -193,8 +226,114 @@ export function ChatPanel({
           send
         </button>
       </div>
-      {busy && <div className="result-note">thinking…</div>}
+      {busy && <div className="result-note">{liveSteps.length > 0 ? "investigating…" : "thinking…"}</div>}
       {error && <div className="error-note">{error}</div>}
     </section>
   );
+}
+
+// The tool calls a committed investigation made: name and arguments, with
+// the verdict — the tool's own, or the harness's refusal.
+function Trail({ steps }: { steps: TrailStepDto[] }) {
+  const [open, setOpen] = useState(false);
+  const summary = summariseTrail(steps);
+  return (
+    <div className="chat-trail">
+      <button className="link-button" onClick={() => setOpen((o) => !o)}>
+        {open ? "▾" : "▸"} {steps.length} tool call{steps.length === 1 ? "" : "s"}: {summary}
+      </button>
+      {open && (
+        <ol className="chat-trail-steps">
+          {steps.map((step, i) => (
+            <li key={i} className={step.refused ? "refused" : step.ok ? "ok" : "no"}>
+              <code>{step.name}</code> {compactArgs(step.args)}
+              {step.refused ? " — refused by policy" : step.ok ? "" : " — the tool said no"}
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+// The investigation as it happens: each tool call as it is made, each
+// result's first lines as it lands, and what the model said between.
+function LiveSteps({ steps }: { steps: AgentStepDto[] }) {
+  return (
+    <ol className="chat-trail-steps live">
+      {steps.map((step, i) => {
+        switch (step.kind) {
+          case "model_call":
+            return (
+              <li key={i} className="model-call">
+                model call #{step.turn}
+              </li>
+            );
+          case "model_text":
+            return (
+              <li key={i} className="model-text">
+                {firstLines(step.text, 3)}
+              </li>
+            );
+          case "tool_call":
+            return (
+              <li key={i} className="tool-call">
+                → <code>{step.name}</code> {compactArgs(step.args)}
+              </li>
+            );
+          case "tool_result":
+            return (
+              <li key={i} className={step.refused ? "refused" : step.ok ? "ok" : "no"}>
+                ← <code>{step.name}</code>
+                {step.refused ? " refused: " : step.ok ? ": " : " said no: "}
+                <span className="tool-result">{firstLines(step.text, 6)}</span>
+              </li>
+            );
+          case "unknown_tool":
+            return (
+              <li key={i} className="no">
+                ✗ no such tool: <code>{step.name}</code>
+              </li>
+            );
+          case "sent_back":
+            return (
+              <li key={i} className="refused">
+                ✗ sent back: {step.reason}
+              </li>
+            );
+        }
+      })}
+    </ol>
+  );
+}
+
+function describeLive(steps: AgentStepDto[]): string {
+  const calls = steps.filter((s) => s.kind === "tool_call").length;
+  const turns = steps.filter((s) => s.kind === "model_call").length;
+  return `${turns} model call${turns === 1 ? "" : "s"}, ${calls} tool call${calls === 1 ? "" : "s"} so far`;
+}
+
+function summariseTrail(steps: TrailStepDto[]): string {
+  const parts: { name: string; n: number }[] = [];
+  for (const step of steps) {
+    const last = parts[parts.length - 1];
+    if (last && last.name === step.name) last.n += 1;
+    else parts.push({ name: step.name, n: 1 });
+  }
+  return parts.map((p) => (p.n > 1 ? `${p.name} ×${p.n}` : p.name)).join(", ");
+}
+
+function compactArgs(args: unknown): string {
+  if (!args || typeof args !== "object") return "";
+  const entries = Object.entries(args as Record<string, unknown>);
+  if (entries.length === 0) return "";
+  return entries
+    .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+    .join(" ");
+}
+
+function firstLines(text: string, n: number): string {
+  const lines = text.split("\n");
+  if (lines.length <= n) return text;
+  return lines.slice(0, n).join("\n") + ` … (${lines.length - n} more lines)`;
 }
