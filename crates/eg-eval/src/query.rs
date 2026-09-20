@@ -127,7 +127,8 @@ pub enum Aggregate {
 }
 
 impl Aggregate {
-    fn column(&self) -> Option<&str> {
+    /// The column this aggregates, if it takes one.
+    pub fn column(&self) -> Option<&str> {
         match self {
             Aggregate::Count => None,
             Aggregate::CountValues(c)
@@ -187,6 +188,12 @@ pub struct Group {
     pub values: Vec<Option<f64>>,
     /// Counts, which are never fractional and would read wrong as floats.
     pub counts: Vec<Option<u64>>,
+    /// One per aggregate: for a minimum or a maximum, the sheet row (0-based)
+    /// it was first found in — a maximum has a location, and an answer that
+    /// names it can be checked, and cannot be paired with the wrong row's
+    /// key by a caller guessing. `None` for every other aggregate.
+    #[serde(default)]
+    pub at: Vec<Option<u32>>,
 }
 
 /// An answer, and everything needed to check it.
@@ -312,6 +319,9 @@ pub fn query(workbook: &Workbook, table: &Table, query: &Query) -> Result<Answer
             }
         };
         slot.1.rows += 1;
+        // `read` yields every row of the body in order, gaps included, so
+        // the row scanned is the sheet row.
+        let sheet_row = table.body.top + (answer.rows_scanned - 1) as u32;
         for (n, (column, aggregate)) in aggregates.iter().enumerate() {
             let Some(i) = column else {
                 continue;
@@ -321,7 +331,7 @@ pub fn query(workbook: &Workbook, table: &Table, query: &Query) -> Result<Answer
                 answer.errors_in_aggregates += 1;
                 continue;
             }
-            slot.1.see(n, aggregate, value);
+            slot.1.see(n, aggregate, value, sheet_row);
         }
     }
 
@@ -397,6 +407,8 @@ struct Accumulators {
     counts: Vec<u64>,
     mins: Vec<Option<f64>>,
     maxes: Vec<Option<f64>>,
+    min_rows: Vec<Option<u32>>,
+    max_rows: Vec<Option<u32>>,
     distinct: Vec<Option<std::collections::HashSet<ValueKey>>>,
 }
 
@@ -408,11 +420,13 @@ impl Accumulators {
             counts: vec![0; n],
             mins: vec![None; n],
             maxes: vec![None; n],
+            min_rows: vec![None; n],
+            max_rows: vec![None; n],
             distinct: vec![None; n],
         }
     }
 
-    fn see(&mut self, n: usize, aggregate: &Aggregate, value: &CellValue) {
+    fn see(&mut self, n: usize, aggregate: &Aggregate, value: &CellValue, row: u32) {
         match aggregate {
             Aggregate::CountValues(_) => {
                 if !value.is_empty() {
@@ -436,8 +450,16 @@ impl Accumulators {
                 // and over a column of 115,004 rows it would drift from what
                 // the sheet's own `SUM()` produces rather than towards it.
                 self.sums[n] += v;
-                self.mins[n] = Some(self.mins[n].map_or(v, |m| m.min(v)));
-                self.maxes[n] = Some(self.maxes[n].map_or(v, |m| m.max(v)));
+                // Strict comparisons: the first row holding a tied extreme
+                // is the one named.
+                if self.mins[n].is_none_or(|m| v < m) {
+                    self.mins[n] = Some(v);
+                    self.min_rows[n] = Some(row);
+                }
+                if self.maxes[n].is_none_or(|m| v > m) {
+                    self.maxes[n] = Some(v);
+                    self.max_rows[n] = Some(row);
+                }
             }
         }
     }
@@ -445,7 +467,13 @@ impl Accumulators {
     fn finish(self, key: Vec<CellValue>, aggregates: &[(Option<usize>, &Aggregate)]) -> Group {
         let mut values = Vec::with_capacity(aggregates.len());
         let mut counts = Vec::with_capacity(aggregates.len());
+        let mut at = Vec::with_capacity(aggregates.len());
         for (n, (_, aggregate)) in aggregates.iter().enumerate() {
+            at.push(match aggregate {
+                Aggregate::Min(_) => self.min_rows[n],
+                Aggregate::Max(_) => self.max_rows[n],
+                _ => None,
+            });
             match aggregate {
                 Aggregate::Count => {
                     values.push(None);
@@ -489,6 +517,7 @@ impl Accumulators {
             rows: self.rows,
             values,
             counts,
+            at,
         }
     }
 }

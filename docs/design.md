@@ -1124,6 +1124,20 @@ in seven turns. And the tools' own habit of printing a name in quotes —
 and was refused; a citation wrapped whole in one pair of quotes is now
 unwrapped, without touching the quote that belongs to `'Sales'!B2`.
 
+Two more came from watching the smallest bundled model in the browser,
+asked for the largest balance and the account holding it. It read a
+two-thousand-row column, was told "40 populated cell(s), capped", took
+those forty for the column and named the largest of them. `read_cells`
+now says "showing the first 40 of 2000" and names `query_table` as what
+reads every row; the same model then got the maximum right. It then
+paired the figure with an account from the ten rows it had read — the
+tool had given it a number and no place. A minimum or maximum now names
+the cell it was found in and the `read_cells` that fetches that row;
+the 9B took the hint in one call and answered with the account holder.
+The 4B did not, and named a value for a cell it never read — the
+laptop tier's ceiling, and why its manifest note says it finds but does
+not compute.
+
 One template finding is worth recording because it runs against the
 grain of where the template came from. A "terse" chat-template splice
 that measurably shortens shell-tool turns for a coding agent cost this

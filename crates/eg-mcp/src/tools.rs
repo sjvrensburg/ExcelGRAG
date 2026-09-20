@@ -687,12 +687,27 @@ fn read_cells(state: &mut State, args: &Value) -> Result<String, String> {
     let workbook = &loaded.workbook;
     let (cells, capped) = cells_in(workbook, range, limit);
 
-    let mut out = format!(
-        "{note}{} — {} populated cell(s){}\n",
-        workbook.cite_range(range),
-        cells.len(),
-        if capped { ", capped" } else { "" }
-    );
+    // A capped read says how much it left out and what reads the rest. A
+    // bare "capped" was read by a model as "that is all there is": it took
+    // the first forty balances of a two-thousand-row column for the whole
+    // column and named the largest of them as the largest balance.
+    let mut out = if capped {
+        let total = eg_eval::count_in(workbook, range);
+        format!(
+            "{note}{} — showing the first {} of {total} populated cell(s). Raise `limit` \
+             (to at most 500) for more; for a question over the whole range — a \
+             total, a maximum, a count, the rows matching a condition — use \
+             `query_table`, which reads every row.\n",
+            workbook.cite_range(range),
+            cells.len(),
+        )
+    } else {
+        format!(
+            "{note}{} — {} populated cell(s)\n",
+            workbook.cite_range(range),
+            cells.len(),
+        )
+    };
     for fact in &cells {
         out.push_str(&format!("  {:<24}", fact.a1));
         if let Some(formula) = &fact.formula {
@@ -1284,7 +1299,45 @@ fn query_table(state: &mut State, args: &Value) -> Result<String, String> {
                 (None, Some(c)) => c.to_string(),
                 (None, None) => "—".to_string(),
             };
-            parts.push(format!("{label} {shown}"));
+            // A minimum or maximum names the cell it was found in. Without
+            // it, a model given "max 45033.43" paired the figure with an
+            // account from the ten rows it had read earlier — the wrong
+            // one — because the tool had given it a number and no place.
+            let at = group.at.get(i).copied().flatten().and_then(|row| {
+                let column = query.aggregates[i].column()?;
+                let range = table
+                    .columns
+                    .iter()
+                    .find(|c| c.header.eq_ignore_ascii_case(column))?
+                    .range;
+                let cell = eg_model::RangeRef {
+                    sheet: range.sheet,
+                    top: row,
+                    left: range.left,
+                    bottom: row,
+                    right: range.left,
+                };
+                // And the read that fetches the whole row: a model told the
+                // cell still asked the query five more ways for the row's
+                // key rather than reading the row.
+                let row_range = eg_model::RangeRef {
+                    sheet: range.sheet,
+                    top: row,
+                    // Label columns sit immediately left of the body.
+                    left: table
+                        .body
+                        .left
+                        .saturating_sub(table.label_headers.len() as u16),
+                    bottom: row,
+                    right: table.body.right,
+                };
+                Some(format!(
+                    " (at {}; `read_cells {}` for that row)",
+                    loaded.workbook.cite_range(cell),
+                    loaded.workbook.cite_range(row_range)
+                ))
+            });
+            parts.push(format!("{label} {shown}{}", at.unwrap_or_default()));
         }
         out.push_str(&format!(
             "  {key}({} rows)  {}\n",
