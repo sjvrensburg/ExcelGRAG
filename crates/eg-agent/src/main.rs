@@ -17,8 +17,6 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use eg_agent::{Event, Harness, Policy};
-use rig_core::client::CompletionClient;
-use rig_core::providers::openai::CompletionsClient;
 use serde::Deserialize;
 
 #[derive(Parser)]
@@ -96,18 +94,14 @@ async fn main() -> Result<()> {
         // llama-server, and the value is never a secret.
         None => "none".to_string(),
     };
-    let client = CompletionsClient::builder()
-        .api_key(api_key)
-        .base_url(&args.base_url)
-        .build()
-        .map_err(|e| anyhow!("could not build the model client: {e}"))?;
-    let model = client.completion_model(&args.model);
+    let model = eg_agent::openai_compatible(&args.base_url, Some(&api_key), &args.model)
+        .map_err(|e| anyhow!(e))?;
     let policy = Policy {
         max_turns: args.max_turns,
         max_scans: args.max_scans,
         ..Policy::default()
     };
-    let mut harness = Harness::new(model, policy);
+    let mut harness = Harness::new(model, policy).with_redacted_values(args.redact_values);
     if let Some(raw) = &args.extra_params {
         let params: serde_json::Value =
             serde_json::from_str(raw).context("--extra-params is not JSON")?;

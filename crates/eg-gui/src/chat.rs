@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{self, SearchParams};
 use crate::app::App;
-use crate::dto::{ChatTurnDto, DirectedDto, TurnSourceDto, WsEvent};
+use crate::dto::{ChatTurnDto, DirectedDto, TrailStepDto, TurnSourceDto, WsEvent};
 
 pub const DEFAULT_SESSION: &str = "default";
 
@@ -110,6 +110,10 @@ pub struct ChatTurn {
     pub directed_to: Option<Directed>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<u64>,
+    /// The tool calls the model made, when it drove the turn itself
+    /// (`investigate`). Arguments and verdicts only — see `TrailStepDto`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trail: Vec<TrailStepDto>,
 }
 
 impl ChatTurn {
@@ -120,7 +124,7 @@ impl ChatTurn {
     /// handful of fields that differ, via struct-update syntax, rather than
     /// listing all ten fields by hand — which had let a turn kind silently
     /// omit a field a future one added.
-    fn new(source: TurnSource, message: impl Into<String>) -> ChatTurn {
+    pub(crate) fn new(source: TurnSource, message: impl Into<String>) -> ChatTurn {
         ChatTurn {
             id: 0,
             source,
@@ -132,6 +136,7 @@ impl ChatTurn {
             timestamp: now(),
             directed_to: None,
             reply_to: None,
+            trail: Vec::new(),
         }
     }
 
@@ -147,6 +152,7 @@ impl ChatTurn {
             timestamp: self.timestamp,
             directed_to: self.directed_to.map(Into::into),
             reply_to: self.reply_to,
+            trail: self.trail.clone(),
         }
     }
 
@@ -393,7 +399,7 @@ pub async fn run_turn(
 /// update. `sticky` is `None` for turns that never touch scope (a
 /// directed-at-agent turn and an agent's reply to one neither ran the engine
 /// nor should move where a plain follow-up lands).
-fn commit_turn(
+pub(crate) fn commit_turn(
     app: &Arc<App>,
     session_id: &str,
     mut turn: ChatTurn,

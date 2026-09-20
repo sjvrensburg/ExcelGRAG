@@ -28,6 +28,7 @@ use serde_json::{json, Value};
 use crate::app::App;
 use crate::chat::{self, TurnSource};
 use crate::dto::ChatTurnDto;
+use crate::investigate;
 
 const GUI_TOOL_NAMES: &[&str] = &["chat", "gui_show"];
 
@@ -53,6 +54,7 @@ fn gui_tools() -> Vec<Tool> {
                     "message": { "type": "string", "description": "Normally, what to ask, in words. With `reply_to` set, this is instead your own answer text to that turn — posted as-is, without running search." },
                     "session_id": { "type": "string", "description": "Which chat session — default \"default\", the one the GUI's browser tab shows unless told otherwise." },
                     "reply_to": { "type": "integer", "description": "The id of a turn a human routed to you (from an earlier call's `pending_for_you`), to answer instead of asking a new question. Refused if this corpus was started with --redact-values." },
+                    "investigate": { "type": "boolean", "description": "Let the GUI's own configured chat model drive the workbook tools itself and answer from what they return, with every step shown live in the browser — instead of the fixed search→context→render pipeline. Needs a chat model configured in the GUI with privacy above `off`." },
                 },
                 "required": ["message"],
                 "additionalProperties": false,
@@ -134,8 +136,22 @@ impl McpBridge {
                     };
                 }
 
-                match chat::run_turn(&self.app, session_id, TurnSource::Agent, message, None).await
-                {
+                let investigate = args
+                    .get("investigate")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let result = if investigate {
+                    investigate::run_investigation(
+                        &self.app,
+                        session_id,
+                        TurnSource::Agent,
+                        message,
+                    )
+                    .await
+                } else {
+                    chat::run_turn(&self.app, session_id, TurnSource::Agent, message, None).await
+                };
+                match result {
                     Ok(turn) => {
                         let pending = chat::pending_for_agent(&self.app, session_id);
                         let mut blocks = Vec::new();

@@ -41,16 +41,31 @@ pub fn names() -> impl Iterator<Item = &'static str> {
 /// can act on the first and cannot act on the second, which is why
 /// `eg-mcp` returns failures as results rather than protocol errors, and
 /// why this keeps the distinction.
+///
+/// `redact` shows the model every value as its kind for this one call,
+/// whatever the engine was opened with. The engine's own flag is a
+/// deployment-wide policy set at open; this is the per-caller one a GUI's
+/// privacy dial needs — a `passage`-tier session must not have `read_cells`
+/// hand a hosted model the cells. It is applied by setting the engine's
+/// flag under the lock and restoring it before the lock is released, so no
+/// other caller can observe the change; every tool already honours that
+/// flag, which is why this is one line rather than a second redaction
+/// layer.
 pub async fn execute(
     engine: Arc<Mutex<eg_mcp::State>>,
     name: String,
     args: Value,
+    redact: bool,
 ) -> Result<Result<String, String>, String> {
     tokio::task::spawn_blocking(move || {
         let mut state = engine
             .lock()
             .map_err(|_| "the engine lock was poisoned by an earlier panic".to_string())?;
-        Ok(eg_mcp::tools::call(&mut state, &name, &args))
+        let prior = state.redact_values;
+        state.redact_values = prior || redact;
+        let result = eg_mcp::tools::call(&mut state, &name, &args);
+        state.redact_values = prior;
+        Ok(result)
     })
     .await
     .map_err(|e| format!("the tool task did not complete: {e}"))?

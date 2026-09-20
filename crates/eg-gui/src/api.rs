@@ -16,6 +16,8 @@ use crate::app::{resolve_hash, resolve_hash_optional, App, SharedApp};
 use crate::chat::{self, TurnSource};
 use crate::dto::{self, ChatTurnDto, GraphDto, NodeDetailDto, SearchDto, WorkbookDto, WsEvent};
 use crate::index_job::{self, IndexBody};
+use crate::investigate;
+use crate::sidecar;
 
 /// Every handler's failure mode: a status and a message the frontend can
 /// show as-is, because these are people-messages ("no workbook matches…")
@@ -66,6 +68,10 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/chat", post(post_chat))
         .route("/api/chat/{session_id}", get(get_chat))
         .route("/api/llm", get(get_llm).post(post_llm))
+        .route(
+            "/api/sidecar",
+            get(get_sidecar).post(post_sidecar).delete(delete_sidecar),
+        )
         .route("/ws", get(ws_upgrade))
         .fallback(static_handler)
         .with_state(app)
@@ -94,6 +100,31 @@ async fn workbooks(State(app): State<SharedApp>) -> Json<WorkbooksResponse> {
         redact_values: app.redact_values,
         workbooks,
     })
+}
+
+/// The bundled model: manifest, what is on disk, and the sidecar's state.
+async fn get_sidecar(State(app): State<SharedApp>) -> Json<sidecar::SidecarInfo> {
+    Json(sidecar::info(&app))
+}
+
+#[derive(Deserialize)]
+struct SidecarBody {
+    model: String,
+}
+
+/// Fetch (if needed), verify, start and connect a bundled model. Returns
+/// as soon as the job is accepted; progress arrives over the WebSocket.
+async fn post_sidecar(
+    State(app): State<SharedApp>,
+    Json(body): Json<SidecarBody>,
+) -> Result<Json<sidecar::SidecarInfo>, ApiError> {
+    sidecar::launch(Arc::clone(&app), &body.model).map_err(bad_request)?;
+    Ok(Json(sidecar::info(&app)))
+}
+
+async fn delete_sidecar(State(app): State<SharedApp>) -> Json<sidecar::SidecarInfo> {
+    sidecar::stop(&app);
+    Json(sidecar::info(&app))
 }
 
 /// The chat model's connection, key omitted.
@@ -415,6 +446,13 @@ struct ChatBody {
     /// context of its own to hand an agent that never ran the engine.
     #[serde(default)]
     to_agent: bool,
+    /// Let the configured chat model drive the `eg-mcp` tools itself and
+    /// answer from what they return — `investigate::run_investigation` —
+    /// rather than the fixed pipeline. Needs a model with privacy above
+    /// `off`; `workbook`/`node` are ignored, since the model chooses where
+    /// to look.
+    #[serde(default)]
+    investigate: bool,
 }
 
 /// A human's turn in the shared chat session — the same pipeline an agent's
@@ -432,6 +470,12 @@ async fn post_chat(
         return chat::direct_to_agent(&app, &session_id, &body.message)
             .map(Json)
             .map_err(internal);
+    }
+    if body.investigate {
+        return investigate::run_investigation(&app, &session_id, TurnSource::Human, &body.message)
+            .await
+            .map(Json)
+            .map_err(bad_request);
     }
     let context = match (body.workbook, body.node) {
         (Some(workbook), Some(node)) => Some(chat::EntityContext { workbook, node }),
@@ -526,6 +570,7 @@ async fn handle_socket(app: SharedApp, mut socket: WebSocket) {
                 redact_values: app.redact_values,
                 workbooks: WorkbookDto::list(&app),
                 llm: app.llm_status(),
+                sidecar: app.sidecar().status.clone(),
             })
             .expect("the hello event serialises")
         }

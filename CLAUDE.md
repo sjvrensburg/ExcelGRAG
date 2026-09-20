@@ -249,7 +249,22 @@ above it.
   the optional LLM (`llm.rs`, built on `async-openai`, not a hand-rolled HTTP
   client), so a slow or unreachable model degrades a turn to the plain
   rendered passage rather than blocking every other browser tab or agent
-  call behind the corpus lock.
+  call behind the corpus lock. `investigate.rs` is the other kind of turn:
+  `POST /api/chat {investigate: true}` (or the bridge's `chat` with the same
+  flag) hands the configured model the tools through `eg-agent`'s harness;
+  each `Event` is broadcast as `WsEvent::AgentStep`, every range a tool
+  call names is resolved to a graph node (`dto::node_for_citation`) and
+  sent as `Navigate`, and the committed `ChatTurn` carries a `trail` of
+  calls — arguments and verdicts, never results. `passage` privacy runs the
+  tools with values redacted per call (`Harness::with_redacted_values`,
+  which flips `State.redact_values` under the lock and restores it).
+  `sidecar.rs` is the bundled model: a manifest of runtime builds
+  (`RUNTIMES`) and weights (`MODELS`), each pinned by size and sha256,
+  fetched into `eg_index::cache_dir()` with resume, verified, unpacked,
+  spawned on a free loopback port and stopped **by pid** — on Linux the
+  child also carries `PR_SET_PDEATHSIG`, and `run()` stops it on
+  SIGINT/SIGTERM, because a killed GUI runs no `Drop`. Swapping a model is
+  a manifest row plus an `eg-agent --score` run.
 - `eg-agent` — the agent harness: a model drives the `eg-mcp` tools itself,
   one call at a time, where `eg gui`'s chat runs a fixed find→expand→render
   pipeline. Built on Rig's `AgentRun` (`rig-agent`), a sans-IO state machine
