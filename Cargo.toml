@@ -11,6 +11,7 @@ members = [
     "crates/eg-mcp",
     "crates/eg-cli",
     "crates/eg-gui",
+    "crates/eg-agent",
     "crates/eg-fixtures",
 ]
 exclude = ["vendor/calamine"]
@@ -20,7 +21,7 @@ version = "0.3.5"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sjvrensburg/ExcelGRAG"
-rust-version = "1.85"
+rust-version = "1.95"
 
 [workspace.dependencies]
 eg-model = { path = "crates/eg-model" }
@@ -67,6 +68,16 @@ async-openai = { version = "0.42", default-features = false, features = [
     "chat-completion",
     "rustls",
 ] }
+# The agent harness's model loop: rig-agent is the sans-IO `AgentRun` state
+# machine eg-agent drives by hand, rig-core the provider clients and message
+# types under it. The two crates directly, never the `rig` facade: the facade
+# lists `rig-fastembed` as an optional dependency, and Cargo resolves optional
+# dependencies whether or not their feature is on, so the facade pins
+# fastembed 4 / ort rc.9 against eg-index's fastembed 6 / ort rc.13 and the
+# workspace stops resolving at all. No default features, because the default
+# is `derive`, which nothing here uses.
+rig-agent = { version = "0.42", default-features = false }
+rig-core = { version = "0.42", default-features = false, features = ["reqwest", "rustls"] }
 
 [profile.release]
 opt-level = 3

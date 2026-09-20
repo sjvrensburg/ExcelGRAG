@@ -1128,6 +1128,13 @@ fn tables(state: &mut State, args: &Value) -> Result<String, String> {
 }
 
 /// Find the table a caller named by its range.
+///
+/// Either spelling of a table is accepted: the region it was detected as
+/// (header and label columns included, what `context` cites) or its body
+/// (the rows under the header, what `tables` prints). Matching the region
+/// alone refused the exact range `tables` had just listed — an agent was
+/// watched asking for `'Debtors'!B2:M2001` twice, being told it was not a
+/// table, and only getting through by guessing the enclosing region.
 fn table_at(loaded: &eg_ingest::Loaded, citation: &str) -> Result<Table, String> {
     let range = resolve_range(&loaded.workbook, citation)?;
     let sheet = loaded
@@ -1139,6 +1146,13 @@ fn table_at(loaded: &eg_ingest::Loaded, citation: &str) -> Result<Table, String>
             let table = read_table(sheet, &region)
                 .ok_or_else(|| format!("{citation} is a region with no rows under its header"))?;
             return Ok(table);
+        }
+        if region.range.intersects(&range) {
+            if let Some(table) = read_table(sheet, &region) {
+                if table.body == range {
+                    return Ok(table);
+                }
+            }
         }
     }
     Err(format!(
@@ -1474,6 +1488,43 @@ mod tests {
 
         let state = State::open(path, false).expect("state opens over what was just indexed");
         (state, dir)
+    }
+
+    /// `tables` prints a table's body; a caller may hand that back, or the
+    /// region `context` cites. Both must find the same table, and the range
+    /// `tables` printed must never be the one `query_table` refuses.
+    #[test]
+    fn a_table_is_found_by_its_body_as_tables_prints_it_and_by_its_region() {
+        let wb = one_sheet_workbook("hash-t", "t.xlsx", "Sales");
+        let loaded = eg_ingest::Loaded {
+            capabilities: eg_ingest::Capabilities::for_format(eg_model::WorkbookFormat::Xlsx),
+            warnings: Vec::new(),
+            workbook: wb,
+        };
+        let sheet = loaded.workbook.sheet(eg_model::SheetId(0)).unwrap();
+        let region = detect_regions(sheet)
+            .into_iter()
+            .next()
+            .expect("one region");
+        let table = read_table(sheet, &region).expect("a table");
+        assert_ne!(table.body, region.range, "the body excludes the header row");
+
+        let by_region = table_at(&loaded, &loaded.workbook.cite_range(region.range)).unwrap();
+        let by_body = table_at(&loaded, &loaded.workbook.cite_range(table.body)).unwrap();
+        assert_eq!(by_region.body, by_body.body);
+        // A quoted sheet name is the same address.
+        let quoted = format!(
+            "'Sales'!{}",
+            loaded
+                .workbook
+                .cite_range(table.body)
+                .split('!')
+                .nth(1)
+                .unwrap()
+        );
+        assert!(table_at(&loaded, &quoted).is_ok(), "{quoted}");
+        // A range that is neither is still refused.
+        assert!(table_at(&loaded, "Sales!B2:B3").is_err());
     }
 
     #[test]

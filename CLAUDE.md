@@ -250,6 +250,26 @@ above it.
   client), so a slow or unreachable model degrades a turn to the plain
   rendered passage rather than blocking every other browser tab or agent
   call behind the corpus lock.
+- `eg-agent` — the agent harness: a model drives the `eg-mcp` tools itself,
+  one call at a time, where `eg gui`'s chat runs a fixed find→expand→render
+  pipeline. Built on Rig's `AgentRun` (`rig-agent`), a sans-IO state machine
+  the harness steps by hand — `harness.rs` asks it for the next step, makes
+  the model call or the tool calls, feeds the result back — so every step is
+  an `Event` the host sees before the next one lands, and a run is
+  serialisable between steps. Tools are `eg_mcp::tools::TOOLS` iterated, as
+  `eg-gui`'s bridge does, never redeclared; `tools::execute` takes the
+  engine lock inside a blocking task and never across a model `.await`.
+  `policy.rs` is about cost, not safety (nothing in `eg` mutates): the two
+  full-scan tools are budgeted and a verbatim repeat is refused, each with a
+  sentence the model reads as the tool's result. Depend on `rig-agent` and
+  `rig-core` directly, **never the `rig` facade** — it lists `rig-fastembed`
+  as an optional dependency, Cargo resolves optional dependencies whether or
+  not their feature is on, and its fastembed 4/ort rc.9 pin cannot coexist
+  with eg-index's fastembed 6/ort rc.13: the workspace stops resolving.
+  `eg-agent --score tests/fixtures/demo/answers.json` marks whether the
+  agent's *final reply* names an answer after choosing its own tools; the
+  scripted-model tests in `tests/scripted.rs` prove the loop's contract with
+  no model at all.
 
 ## Invariants worth not breaking
 
