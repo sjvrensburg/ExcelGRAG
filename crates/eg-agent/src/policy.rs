@@ -28,7 +28,9 @@ pub struct Policy {
     /// Most tokens the model may generate per call. A tool call is a line
     /// and an answer is a paragraph; a small model under a forced tool
     /// choice was seen generating twenty thousand tokens for a one-word
-    /// question, and without this cap it would still be going.
+    /// question, and without this cap it would still be going. Not too low
+    /// either: a reasoning model's thinking counts against it, and one that
+    /// runs out mid-thought answers with nothing.
     pub max_output_tokens: u64,
     /// How long one model call may take before the run gives up on it.
     pub model_timeout: std::time::Duration,
@@ -43,7 +45,7 @@ impl Default for Policy {
             max_turns: 12,
             max_scans: 2,
             max_identical_calls: 1,
-            max_output_tokens: 2048,
+            max_output_tokens: 4096,
             model_timeout: std::time::Duration::from_secs(300),
             max_ungrounded_retries: 2,
         }

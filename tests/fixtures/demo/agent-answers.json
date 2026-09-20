@@ -1,0 +1,117 @@
+[
+  {
+    "ask": "provision for doubtful debts",
+    "want": ["Provision", "Provision Percent", "Debtors!J"],
+    "why": "the provision column, its rate, or its range; 'doubtful' is not a word the sheet uses"
+  },
+  {
+    "ask": "what rate is each debt discounted at",
+    "want": ["Discount Rate", "Rates!B4", "Debtors!H"],
+    "why": "the rate column, the table it is looked up in, or either's range"
+  },
+  {
+    "ask": "present value of what is owed",
+    "want": ["Present Value", "Debtors!K"],
+    "why": "the discounted column or its range"
+  },
+  {
+    "ask": "how long has each account been overdue",
+    "want": ["Days Overdue", "Ageing Bucket", "Debtors!F", "Debtors!G"],
+    "why": "the raw count of days or the bucket it falls in"
+  },
+  {
+    "ask": "ageing buckets",
+    "want": ["Ageing Bucket", "Debtors!G"],
+    "why": "the column of bucket labels"
+  },
+  {
+    "ask": "what rate applies to each type of debtor",
+    "want": ["Rates", "Discount Rate", "Debt Type", "VLOOKUP"],
+    "why": "the lookup relation: debt type keys into the rates table, and an agent may name the formula that does it"
+  },
+  {
+    "ask": "impairment",
+    "want": ["Impairment", "Debtors!L"],
+    "why": "the single word the whole workbook is named for"
+  },
+  {
+    "ask": "total balance outstanding",
+    "want": ["43386900.86", "Summary!B4", "Balance"],
+    "why": "an agent should give the figure or the cell that totals it; the column name alone is the retrieval-level answer"
+  },
+  {
+    "ask": "notes on how the calculation works",
+    "want": ["Notes"],
+    "why": "the sheet of prose; explaining the formulas instead is not what was asked"
+  },
+  {
+    "ask": "what was billed in january",
+    "want": ["Jan", "Billed"],
+    "why": "the January sheet, or the summary line that sums the quarter"
+  },
+  {
+    "ask": "tax rate",
+    "want": ["Tax_Rate", "Rates!B11", "0.15"],
+    "why": "the defined name, the cell it names, or its value"
+  },
+  {
+    "ask": "which territory is an account in",
+    "want": ["Territory", "Debtors!C"],
+    "why": "the territory column"
+  },
+  {
+    "ask": "percentage provided against each band of days",
+    "want": ["Provision Percent", "Days Overdue From", "Rates!D", "Rates!E"],
+    "why": "the banding table on the rates sheet"
+  },
+  {
+    "ask": "account number",
+    "want": ["Account", "Debtors!A"],
+    "why": "the key column"
+  },
+  {
+    "ask": "which accounts are in Ironwood",
+    "want": ["Territory", "313"],
+    "why": "the territory column, or the count of rows in it"
+  },
+  {
+    "ask": "45033.43",
+    "want": ["Debtors!E1325", "Summary!B8", "Balance"],
+    "why": "a figure the index cannot hold: the cell that stores it, the summary cell that computes it as a maximum, or the column"
+  },
+  {
+    "ask": "1612",
+    "want": ["Debtors!L632", "Impairment"],
+    "why": "a figure in the middle of a large numeric column, found only by scanning cells; the retrieval scorer records this as a known gap, and an agent with `find_value` closes it"
+  },
+  {
+    "ask": "what is the total present value of everything owed",
+    "want": ["41789046.97"],
+    "why": "no cell holds this: it is a sum over the Present Value column, which only `query_table` can produce"
+  },
+  {
+    "ask": "how much is owed in total by accounts in Ironwood",
+    "want": ["7048291.64"],
+    "why": "a filtered sum: `query_table` where Territory is Ironwood, sum of Balance"
+  },
+  {
+    "ask": "how many accounts are business debt",
+    "want": ["508"],
+    "why": "a filtered count over the Debt Type column"
+  },
+  {
+    "ask": "which formula computes each account's provision",
+    "want": ["E2*I2", "E2 * I2", "ROUND(E2"],
+    "why": "the formula text of the provision column, from `read_cells` or `precedents`; any row's instance is right"
+  },
+  {
+    "ask": "what provision percentage applies to a debt more than 120 days overdue",
+    "want": ["0.85", "85 percent", "85%"],
+    "why": "the last band of the rates table, or the sentence in the notes that states it"
+  },
+  {
+    "ask": "if the tax rate were 20 percent, what would the provision after tax be",
+    "want": ["5842572.67"],
+    "why": "a what-if: change Tax_Rate (Rates!B11) to 0.2 and read Summary!B11, which `what_if` reports as moved"
+  }
+]

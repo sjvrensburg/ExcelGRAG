@@ -1075,6 +1075,43 @@ turns on that before guessing the enclosing region; a larger one spent a
 whole turn budget on it. `table_at` now accepts either spelling, and the
 test that pins it fails on the old code.
 
+`tests/fixtures/demo/agent-answers.json` is the answer file written for an
+agent rather than for retrieval. Its first seventeen questions are the
+retrieval file's, with the wants widened to the spellings an agent's right
+answer takes — `Debtors!L632` beside `Impairment`, `Summary!B8` beside
+`Balance` — and its `known_gap` retired, because an agent with the scan
+closes it. Six more can only be answered by computing: a column's sum, a
+filtered sum, a filtered count, a formula's text, a band lookup, and a
+what-if. The mark is the same grounded one, with two loosenings the
+trails argued for: thousands separators are ignored (a tool prints
+`41789046.97`, a model writes `41,789,046.97`), and the reply and the
+tool result may use different spellings of one want (`0.85` in the cell,
+`85%` in the sentence). Both are about how a figure is written, never
+about which figure.
+
+Scoring three local models against it found two more tool defects,
+neither visible to a unit test because both are about what a tool *says*
+when it has nothing to say. An agent asked how many accounts were
+"business debt" filtered `Debt Type is "Business Debt"`, was told no rows
+matched, and reported that as the answer; the column held `Business`,
+and the profile knew it. `query_table` now lists a filtered column's
+values when an equality-shaped filter matches nothing, on the terms
+`profiles/` already governs (a count, not the values, under
+`--redact-values`). And an agent handed the vocabulary the tools
+themselves print — `defined name "Tax_Rate"` — used it as a `what_if`
+target and was told it was not an A1 range. Every citation now resolves a
+workbook-scoped defined name first, by the evaluator's own rules, so
+`what_if Tax_Rate=0.2` is a sentence a tool accepts.
+
+On this file the two larger models answered all six computed questions
+between them, and one answered every question but the empty-reply case
+that became a harness rule — a reasoning model that spent its output
+budget thinking handed back nothing, and now gets the turn back with a
+request for the short form. The mid-size model's remaining miss is
+instructive in a different way: asked the what-if, it explained the
+formula, named `what_if` as the tool that would answer, and did not call
+it. That is a habit no tool fix reaches.
+
 ## How this is tested
 
 The commands are in the README. What follows is what each check is *for* —

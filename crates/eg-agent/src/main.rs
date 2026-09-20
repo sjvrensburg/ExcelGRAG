@@ -59,6 +59,11 @@ struct Args {
     /// Print tool results in full rather than their first lines.
     #[arg(long)]
     verbose: bool,
+    /// A JSON object merged into every request body, for endpoint-specific
+    /// switches — e.g. '{"chat_template_kwargs":{"terse":false}}' to a
+    /// llama-server whose template takes that flag.
+    #[arg(long)]
+    extra_params: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -102,7 +107,15 @@ async fn main() -> Result<()> {
         max_scans: args.max_scans,
         ..Policy::default()
     };
-    let harness = Harness::new(model, policy);
+    let mut harness = Harness::new(model, policy);
+    if let Some(raw) = &args.extra_params {
+        let params: serde_json::Value =
+            serde_json::from_str(raw).context("--extra-params is not JSON")?;
+        if !params.is_object() {
+            return Err(anyhow!("--extra-params must be a JSON object"));
+        }
+        harness = harness.with_extra_params(params);
+    }
     let verbose = args.verbose;
 
     if let Some(path) = &args.score {
@@ -117,20 +130,35 @@ async fn main() -> Result<()> {
         for (i, q) in questions.iter().enumerate() {
             println!("\n=== [{}/{}] {}", i + 1, questions.len(), q.ask);
             let mut sink = |e: Event| print_event(&e, verbose);
-            let outcome = harness.ask(Arc::clone(&engine), &q.ask, &mut sink).await?;
+            // A question the model could not finish — a timed-out call, a
+            // provider error — is that question's miss, not the end of the
+            // file: the other questions are the point of running it.
+            let outcome = match harness.ask(Arc::clone(&engine), &q.ask, &mut sink).await {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    println!("--- MISS (run failed: {e})");
+                    rows.push((q.ask.clone(), format!("MISS (failed: {e})"), 0, 0));
+                    continue;
+                }
+            };
             let answer = outcome.answer.clone().unwrap_or_default();
             // A hit is *grounded*: the reply names an answer, and a tool the
             // model actually called returned that name. The reply alone is
             // not enough — the question usually contains the answer's own
             // words, and a model that never called a tool echoes them back.
-            let named = |text: &str, w: &str| text.to_lowercase().contains(&w.to_lowercase());
-            let hit = q.want.iter().find(|w| {
-                named(&answer, w)
-                    && outcome
-                        .calls
-                        .iter()
-                        .any(|c| c.ok && !c.refused && named(&c.result, w))
+            // Case-blind, and blind to the thousands separators a model puts
+            // into a figure a tool printed bare — `41,789,046.97` is
+            // `41789046.97`, and the agent answer file wants the number.
+            let named = |text: &str, w: &str| normalise(text).contains(&normalise(w));
+            // The wants are one answer in its several spellings — `0.85`,
+            // `85%` — so the reply may use one and the tool another.
+            let carried = q.want.iter().any(|w| {
+                outcome
+                    .calls
+                    .iter()
+                    .any(|c| c.ok && !c.refused && named(&c.result, w))
             });
+            let hit = q.want.iter().find(|w| carried && named(&answer, w));
             let echoed = hit.is_none() && q.want.iter().any(|w| named(&answer, w));
             let mark = match (hit, echoed, &q.known_gap) {
                 (Some(w), _, _) => {
@@ -201,8 +229,14 @@ fn print_event(event: &Event, verbose: bool) {
             println!("{}", indent(&first_lines(text, 12, verbose)));
         }
         Event::UnknownTool { name, .. } => println!("  ✗ no such tool: {name}"),
-        Event::Ungrounded { .. } => println!("  ✗ answered without a tool; sent back"),
+        Event::Ungrounded { reason, .. } => {
+            println!("  ✗ sent back: {}", first_lines(reason, 1, false))
+        }
     }
+}
+
+fn normalise(text: &str) -> String {
+    text.to_lowercase().replace(',', "")
 }
 
 fn first_lines(text: &str, n: usize, all: bool) -> String {
