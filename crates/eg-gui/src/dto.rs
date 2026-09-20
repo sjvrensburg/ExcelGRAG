@@ -625,6 +625,11 @@ pub enum AgentStepDto {
     ModelCall {
         turn: usize,
     },
+    /// The model's reasoning for the turn, once the call returned.
+    ModelReasoning {
+        turn: usize,
+        text: String,
+    },
     ModelText {
         turn: usize,
         text: String,

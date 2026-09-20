@@ -154,6 +154,7 @@ export function ChatPanel({
             <div className="chat-turn-message">
               <span className="chat-source-tag">investigating</span>
               {describeLive(liveSteps)}
+              <SinceLastStep key={liveSteps.length} />
             </div>
             <LiveSteps steps={liveSteps} />
           </div>
@@ -269,6 +270,15 @@ function LiveSteps({ steps }: { steps: AgentStepDto[] }) {
                 model call #{step.turn}
               </li>
             );
+          case "model_reasoning":
+            return (
+              <li key={i} className="model-reasoning">
+                <details>
+                  <summary>thought for a while — {step.text.length} chars</summary>
+                  <div className="reasoning-text">{step.text}</div>
+                </details>
+              </li>
+            );
           case "model_text":
             return (
               <li key={i} className="model-text">
@@ -336,4 +346,20 @@ function firstLines(text: string, n: number): string {
   const lines = text.split("\n");
   if (lines.length <= n) return text;
   return lines.slice(0, n).join("\n") + ` … (${lines.length - n} more lines)`;
+}
+
+// How long the current step has been running, ticking. A reasoning model
+// can think for a minute between one tool result and the next call, and
+// a card that does not move for a minute reads as a card that has died.
+// Keyed on the step count by the caller, so each step starts its own
+// clock.
+function SinceLastStep() {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const started = Date.now();
+    const id = setInterval(() => setSeconds(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, []);
+  if (seconds < 3) return null;
+  return <span className="since-last-step"> · working for {seconds}s</span>;
 }

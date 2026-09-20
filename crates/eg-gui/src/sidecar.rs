@@ -215,6 +215,13 @@ pub struct SidecarInfo {
     pub runtime: Option<Runtime>,
     pub models: Vec<ModelInfo>,
     pub cache_dir: String,
+    /// The machine's memory, when it can be read; what `recommended` is
+    /// judged against. On a unified-memory machine it is also the GPU's.
+    pub memory_bytes: Option<u64>,
+    /// The first model in manifest order — which is preference order —
+    /// whose `needs_bytes` fits this machine's memory. `None` when memory
+    /// is unknown or nothing fits.
+    pub recommended: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -225,6 +232,13 @@ pub struct ModelInfo {
 }
 
 pub fn info(app: &App) -> SidecarInfo {
+    let memory_bytes = total_memory();
+    let recommended = memory_bytes.and_then(|mem| {
+        MODELS
+            .iter()
+            .find(|m| m.needs_bytes <= mem)
+            .map(|m| m.id.to_string())
+    });
     SidecarInfo {
         status: app.sidecar().status.clone(),
         runtime: runtime_for_host().copied(),
@@ -236,7 +250,33 @@ pub fn info(app: &App) -> SidecarInfo {
             })
             .collect(),
         cache_dir: eg_index::cache_dir().display().to_string(),
+        memory_bytes,
+        recommended,
     }
+}
+
+/// Total physical memory, from `/proc/meminfo` on Linux and `sysctl` on
+/// macOS; `None` elsewhere or when unreadable. Total rather than free: a
+/// model is chosen for a machine, not for what its browser tabs left over
+/// this minute.
+pub fn total_memory() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let line = text.lines().find(|l| l.starts_with("MemTotal:"))?;
+        let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        return Some(kib * 1024);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .ok()?;
+        return String::from_utf8(out.stdout).ok()?.trim().parse().ok();
+    }
+    #[allow(unreachable_code)]
+    None
 }
 
 /// The live sidecar, held by `App`. The child is stopped by pid on `stop`
@@ -628,6 +668,15 @@ mod tests {
         }
         assert!(model("ornith-1.5-35b-a3b").is_some());
         assert!(model("nope").is_none());
+        // Manifest order is preference order: the recommendation for a
+        // machine is the first row that fits, so the rows must descend.
+        let needs: Vec<u64> = MODELS.iter().map(|m| m.needs_bytes).collect();
+        let mut sorted = needs.clone();
+        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(
+            needs, sorted,
+            "MODELS must be in descending needs_bytes order"
+        );
     }
 
     #[test]

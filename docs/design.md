@@ -1138,6 +1138,24 @@ The 4B did not, and named a value for a cell it never read — the
 laptop tier's ceiling, and why its manifest note says it finds but does
 not compute.
 
+What an investigation shows while it runs was settled the same way. A
+reasoning model thinks for a minute between one tool result and the next
+call, and a card that does not move for a minute reads as a card that has
+died. The model's reasoning is now a step in the trail — reported when the
+call returns, since the harness does not stream — and the pending card
+carries a clock that restarts at every step. Token-level streaming would
+put the thinking on screen as it happens; Rig has the protocol for it
+(`StreamedTurnAssembler` and the streamed entry points on `AgentRun`),
+but its reference driver is several hundred lines of usage records,
+identity, abandoned turns and mid-stream invalid calls, and a clock plus
+the reasoning after the fact bought most of the value for none of that
+risk. It stays on the list.
+
+The bundled-model card defaults to the first manifest row whose stated
+need fits the machine's total memory — manifest order is preference
+order, and a test pins it as descending — rather than to whatever
+happened to be on disk.
+
 One template finding is worth recording because it runs against the
 grain of where the template came from. A "terse" chat-template splice
 that measurably shortens shell-tool turns for a coding agent cost this

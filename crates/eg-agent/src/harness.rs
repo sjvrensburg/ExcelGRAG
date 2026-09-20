@@ -13,7 +13,7 @@ use rig_agent::agent::{
     AgentRun, AgentRunStep, InvalidToolCallAction, ModelTurn, ModelTurnOutcome, RetryRequest,
 };
 use rig_agent::completion::PromptError;
-use rig_core::completion::message::{ToolChoice, ToolResultContent, UserContent};
+use rig_core::completion::message::{ReasoningContent, ToolChoice, ToolResultContent, UserContent};
 use rig_core::completion::{AssistantContent, CompletionModel, ToolDefinition, Usage};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -28,6 +28,11 @@ use crate::tools;
 pub enum Event {
     /// A model call is being made; `turn` is one-based.
     ModelCall { turn: usize },
+    /// What the model was thinking before it acted — a reasoning model's
+    /// `reasoning_content`, reported once the call returns. It is the why
+    /// behind a tool call, and worth the host showing; it is not an answer
+    /// and never grounds one.
+    ModelReasoning { turn: usize, text: String },
     /// The model replied with text (possibly beside tool calls).
     ModelText { turn: usize, text: String },
     /// The model asked for a tool. Reported before the policy decides.
@@ -212,6 +217,26 @@ impl<M: CompletionModel + Clone> Harness<M> {
                                 self.policy.model_timeout
                             ),
                         })??;
+                    let reasoning: String = response
+                        .choice
+                        .iter()
+                        .filter_map(|c| match c {
+                            AssistantContent::Reasoning(r) => Some(r),
+                            _ => None,
+                        })
+                        .flat_map(|r| r.content.iter())
+                        .filter_map(|part| match part {
+                            ReasoningContent::Text { text, .. } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !reasoning.trim().is_empty() {
+                        sink(Event::ModelReasoning {
+                            turn,
+                            text: reasoning,
+                        });
+                    }
                     let text: String = response
                         .choice
                         .iter()

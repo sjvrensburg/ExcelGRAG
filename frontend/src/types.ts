@@ -167,6 +167,7 @@ export interface TrailStepDto {
 // live under the pending turn; never persisted.
 export type AgentStepDto =
   | { kind: "model_call"; turn: number }
+  | { kind: "model_reasoning"; turn: number; text: string }
   | { kind: "model_text"; turn: number; text: string }
   | { kind: "tool_call"; turn: number; name: string; args: unknown }
   | { kind: "tool_result"; turn: number; name: string; ok: boolean; refused: boolean; text: string }
@@ -197,6 +198,10 @@ export interface SidecarInfo {
   runtime: { os: string; arch: string; accelerator: string; build: string } | null;
   models: SidecarModel[];
   cache_dir: string;
+  memory_bytes: number | null;
+  // The first model in manifest (preference) order that fits this
+  // machine's memory; the card's default.
+  recommended: string | null;
 }
 
 export type LlmPrivacy = "off" | "passage" | "values";
