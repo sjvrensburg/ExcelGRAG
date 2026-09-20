@@ -440,3 +440,42 @@ fn a_sum_here_agrees_with_the_sum_in_the_cell_beside_it() {
         "and to a sheet they are one number: {computed:?}"
     );
 }
+
+#[test]
+fn a_minimum_and_a_maximum_say_which_row_they_were_found_in() {
+    // A maximum has a location. A caller told only "max 3400" pairs it
+    // with whichever row it happens to have read — the wrong one, when it
+    // has read ten of two thousand — so the row comes with the number.
+    let answer = ask(Query {
+        aggregates: vec![
+            Aggregate::Max("Debt".into()),
+            Aggregate::Min("Debt".into()),
+            Aggregate::Sum("Debt".into()),
+        ],
+        limit: 10,
+        ..Default::default()
+    })
+    .unwrap();
+    let group = answer.one().unwrap();
+    assert_eq!(group.values[0], Some(3400.0));
+    assert_eq!(group.at[0], Some(2), "South's row: header is row 0");
+    assert_eq!(group.values[1], Some(700.0));
+    assert_eq!(group.at[1], Some(4), "West's row");
+    assert_eq!(group.at[2], None, "a sum is nowhere in particular");
+
+    // Grouped, each group's extreme is its own row.
+    let answer = ask(Query {
+        group_by: vec!["Type".into()],
+        aggregates: vec![Aggregate::Max("Debt".into())],
+        limit: 10,
+        ..Default::default()
+    })
+    .unwrap();
+    let residential = answer
+        .groups
+        .iter()
+        .find(|g| g.key[0] == CellValue::Text("Residential".into()))
+        .unwrap();
+    assert_eq!(residential.values[0], Some(1200.0));
+    assert_eq!(residential.at[0], Some(1), "North's row");
+}

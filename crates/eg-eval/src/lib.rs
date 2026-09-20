@@ -55,8 +55,8 @@ pub use parse::{parse, BinOp, Expr, ParseError, UnaryOp};
 pub use query::{query, Aggregate, Answer, Filter, Group, Query, QueryError, Test};
 pub use schema::{infer_schema, Lookup, LookupKind, Schema};
 pub use trace::{
-    cell, cells_holding, cells_in, dependents_of, holds, precedents_of, CellFact, Reference,
-    ScanReport, Target, ValueScan,
+    cell, cells_holding, cells_in, count_in, dependents_of, holds, precedents_of, CellFact,
+    Reference, ScanReport, Target, ValueScan,
 };
 pub use whatif::{
     what_if, Applied, Blocked, Change, Impact, ImpactReport, Moved, Stopped, WhatIfOptions,
