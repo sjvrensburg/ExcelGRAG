@@ -266,10 +266,15 @@ above it.
   as an optional dependency, Cargo resolves optional dependencies whether or
   not their feature is on, and its fastembed 4/ort rc.9 pin cannot coexist
   with eg-index's fastembed 6/ort rc.13: the workspace stops resolving.
-  `eg-agent --score tests/fixtures/demo/answers.json` marks whether the
-  agent's *final reply* names an answer after choosing its own tools; the
+  `eg-agent --score tests/fixtures/demo/agent-answers.json` marks whether the
+  agent's *final reply* names an answer **and** a tool it called returned
+  it — the retrieval file's questions with agent-shaped wants, plus six that
+  need computing (`query_table`, `what_if`). Read the trails, not just the
+  marks: three of the four tool defects found so far were found there. The
   scripted-model tests in `tests/scripted.rs` prove the loop's contract with
-  no model at all.
+  no model at all. When running against a local model server, stop **your
+  own** server by pid — `pkill llama-server` once took down the user's
+  systemd model services alongside it.
 
 ## Invariants worth not breaking
 

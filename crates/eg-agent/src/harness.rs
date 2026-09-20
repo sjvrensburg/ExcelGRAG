@@ -47,9 +47,9 @@ pub enum Event {
     },
     /// The model named a tool that does not exist; it was told so.
     UnknownTool { turn: usize, name: String },
-    /// The model answered before calling any tool; the answer was sent back
-    /// with the reason it cannot stand.
-    Ungrounded { turn: usize },
+    /// The model's reply could not stand — given before any tool had run,
+    /// or empty — and was sent back with `reason`.
+    Ungrounded { turn: usize, reason: String },
 }
 
 /// How a run ended.
@@ -85,6 +85,9 @@ pub struct Harness<M: CompletionModel + Clone> {
     tools: Vec<ToolDefinition>,
     names: BTreeSet<String>,
     preamble: String,
+    /// Provider-specific fields merged into every request body — a local
+    /// server's chat-template switches, say. `None` sends nothing extra.
+    extra_params: Option<Value>,
 }
 
 impl<M: CompletionModel + Clone> Harness<M> {
@@ -95,7 +98,15 @@ impl<M: CompletionModel + Clone> Harness<M> {
             tools: tools::definitions(),
             names: tools::names().map(str::to_string).collect(),
             preamble: PREAMBLE.to_string(),
+            extra_params: None,
         }
+    }
+
+    /// Merge these fields into every request body. What they mean is the
+    /// endpoint's business; the harness passes them through untouched.
+    pub fn with_extra_params(mut self, params: Value) -> Self {
+        self.extra_params = Some(params);
+        self
     }
 
     /// Replace the preamble, for a host with more to say about its corpus.
@@ -168,7 +179,8 @@ impl<M: CompletionModel + Clone> Harness<M> {
                         .preamble(preamble.clone())
                         .tools(self.tools.clone())
                         .temperature(0.0)
-                        .max_tokens(self.policy.max_output_tokens);
+                        .max_tokens(self.policy.max_output_tokens)
+                        .additional_params_opt(self.extra_params.clone());
                     let request = if turn == 1 {
                         request.tool_choice(ToolChoice::Required)
                     } else {
@@ -193,7 +205,10 @@ impl<M: CompletionModel + Clone> Harness<M> {
                         .collect::<Vec<_>>()
                         .join("\n");
                     if !text.trim().is_empty() {
-                        sink(Event::ModelText { turn, text });
+                        sink(Event::ModelText {
+                            turn,
+                            text: text.clone(),
+                        });
                     }
                     let has_tool_calls = response
                         .choice
@@ -215,21 +230,41 @@ impl<M: CompletionModel + Clone> Harness<M> {
                     // starts a call), so the rule is enforced here: the
                     // turn is rolled back with the reason, a bounded number
                     // of times, and the retry spends the same turn budget.
-                    if !has_tool_calls
-                        && calls.is_empty()
-                        && ungrounded_retries < self.policy.max_ungrounded_retries
-                        && matches!(outcome, ModelTurnOutcome::Continue { .. })
-                    {
-                        ungrounded_retries += 1;
-                        sink(Event::Ungrounded { turn });
-                        run.retry_model_turn(RetryRequest::Feedback(
+                    //
+                    // An *empty* final reply is sent back the same way. A
+                    // reasoning model's thinking arrives as reasoning content,
+                    // not text, and a model that spent its whole output budget
+                    // thinking hands back nothing — seen with a 35B model about
+                    // to list three hundred accounts. The retry is a fresh
+                    // budget, and the feedback asks for the short form.
+                    let empty_reply = !has_tool_calls && text.trim().is_empty();
+                    let feedback = if !has_tool_calls && calls.is_empty() {
+                        Some(
                             "You have not called any tool, so you know nothing about \
                              this workbook yet; nothing in that reply can be checked. \
                              Call `search` with the question's words first, then \
-                             answer from what it returns."
-                                .to_string(),
-                        ))?;
-                        continue;
+                             answer from what it returns.",
+                        )
+                    } else if empty_reply {
+                        Some(
+                            "Your reply was empty. Answer in a few plain sentences \
+                             from what the tools returned; summarise rather than list.",
+                        )
+                    } else {
+                        None
+                    };
+                    if let Some(feedback) = feedback {
+                        if ungrounded_retries < self.policy.max_ungrounded_retries
+                            && matches!(outcome, ModelTurnOutcome::Continue { .. })
+                        {
+                            ungrounded_retries += 1;
+                            sink(Event::Ungrounded {
+                                turn,
+                                reason: feedback.to_string(),
+                            });
+                            run.retry_model_turn(RetryRequest::Feedback(feedback.to_string()))?;
+                            continue;
+                        }
                     }
                     // A misnamed tool is a result the model can read, not a
                     // failed run: it gets told what exists and tries again,

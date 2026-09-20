@@ -299,3 +299,38 @@ async fn an_ungrounded_answer_is_accepted_once_the_retries_are_spent() {
     assert_eq!(outcome.answer.as_deref(), Some("second guess"));
     assert!(outcome.calls.is_empty());
 }
+
+#[tokio::test]
+async fn an_empty_final_reply_is_sent_back() {
+    let (engine, _dir) = engine();
+    let model = Scripted::new(vec![
+        vec![AssistantContent::tool_call(
+            "c1",
+            "search",
+            json!({ "query": "revenue", "lexical_only": true }),
+        )],
+        // A reasoning model that spent its whole budget thinking.
+        vec![AssistantContent::text("")],
+        vec![AssistantContent::text(
+            "Revenue is a column on the Sales sheet.",
+        )],
+    ]);
+    let harness = Harness::new(model.clone(), Policy::default());
+    let mut sent_back = 0;
+    let outcome = harness
+        .ask(engine, "where is revenue?", &mut |e: Event| {
+            if matches!(e, Event::Ungrounded { .. }) {
+                sent_back += 1;
+            }
+        })
+        .await
+        .expect("the run completes");
+    assert_eq!(sent_back, 1);
+    assert_eq!(
+        outcome.answer.as_deref(),
+        Some("Revenue is a column on the Sales sheet.")
+    );
+    let requests = model.requests.lock().unwrap();
+    let third = serde_json::to_string(&requests[2].chat_history).unwrap();
+    assert!(third.contains("reply was empty"), "{third}");
+}
