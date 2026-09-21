@@ -7,8 +7,15 @@
 //! a loop will happily fire one per turn. The budget counts them, and past
 //! it a call is refused with a reason the model reads as the tool's result,
 //! so it can change course rather than the run simply failing.
+//!
+//! arXiv 2609.20804 found that a weak model does better when a budget's
+//! refusal is a reminder it reads and can act on, rather than the run simply
+//! terminating — [`Policy::admit`] already works this way and was evaluated
+//! against the paper and left unchanged on purpose.
 
 use std::collections::BTreeMap;
+
+use crate::elide::ElisionConfig;
 
 /// The two tools that cost a full scan of a workbook. Everything else is a
 /// lookup, a bounded walk, or a formula's own text.
@@ -40,6 +47,10 @@ pub struct Policy {
     /// How many times a reply given before any tool has run is sent back.
     /// Zero accepts such a reply as the answer.
     pub max_ungrounded_retries: usize,
+    /// How the history sent on each model call is trimmed once it grows
+    /// past a soft budget. Budget-adjacent like the rest of this struct, not
+    /// a safety gate — see [`crate::elide`].
+    pub elision: ElisionConfig,
 }
 
 impl Default for Policy {
@@ -51,6 +62,7 @@ impl Default for Policy {
             max_output_tokens: 4096,
             model_timeout: std::time::Duration::from_secs(600),
             max_ungrounded_retries: 2,
+            elision: ElisionConfig::default(),
         }
     }
 }

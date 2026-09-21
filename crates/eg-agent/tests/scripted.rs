@@ -182,6 +182,111 @@ async fn a_refusal_is_a_result_the_model_reads() {
 }
 
 #[tokio::test]
+async fn a_progress_recap_reaches_the_model_from_the_second_call_on() {
+    let (engine, _dir) = engine();
+    let model = Scripted::new(vec![
+        vec![AssistantContent::tool_call(
+            "c1",
+            "search",
+            json!({ "query": "revenue", "lexical_only": true }),
+        )],
+        vec![AssistantContent::text("done")],
+    ]);
+    let harness = Harness::new(model.clone(), Policy::default());
+    harness
+        .ask(engine, "where is revenue?", &mut |_| {})
+        .await
+        .expect("the run completes");
+
+    let requests = model.requests.lock().unwrap();
+    // Turn 1 has made no calls yet, so its preamble carries no recap.
+    let first = serde_json::to_string(&requests[0]).unwrap();
+    assert!(!first.contains("Progress so far"), "{first}");
+    // Turn 2 is told what turn 1 already found.
+    let second = serde_json::to_string(&requests[1]).unwrap();
+    assert!(second.contains("Progress so far"), "{second}");
+    assert!(second.contains("search"), "{second}");
+}
+
+#[tokio::test]
+async fn an_old_result_is_elided_once_it_no_longer_fits_the_budget() {
+    let (engine, _dir) = engine();
+    // The freshest tool result is always the next call's `prompt`, not part
+    // of `history` — so eliding anything requires at least two prior tool
+    // calls: the first ages into `history` once the second has run.
+    let model = Scripted::new(vec![
+        vec![AssistantContent::tool_call(
+            "c1",
+            "search",
+            json!({ "query": "revenue", "lexical_only": true }),
+        )],
+        vec![AssistantContent::tool_call("c2", "tables", json!({}))],
+        vec![AssistantContent::text("done")],
+    ]);
+    // A budget of one token is smaller than any real tool result, so the
+    // oldest tool-result-bearing message in history is a candidate the
+    // moment there is one; `keep_recent: 0` protects nothing further.
+    let policy = Policy {
+        elision: eg_agent::elide::ElisionConfig {
+            soft_token_budget: 1,
+            keep_recent: 0,
+        },
+        ..Policy::default()
+    };
+    let harness = Harness::new(model.clone(), policy);
+    harness
+        .ask(engine, "where is revenue?", &mut |_| {})
+        .await
+        .expect("the run completes");
+
+    let requests = model.requests.lock().unwrap();
+    let third: serde_json::Value = serde_json::to_value(&requests[2].chat_history).unwrap();
+    let messages = third.as_array().expect("chat_history is an array");
+    let first_result_text = messages
+        .iter()
+        .flat_map(|m| {
+            m.get("content")
+                .and_then(|c| c.as_array())
+                .into_iter()
+                .flatten()
+        })
+        .find(|item| item.get("call").and_then(|c| c.as_str()) == Some("c1"))
+        .and_then(|item| item.get("content").and_then(|c| c.as_array()))
+        .and_then(|c| c.first())
+        .and_then(|c| c.get("text"))
+        .and_then(|t| t.as_str())
+        .expect("the first search call's tool result is present");
+    assert!(
+        first_result_text.starts_with("[elided:"),
+        "{first_result_text}"
+    );
+}
+
+#[tokio::test]
+async fn a_short_run_under_budget_is_never_elided() {
+    let (engine, _dir) = engine();
+    let model = Scripted::new(vec![
+        vec![AssistantContent::tool_call(
+            "c1",
+            "search",
+            json!({ "query": "revenue", "lexical_only": true }),
+        )],
+        vec![AssistantContent::text(
+            "Revenue is a column on the Sales sheet.",
+        )],
+    ]);
+    let harness = Harness::new(model.clone(), Policy::default());
+    harness
+        .ask(engine, "where is revenue?", &mut |_| {})
+        .await
+        .expect("the run completes");
+
+    let requests = model.requests.lock().unwrap();
+    let second = serde_json::to_string(&requests[1].chat_history).unwrap();
+    assert!(!second.contains("[elided:"), "{second}");
+}
+
+#[tokio::test]
 async fn a_misnamed_tool_is_corrected_not_fatal() {
     let (engine, _dir) = engine();
     let model = Scripted::new(vec![

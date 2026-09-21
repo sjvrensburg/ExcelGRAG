@@ -23,7 +23,7 @@ being written in quietly.
 
 | Licence | Crates |
 |---|---:|
-| MIT License | 420 |
+| MIT License | 425 |
 | ISC License | 23 |
 | Unicode License v3 | 19 |
 | Apache License 2.0 | 18 |
@@ -6170,6 +6170,43 @@ DEALINGS IN THE SOFTWARE.
 
 ## MIT License
 
+`bit-set 0.8.0` · `bit-vec 0.8.0`
+
+<details><summary>Licence text</summary>
+
+```
+Copyright (c) 2023 The Rust Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+```
+
+</details>
+
+## MIT License
+
 `hyper-util 0.1.20`
 
 <details><summary>Licence text</summary>
@@ -7480,7 +7517,7 @@ SOFTWARE.
 
 ## MIT License
 
-`eg-agent 0.3.5` · `eg-cli 0.3.5` · `eg-eval 0.3.5` · `eg-fixtures 0.3.5` · `eg-graph 0.3.5` · `eg-gui 0.3.5` · `eg-index 0.3.5` · `eg-ingest 0.3.5` · `eg-mcp 0.3.5` · `eg-model 0.3.5` · `eg-retrieve 0.3.5` · `eg-structure 0.3.5` · `async-openai-macros 0.3.0` · `async-openai 0.42.0` · `async-stream-impl 0.3.6` · `async-stream 0.3.6` · `chrono 0.4.45` · `eventsource-stream 0.2.3` · `gloo-timers 0.4.0` · `htmlescape 0.3.1` · `jni-macros 0.22.4` · `jni-sys-macros 0.4.1` · `jni 0.22.4` · `ndk-context 0.1.1` · `objc2-app-kit 0.3.2` · `objc2-core-foundation 0.3.2` · `objc2-encode 4.1.0` · `objc2-foundation 0.3.2` · `objc2 0.6.4` · `ownedbytes 0.9.0` · `r-efi 5.3.0` · `r-efi 6.0.0` · `rig-agent 0.42.0` · `rustls-platform-verifier-android 0.1.1` · `tantivy-bitpacker 0.10.0` · `tantivy-columnar 0.7.0` · `tantivy-common 0.11.0` · `tantivy-query-grammar 0.26.0` · `tantivy-sstable 0.7.0` · `tantivy-stacker 0.7.0` · `tantivy-tokenizer-api 0.7.0` · `winapi-i686-pc-windows-gnu 0.4.0` · `winapi-x86_64-pc-windows-gnu 0.4.0` · `windows-core 0.62.2` · `windows-implement 0.60.2` · `windows-interface 0.59.3` · `windows-link 0.2.1` · `windows-registry 0.6.1` · `windows-result 0.4.1` · `windows-strings 0.5.1` · `windows-sys 0.52.0` · `windows-sys 0.59.0` · `windows-sys 0.60.2` · `windows-sys 0.61.2` · `windows-targets 0.52.6` · `windows-targets 0.53.5` · `windows_aarch64_gnullvm 0.52.6` · `windows_aarch64_gnullvm 0.53.1` · `windows_aarch64_msvc 0.52.6` · `windows_aarch64_msvc 0.53.1` · `windows_i686_gnu 0.52.6` · `windows_i686_gnu 0.53.1` · `windows_i686_gnullvm 0.52.6` · `windows_i686_gnullvm 0.53.1` · `windows_i686_msvc 0.52.6` · `windows_i686_msvc 0.53.1` · `windows_x86_64_gnu 0.52.6` · `windows_x86_64_gnu 0.53.1` · `windows_x86_64_gnullvm 0.52.6` · `windows_x86_64_gnullvm 0.53.1` · `windows_x86_64_msvc 0.52.6` · `windows_x86_64_msvc 0.53.1`
+`eg-agent 0.4.0` · `eg-cli 0.4.0` · `eg-eval 0.4.0` · `eg-fixtures 0.4.0` · `eg-graph 0.4.0` · `eg-gui 0.4.0` · `eg-index 0.4.0` · `eg-ingest 0.4.0` · `eg-mcp 0.4.0` · `eg-model 0.4.0` · `eg-retrieve 0.4.0` · `eg-structure 0.4.0` · `async-openai-macros 0.3.0` · `async-openai 0.42.0` · `async-stream-impl 0.3.6` · `async-stream 0.3.6` · `chrono 0.4.45` · `eventsource-stream 0.2.3` · `gloo-timers 0.4.0` · `htmlescape 0.3.1` · `jni-macros 0.22.4` · `jni-sys-macros 0.4.1` · `jni 0.22.4` · `ndk-context 0.1.1` · `objc2-app-kit 0.3.2` · `objc2-core-foundation 0.3.2` · `objc2-encode 4.1.0` · `objc2-foundation 0.3.2` · `objc2 0.6.4` · `ownedbytes 0.9.0` · `r-efi 5.3.0` · `r-efi 6.0.0` · `rig-agent 0.42.0` · `rustls-platform-verifier-android 0.1.1` · `tantivy-bitpacker 0.10.0` · `tantivy-columnar 0.7.0` · `tantivy-common 0.11.0` · `tantivy-query-grammar 0.26.0` · `tantivy-sstable 0.7.0` · `tantivy-stacker 0.7.0` · `tantivy-tokenizer-api 0.7.0` · `tiktoken-rs 0.12.0` · `winapi-i686-pc-windows-gnu 0.4.0` · `winapi-x86_64-pc-windows-gnu 0.4.0` · `windows-core 0.62.2` · `windows-implement 0.60.2` · `windows-interface 0.59.3` · `windows-link 0.2.1` · `windows-registry 0.6.1` · `windows-result 0.4.1` · `windows-strings 0.5.1` · `windows-sys 0.52.0` · `windows-sys 0.59.0` · `windows-sys 0.60.2` · `windows-sys 0.61.2` · `windows-targets 0.52.6` · `windows-targets 0.53.5` · `windows_aarch64_gnullvm 0.52.6` · `windows_aarch64_gnullvm 0.53.1` · `windows_aarch64_msvc 0.52.6` · `windows_aarch64_msvc 0.53.1` · `windows_i686_gnu 0.52.6` · `windows_i686_gnu 0.53.1` · `windows_i686_gnullvm 0.52.6` · `windows_i686_gnullvm 0.53.1` · `windows_i686_msvc 0.52.6` · `windows_i686_msvc 0.53.1` · `windows_x86_64_gnu 0.52.6` · `windows_x86_64_gnu 0.53.1` · `windows_x86_64_gnullvm 0.52.6` · `windows_x86_64_gnullvm 0.53.1` · `windows_x86_64_msvc 0.52.6` · `windows_x86_64_msvc 0.53.1`
 
 <details><summary>Licence text</summary>
 
@@ -7836,6 +7873,39 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE
+
+```
+
+</details>
+
+## MIT License
+
+`fancy-regex 0.17.0`
+
+<details><summary>Licence text</summary>
+
+```
+The MIT License
+
+Copyright 2015 The Fancy Regex Authors.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 
 ```
 
@@ -8512,6 +8582,39 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+
+```
+
+</details>
+
+## MIT License
+
+`bstr 1.13.1`
+
+<details><summary>Licence text</summary>
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2018-2019 Andrew Gallant
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 
 ```
 

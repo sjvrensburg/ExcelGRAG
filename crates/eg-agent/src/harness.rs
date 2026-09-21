@@ -18,8 +18,10 @@ use rig_core::completion::{AssistantContent, CompletionModel, ToolDefinition, Us
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::elide;
 use crate::policy::{Ledger, Policy};
 use crate::preamble::PREAMBLE;
+use crate::progress::ProgressSummary;
 use crate::tools;
 
 /// One thing the harness did, reported to the host as it happens.
@@ -200,11 +202,14 @@ impl<M: CompletionModel + Clone> Harness<M> {
                     // claiming a `find_value` scan it never made. Only the
                     // first: forcing every turn is the documented footgun
                     // where the model can never stop to answer.
+                    let request_preamble =
+                        format!("{preamble}{}", ProgressSummary::build(&calls).render());
+                    let history = elide::elide_history(&history, &self.policy.elision);
                     let request = self
                         .model
                         .completion_request(prompt)
                         .messages(history)
-                        .preamble(preamble.clone())
+                        .preamble(request_preamble)
                         .tools(self.tools.clone())
                         .temperature(0.0)
                         .max_tokens(self.policy.max_output_tokens)

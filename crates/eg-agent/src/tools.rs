@@ -4,6 +4,10 @@
 //! and [`execute`] dispatches through `eg_mcp::tools::call`, so a tool added
 //! to the server is a tool the agent has, with the same name, description and
 //! schema — the two cannot drift because there is only one.
+//!
+//! arXiv 2609.20804 found that a weak model does much better with a fixed,
+//! predefined tool interface than with a raw shell — this table already is
+//! that, evaluated against the paper and left unchanged on purpose.
 
 use std::sync::{Arc, Mutex};
 
