@@ -70,7 +70,7 @@ impl Policy {
         name: &str,
         args: &serde_json::Value,
     ) -> Result<(), String> {
-        let key = format!("{name}{args}");
+        let key = format!("{name}{}", canonical(args));
         let count = ledger.seen.entry(key).or_insert(0);
         if *count >= self.max_identical_calls {
             return Err(format!(
@@ -96,10 +96,57 @@ impl Policy {
     }
 }
 
+/// A JSON value with every object's keys sorted, so the same arguments in
+/// another order are the same call. `serde_json`'s own `Display` follows
+/// insertion order once any crate in the build turns on `preserve_order`.
+fn canonical(value: &serde_json::Value) -> String {
+    fn walk(value: &serde_json::Value, out: &mut String) {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort_unstable();
+                out.push('{');
+                for (i, key) in keys.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&serde_json::Value::String((*key).clone()).to_string());
+                    out.push(':');
+                    walk(&map[*key], out);
+                }
+                out.push('}');
+            }
+            serde_json::Value::Array(items) => {
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    walk(item, out);
+                }
+                out.push(']');
+            }
+            other => out.push_str(&other.to_string()),
+        }
+    }
+    let mut out = String::new();
+    walk(value, &mut out);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_repeat_key_ignores_argument_order() {
+        assert_eq!(
+            canonical(&json!({"b": [1, {"y": 2, "x": 1}], "a": "s"})),
+            canonical(&json!({"a": "s", "b": [1, {"x": 1, "y": 2}]}))
+        );
+        assert_ne!(canonical(&json!({"a": 1})), canonical(&json!({"a": 2})));
+    }
 
     #[test]
     fn scans_are_budgeted_and_repeats_refused() {

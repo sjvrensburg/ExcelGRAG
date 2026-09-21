@@ -339,8 +339,17 @@ pub fn launch(app: Arc<App>, model_id: &str) -> Result<(), String> {
             return Err("a sidecar is already being set up".into());
         }
         slot.stop_child();
-        slot.status = SidecarStatus::Stopped;
+        // Claimed here, under the lock, not by the job's first status write
+        // later: two quick POSTs would otherwise both pass the guard and
+        // start two downloads into one `.part`, or two servers of which
+        // only one is tracked.
+        slot.status = SidecarStatus::Starting {
+            model: model.id.to_string(),
+        };
     }
+    app.send(WsEvent::Sidecar {
+        status: app.sidecar().status.clone(),
+    });
     tokio::spawn(async move {
         if let Err(error) = run(&app, model, runtime).await {
             tracing::warn!("sidecar {}: {error}", model.id);
@@ -359,12 +368,27 @@ pub fn launch(app: Arc<App>, model_id: &str) -> Result<(), String> {
 
 /// Stop the running sidecar, if any, and switch the chat model off.
 pub fn stop(app: &App) -> SidecarStatus {
-    {
+    let port = {
         let mut slot = app.sidecar();
         slot.stop_child();
+        let port = match &slot.status {
+            SidecarStatus::Running { port, .. } => Some(*port),
+            _ => None,
+        };
         slot.status = SidecarStatus::Stopped;
+        port
+    };
+    // Only a chat model that was the sidecar's is switched off with it; a
+    // hand-configured endpoint in the panel is the person's, not this
+    // job's, and a stop with no sidecar running must leave it alone.
+    let points_at_sidecar = port.is_some_and(|port| {
+        app.llm_status()
+            .settings
+            .is_some_and(|s| s.base_url.contains(&format!("127.0.0.1:{port}/")))
+    });
+    if points_at_sidecar {
+        let _ = app.set_llm(None);
     }
-    let _ = app.set_llm(None);
     app.send(WsEvent::Sidecar {
         status: SidecarStatus::Stopped,
     });
@@ -438,6 +462,11 @@ async fn run(
     // on that path either. On Linux the child asks the kernel to SIGTERM
     // it when its parent exits, whatever the exit was. Elsewhere the
     // signal handler in `lib.rs` covers SIGINT/SIGTERM.
+    //
+    // PR_SET_PDEATHSIG fires on the death of the *thread* that forked, not
+    // of the process. This spawn runs on a Tokio worker thread, which lives
+    // as long as the runtime; it must never move to `spawn_blocking`, whose
+    // idle threads are reaped and would take the sidecar with them.
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt;
@@ -458,7 +487,7 @@ async fn run(
     let pid = child.id();
     app.sidecar().child = Some(child);
 
-    wait_healthy(port, Duration::from_secs(600)).await?;
+    wait_healthy(app, port, Duration::from_secs(600)).await?;
 
     // A server on loopback keeps "nothing leaves the machine": `values` is
     // the tier that lets an investigation read cells, and it is announced
@@ -481,7 +510,44 @@ async fn run(
             pid,
         },
     );
+    watch_child(Arc::clone(app), model.id, pid);
     Ok(())
+}
+
+/// After a server is healthy, notice if it dies: a crash mid-session must
+/// not leave the card saying *stop* and the chat model pointed at a dead
+/// port until the person works it out from failed turns. Polled rather
+/// than `wait()`ed, because the child lives in the slot's mutex and a
+/// blocking wait would hold it.
+fn watch_child(app: Arc<App>, model_id: &'static str, pid: u32) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let exited = {
+                let mut slot = app.sidecar();
+                // Someone stopped or replaced it: this watcher is done.
+                if !matches!(&slot.status, SidecarStatus::Running { pid: p, .. } if *p == pid) {
+                    return;
+                }
+                match slot.child.as_mut().map(|c| c.try_wait()) {
+                    Some(Ok(Some(status))) => Some(status.to_string()),
+                    Some(Err(e)) => Some(format!("could not be checked: {e}")),
+                    _ => None,
+                }
+            };
+            if let Some(how) = exited {
+                app.sidecar().child = None;
+                set_status(
+                    &app,
+                    SidecarStatus::Failed {
+                        model: model_id.to_string(),
+                        error: format!("llama-server exited ({how})"),
+                    },
+                );
+                return;
+            }
+        }
+    });
 }
 
 fn free_port() -> Result<u16, String> {
@@ -493,7 +559,11 @@ fn free_port() -> Result<u16, String> {
         .map_err(|e| e.to_string())
 }
 
-async fn wait_healthy(port: u16, timeout: Duration) -> Result<(), String> {
+/// Poll `/health` until the server answers — or until the child has
+/// exited, which a missing library, a model too large for memory, or a
+/// port race does within seconds, and which must not be reported as a
+/// ten-minute timeout.
+async fn wait_healthy(app: &Arc<App>, port: u16, timeout: Duration) -> Result<(), String> {
     let client = reqwest::Client::new();
     let url = format!("http://127.0.0.1:{port}/health");
     let start = Instant::now();
@@ -502,6 +572,17 @@ async fn wait_healthy(port: u16, timeout: Duration) -> Result<(), String> {
             if response.status().is_success() {
                 return Ok(());
             }
+        }
+        let exited = {
+            let mut slot = app.sidecar();
+            match slot.child.as_mut().map(|c| c.try_wait()) {
+                Some(Ok(Some(status))) => Some(status.to_string()),
+                None => Some("the server process is gone".to_string()),
+                _ => None,
+            }
+        };
+        if let Some(how) = exited {
+            return Err(format!("llama-server exited before it was healthy ({how})"));
         }
         if start.elapsed() > timeout {
             return Err(format!(

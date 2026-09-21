@@ -109,6 +109,7 @@ export default function App() {
     )
       .then((turn) => {
         setChatTurns((prev) => appendTurn(prev, turn));
+        setLiveSteps([]);
         // Cleared only on success: a failed request leaves the context chip
         // in place so retrying the same message keeps the same entity
         // attached instead of silently falling back to a bare text search.
@@ -193,9 +194,10 @@ export default function App() {
         case "chat_turn":
           if (event.session_id === DEFAULT_SESSION) {
             setChatTurns((prev) => appendTurn(prev, event.turn));
-            // The committed turn carries its own trail; the live one is
-            // done with.
-            if (event.turn.trail) setLiveSteps([]);
+            // A committed turn ends whatever investigation was live — its
+            // own trail travels with it, and a turn with no trail (the
+            // budget ran out before a call) is over just the same.
+            setLiveSteps([]);
           }
           break;
         case "navigate":
