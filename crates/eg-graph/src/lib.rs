@@ -23,6 +23,7 @@
 pub mod audit;
 pub mod build;
 pub mod check;
+pub mod importance;
 pub mod node;
 pub mod report;
 pub mod store;
@@ -32,6 +33,7 @@ pub use build::{
     build, build_with, nodes_of_kind, reachable_from, BuiltGraph, Graph, GraphOptions,
 };
 pub use check::{check, Violation};
+pub use importance::compute_importance;
 pub use node::{
     ColumnNode, DanglingReason, DanglingRef, DefinedNameNode, Edge, EdgeKind, ExternalWorkbookNode,
     FormulaGroupNode, Node, NodeKind, RegionNode, SheetNode, WorkbookNode,

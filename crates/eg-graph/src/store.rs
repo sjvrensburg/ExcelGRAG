@@ -67,8 +67,9 @@ use crate::report::BuildReport;
 /// the reader does — so a fix to what a formula decodes to, or a new field on
 /// a formula group's shape, has to move this or the corpus goes on answering
 /// from graphs built before the fix. Version 2 is the vendored reader's
-/// sheet-qualifier fixes plus `R1C1Ref::end_sheet_name`.
-pub const FORMAT_VERSION: u32 = 2;
+/// sheet-qualifier fixes plus `R1C1Ref::end_sheet_name`. Version 3 adds
+/// [`StoredGraph::importance`].
+pub const FORMAT_VERSION: u32 = 3;
 
 /// How many formula-group nodes are worth keeping in a stored graph.
 ///
@@ -148,6 +149,13 @@ pub struct StoredGraph {
     pub root: u32,
     pub graph: Graph,
     pub report: BuildReport,
+    /// A PageRank-style importance score per node, parallel to the graph's
+    /// own node indices (see [`crate::importance::compute_importance`]). A
+    /// side array rather than a field on [`crate::node::Node`] itself, so
+    /// adding it touched no node variant or the exhaustive matches over
+    /// them — the score is derived from the graph's edges, not part of what
+    /// a node *is*.
+    pub importance: Vec<f32>,
 }
 
 impl StoredGraph {
@@ -334,6 +342,9 @@ impl Corpus {
         formula_group_nodes: bool,
         built: &BuiltGraph,
     ) -> Result<(), StoreError> {
+        // Computed once here, per (re)index, rather than at query time: a
+        // walk over the stored graph only ever needs to look a score up.
+        let importance = crate::importance::compute_importance(&built.graph);
         let stored = StoredGraph {
             version: FORMAT_VERSION,
             content_hash: content_hash.to_string(),
@@ -342,6 +353,7 @@ impl Corpus {
             root: built.root.index() as u32,
             graph: built.graph.clone(),
             report: built.report.clone(),
+            importance,
         };
         let file = self.graph_path(content_hash);
         let bytes = serde_json::to_vec(&stored).expect("a graph of plain data serialises");
