@@ -183,6 +183,53 @@ pub fn sheet_names(graph: &eg_graph::Graph) -> HashMap<SheetId, String> {
         .collect()
 }
 
+/// The node a citation lands on: the smallest node whose range contains
+/// the cited one, on the cited sheet — a column for a cell in it, a region
+/// for a range across columns, the sheet for a citation nothing narrower
+/// holds. `None` when the citation does not parse, names no sheet of this
+/// graph, or is a whole-column/row reference nothing here spans.
+///
+/// This is how an investigation's camera follows its tool calls: the model
+/// cites ranges, the canvas shows nodes, and the same open-then-select as
+/// clicking a search hit is what tells the human *which* node was meant.
+pub fn node_for_citation(graph: &eg_graph::Graph, citation: &str) -> Option<u32> {
+    let parsed = eg_model::parse_a1(citation.trim()).ok()?;
+    let sheet_name = parsed.sheet_name.as_deref()?;
+    let sheet_id = graph.node_weights().find_map(|n| match n {
+        Node::Sheet(sheet) if sheet.name.eq_ignore_ascii_case(sheet_name) => Some(sheet.id),
+        _ => None,
+    })?;
+    if parsed.is_whole_column() || parsed.is_whole_row() {
+        return None;
+    }
+    let wanted = parsed.resolve(sheet_id);
+    let mut best: Option<(u64, u32)> = None;
+    for index in graph.node_indices() {
+        let node = &graph[index];
+        let Some(range) = node.range() else {
+            continue;
+        };
+        if range.sheet != sheet_id
+            || range.top > wanted.top
+            || range.left > wanted.left
+            || range.bottom < wanted.bottom
+            || range.right < wanted.right
+        {
+            continue;
+        }
+        let size = range.cell_count();
+        if best.is_none_or(|(b, _)| size < b) {
+            best = Some((size, index.index() as u32));
+        }
+    }
+    best.map(|(_, id)| id).or_else(|| {
+        graph.node_indices().find_map(|index| match &graph[index] {
+            Node::Sheet(sheet) if sheet.id == sheet_id => Some(index.index() as u32),
+            _ => None,
+        })
+    })
+}
+
 /// A range, cited the way `eg` does: `'Q3 Sales'!B2:D40`, sheet and all — or,
 /// for a sheet id this map doesn't resolve (a graph inconsistency, not the
 /// ordinary case), a citation that at least says which sheet id rather than
@@ -550,6 +597,63 @@ pub struct ChatTurnDto {
     /// the question it answers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<u64>,
+    /// The tool calls an investigation made, in order, when the turn was
+    /// one the model drove itself. Empty for a pipeline turn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trail: Vec<TrailStepDto>,
+}
+
+/// One tool call of an investigation, as persisted and shown: what was
+/// asked of which tool and how it went — never what came back, which in
+/// `values` mode holds cells and belongs in no session file.
+#[derive(Clone, Serialize, serde::Deserialize)]
+pub struct TrailStepDto {
+    pub turn: usize,
+    pub name: String,
+    pub args: serde_json::Value,
+    pub ok: bool,
+    pub refused: bool,
+}
+
+/// One step of an investigation in flight, streamed to every tab as it
+/// happens. The tool result text is the model's view of it (redacted
+/// exactly as the model saw it) and is bounded; it is shown live and never
+/// persisted.
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentStepDto {
+    ModelCall {
+        turn: usize,
+    },
+    /// The model's reasoning for the turn, once the call returned.
+    ModelReasoning {
+        turn: usize,
+        text: String,
+    },
+    ModelText {
+        turn: usize,
+        text: String,
+    },
+    ToolCall {
+        turn: usize,
+        name: String,
+        args: serde_json::Value,
+    },
+    ToolResult {
+        turn: usize,
+        name: String,
+        ok: bool,
+        refused: bool,
+        text: String,
+    },
+    UnknownTool {
+        turn: usize,
+        name: String,
+    },
+    SentBack {
+        turn: usize,
+        reason: String,
+    },
 }
 
 /// The chat model as the browser sees it. `settings` is `None` when no
@@ -575,6 +679,7 @@ pub enum WsEvent {
         redact_values: bool,
         workbooks: Vec<WorkbookDto>,
         llm: LlmStatusDto,
+        sidecar: crate::sidecar::SidecarStatus,
     },
     /// The chat model was reconfigured from a settings panel; every tab
     /// shows the same connection, as with everything else in the session.
@@ -602,6 +707,17 @@ pub enum WsEvent {
     ChatTurn {
         session_id: String,
         turn: ChatTurnDto,
+    },
+    /// The bundled model's sidecar moved: a download's progress, a start,
+    /// a failure. Every tab shows the same one.
+    Sidecar {
+        status: crate::sidecar::SidecarStatus,
+    },
+    /// A step of an investigation the model is driving, as it lands. The
+    /// turn itself arrives as `ChatTurn` when the investigation ends.
+    AgentStep {
+        session_id: String,
+        step: AgentStepDto,
     },
     /// An agent asked the GUI to point the camera at a node, without running
     /// a full chat turn (it already knows exactly what to show).

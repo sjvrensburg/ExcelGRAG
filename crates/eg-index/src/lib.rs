@@ -49,7 +49,7 @@ pub mod tokenize;
 pub mod vector;
 
 pub use doc::{docs_for, docs_for_with, NodeDoc};
-pub use embed::{Embedder, DEFAULT_MODEL};
+pub use embed::{cache_dir, Embedder, DEFAULT_MODEL};
 pub use hybrid::{fuse, fuse_weighted, fuse_with, RRF_K};
 pub use text::{Hit, IndexError, SearchOptions, TextIndex};
 pub use vector::{embeddable, embeddable_with, VectorIndex};

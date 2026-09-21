@@ -150,6 +150,58 @@ export interface ChatTurnDto {
   // Set on an agent's turn that answers a `directed_to` one — the id of the
   // question it answers.
   reply_to?: number;
+  // The tool calls an investigation made, when the model drove this turn
+  // itself. Arguments and verdicts, never results.
+  trail?: TrailStepDto[];
+}
+
+export interface TrailStepDto {
+  turn: number;
+  name: string;
+  args: unknown;
+  ok: boolean;
+  refused: boolean;
+}
+
+// One step of an investigation in flight, streamed as it happens. Shown
+// live under the pending turn; never persisted.
+export type AgentStepDto =
+  | { kind: "model_call"; turn: number }
+  | { kind: "model_reasoning"; turn: number; text: string }
+  | { kind: "model_text"; turn: number; text: string }
+  | { kind: "tool_call"; turn: number; name: string; args: unknown }
+  | { kind: "tool_result"; turn: number; name: string; ok: boolean; refused: boolean; text: string }
+  | { kind: "unknown_tool"; turn: number; name: string }
+  | { kind: "sent_back"; turn: number; reason: string };
+
+// The bundled model's sidecar, as the server reports it.
+export type SidecarStatus =
+  | { state: "stopped" }
+  | { state: "downloading"; model: string; what: string; done: number; total: number }
+  | { state: "verifying"; model: string }
+  | { state: "starting"; model: string }
+  | { state: "running"; model: string; port: number; pid: number }
+  | { state: "failed"; model: string; error: string };
+
+export interface SidecarModel {
+  id: string;
+  tier: string;
+  note: string;
+  file: string;
+  size: number;
+  needs_bytes: number;
+  downloaded: boolean;
+}
+
+export interface SidecarInfo {
+  status: SidecarStatus;
+  runtime: { os: string; arch: string; accelerator: string; build: string } | null;
+  models: SidecarModel[];
+  cache_dir: string;
+  memory_bytes: number | null;
+  // The first model in manifest (preference) order that fits this
+  // machine's memory; the card's default.
+  recommended: string | null;
 }
 
 export type LlmPrivacy = "off" | "passage" | "values";
@@ -176,8 +228,11 @@ export type WsEvent =
       redact_values: boolean;
       workbooks: WorkbookDto[];
       llm: LlmStatusDto;
+      sidecar: SidecarStatus;
     }
   | { type: "llm"; status: LlmStatusDto }
+  | { type: "sidecar"; status: SidecarStatus }
+  | { type: "agent_step"; session_id: string; step: AgentStepDto }
   | {
       type: "corpus";
       added: string[];

@@ -249,7 +249,47 @@ above it.
   the optional LLM (`llm.rs`, built on `async-openai`, not a hand-rolled HTTP
   client), so a slow or unreachable model degrades a turn to the plain
   rendered passage rather than blocking every other browser tab or agent
-  call behind the corpus lock.
+  call behind the corpus lock. `investigate.rs` is the other kind of turn:
+  `POST /api/chat {investigate: true}` (or the bridge's `chat` with the same
+  flag) hands the configured model the tools through `eg-agent`'s harness;
+  each `Event` is broadcast as `WsEvent::AgentStep`, every range a tool
+  call names is resolved to a graph node (`dto::node_for_citation`) and
+  sent as `Navigate`, and the committed `ChatTurn` carries a `trail` of
+  calls — arguments and verdicts, never results. `passage` privacy runs the
+  tools with values redacted per call (`Harness::with_redacted_values`,
+  which flips `State.redact_values` under the lock and restores it).
+  `sidecar.rs` is the bundled model: a manifest of runtime builds
+  (`RUNTIMES`) and weights (`MODELS`), each pinned by size and sha256,
+  fetched into `eg_index::cache_dir()` with resume, verified, unpacked,
+  spawned on a free loopback port and stopped **by pid** — on Linux the
+  child also carries `PR_SET_PDEATHSIG`, and `run()` stops it on
+  SIGINT/SIGTERM, because a killed GUI runs no `Drop`. Swapping a model is
+  a manifest row plus an `eg-agent --score` run.
+- `eg-agent` — the agent harness: a model drives the `eg-mcp` tools itself,
+  one call at a time, where `eg gui`'s chat runs a fixed find→expand→render
+  pipeline. Built on Rig's `AgentRun` (`rig-agent`), a sans-IO state machine
+  the harness steps by hand — `harness.rs` asks it for the next step, makes
+  the model call or the tool calls, feeds the result back — so every step is
+  an `Event` the host sees before the next one lands, and a run is
+  serialisable between steps. Tools are `eg_mcp::tools::TOOLS` iterated, as
+  `eg-gui`'s bridge does, never redeclared; `tools::execute` takes the
+  engine lock inside a blocking task and never across a model `.await`.
+  `policy.rs` is about cost, not safety (nothing in `eg` mutates): the two
+  full-scan tools are budgeted and a verbatim repeat is refused, each with a
+  sentence the model reads as the tool's result. Depend on `rig-agent` and
+  `rig-core` directly, **never the `rig` facade** — it lists `rig-fastembed`
+  as an optional dependency, Cargo resolves optional dependencies whether or
+  not their feature is on, and its fastembed 4/ort rc.9 pin cannot coexist
+  with eg-index's fastembed 6/ort rc.13: the workspace stops resolving.
+  `eg-agent --score tests/fixtures/demo/agent-answers.json` marks whether the
+  agent's *final reply* names an answer **and** a tool it called returned
+  it — the retrieval file's questions with agent-shaped wants, plus six that
+  need computing (`query_table`, `what_if`). Read the trails, not just the
+  marks: three of the four tool defects found so far were found there. The
+  scripted-model tests in `tests/scripted.rs` prove the loop's contract with
+  no model at all. When running against a local model server, stop **your
+  own** server by pid — `pkill llama-server` once took down the user's
+  systemd model services alongside it.
 
 ## Invariants worth not breaking
 

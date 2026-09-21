@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 
-import { postIndex, postLlm } from "../api";
+import { deleteSidecar, getSidecar, postIndex, postLlm, postSidecar } from "../api";
 import type {
   AskResponse,
   LlmPrivacy,
   LlmSettings,
   LlmStatusDto,
   SearchDto,
+  SidecarInfo,
+  SidecarStatus,
   WorkbookDto,
 } from "../types";
 
@@ -35,6 +37,8 @@ interface Props {
   // The chat model as the server reports it (null until the hello event).
   llm: LlmStatusDto | null;
   onLlmChanged: (status: LlmStatusDto) => void;
+  // The bundled model's sidecar, as the server broadcasts it.
+  sidecar: SidecarStatus;
 }
 
 export function Sidebar(props: Props) {
@@ -163,6 +167,8 @@ export function Sidebar(props: Props) {
         </div>
         {indexError && <div className="error-note">{indexError}</div>}
       </section>
+
+      <SidecarSection status={props.sidecar} />
 
       <LlmSection status={props.llm} onChanged={props.onLlmChanged} />
 
@@ -415,4 +421,132 @@ function LlmSection({
       )}
     </section>
   );
+}
+
+// The bundled model: one of the manifest's weights files, run by the
+// `llama-server` the manifest names for this platform, on a loopback port
+// the Chat model panel is pointed at automatically. Everything is fetched
+// on first use into the model cache (`EG_MODEL_CACHE` moves it), resumed
+// if interrupted, and verified against the manifest's sha256 before it is
+// used. Stopping it switches the chat model off again.
+function SidecarSection({ status }: { status: SidecarStatus }) {
+  const [info, setInfo] = useState<SidecarInfo | null>(null);
+  const [choice, setChoice] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // The select follows the sidecar: while one is being set up or running,
+  // it names that model, whatever the reader had picked before.
+  useEffect(() => {
+    if ("model" in status && status.state !== "failed") setChoice(status.model);
+  }, [status]);
+
+  // Refresh what is on disk whenever the sidecar changes state: a finished
+  // download flips a model's `downloaded`.
+  useEffect(() => {
+    getSidecar()
+      .then((i) => {
+        setInfo(i);
+        // Default to what this machine can run best, then to whatever is
+        // already on disk, then to the top of the list.
+        setChoice(
+          (c) => c || i.recommended || i.models.find((m) => m.downloaded)?.id || i.models[0]?.id || "",
+        );
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  }, [status.state]);
+
+  const start = async () => {
+    if (!choice) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setInfo(await postSidecar(choice));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const stop = async () => {
+    setBusy(true);
+    try {
+      setInfo(await deleteSidecar());
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const inFlight =
+    status.state === "downloading" || status.state === "verifying" || status.state === "starting";
+  const chosen = info?.models.find((m) => m.id === choice);
+
+  return (
+    <section className="side-section">
+      <div className="section-title">Bundled model</div>
+      {info && !info.runtime && (
+        <div className="result-note">
+          no bundled runtime for this platform yet — point the Chat model panel at a llama-server,
+          Ollama or hosted endpoint instead
+        </div>
+      )}
+      <div className="sidecar-row">
+        <select value={choice} onChange={(e) => setChoice(e.target.value)} disabled={inFlight}>
+          {info?.models.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.id} · {m.tier} · {gb(m.size)}
+              {m.downloaded ? " · on disk" : ""}
+              {info?.recommended === m.id ? " · recommended" : ""}
+              {info?.memory_bytes != null && m.needs_bytes > info.memory_bytes ? " · too big for this machine" : ""}
+            </option>
+          ))}
+        </select>
+      </div>
+      {chosen && <div className="sidecar-note">{chosen.note}</div>}
+      <div className="sidecar-row">
+        {status.state === "running" ? (
+          <button className="run" onClick={stop} disabled={busy}>
+            stop
+          </button>
+        ) : (
+          <button
+            className="run primary"
+            onClick={start}
+            disabled={busy || inFlight || !choice || !info?.runtime}
+          >
+            {chosen?.downloaded ? "start" : "download & start"}
+          </button>
+        )}
+        <span className="sidecar-status">{describeSidecar(status, info)}</span>
+      </div>
+      {error && <div className="error-note">{error}</div>}
+    </section>
+  );
+}
+
+function describeSidecar(status: SidecarStatus, info: SidecarInfo | null): string {
+  switch (status.state) {
+    case "stopped":
+      return info?.runtime
+        ? `stopped · ${info.runtime.accelerator} runtime ${info.runtime.build}`
+        : "stopped";
+    case "downloading": {
+      const pct = status.total > 0 ? Math.floor((100 * status.done) / status.total) : 0;
+      return `fetching ${status.what} for ${status.model}: ${gb(status.done)} of ${gb(status.total)} (${pct}%)`;
+    }
+    case "verifying":
+      return `verifying ${status.model} against the manifest's sha256…`;
+    case "starting":
+      return `starting ${status.model}…`;
+    case "running":
+      return `${status.model} on 127.0.0.1:${status.port} (pid ${status.pid})`;
+    case "failed":
+      return `${status.model} failed: ${status.error}`;
+  }
+}
+
+function gb(bytes: number): string {
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(0)} MB`;
+  return `${bytes} B`;
 }

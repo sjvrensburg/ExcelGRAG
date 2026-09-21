@@ -220,6 +220,33 @@ takes the *name* of the environment variable holding the API key (as
 `--llm-api-key-env` does), the server reads it, and nothing typed there is
 persisted — a restart starts from the flags again.
 
+### Letting the model drive
+
+With a model configured, the chat panel's **investigate** toggle hands the
+model the tools above and lets it choose its own way through the workbook —
+search, then context, then cells, formulas, a table query or a what-if —
+instead of running the fixed pipeline. Every step shows in the panel as it
+lands, the canvas follows each range the model reads, and the finished turn
+carries the trail of tool calls it made (what was asked of which tool and
+how it went; never a result, which in `values` mode holds cells). Under
+`passage` the tools run with every value redacted to its kind, so the model
+can search, trace and check without a cell's content reaching it. An
+attached agent can ask for the same thing through `chat` with
+`investigate: true`. `eg-agent` (`crates/eg-agent`) is the same harness from
+a shell, with `--score` for measuring a model against an answer file.
+
+### A bundled model
+
+The sidebar's **Bundled model** card fetches a `llama-server` build for this
+platform and one of four weights files — a large tier that answers every
+question of the demo agent file, a small one that computes like it at a
+fifth of the size, and two alternatives — into the model cache
+(`EG_MODEL_CACHE` moves it), verifies each against a pinned sha256, starts
+the server on a loopback port and points the chat model at it. Downloads
+resume; the server stops with the GUI, by pid. Linux x86-64 (Vulkan, with
+a CPU build behind it) and macOS arm64 are in the manifest today; anything
+else is told to point the *Chat model* panel at an endpoint instead.
+
 ## How it works
 
 Data flows one way through the workspace; each crate depends only on the ones

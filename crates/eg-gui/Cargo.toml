@@ -11,6 +11,7 @@ description = "A local web UI over an ExcelGRAG corpus, with a shared agent/huma
 # Not workspace-aliased, matching eg-cli's existing convention for this
 # downstream, non-pipeline crate.
 eg-mcp = { path = "../eg-mcp" }
+eg-agent = { path = "../eg-agent" }
 
 eg-graph.workspace = true
 eg-index.workspace = true
@@ -37,6 +38,18 @@ webbrowser.workspace = true
 # rationale in docs/design.md.
 rmcp.workspace = true
 async-openai.workspace = true
+
+# The bundled-model sidecar: download (resumable, sha256-verified), unpack,
+# spawn `llama-server`, stop it by pid.
+reqwest.workspace = true
+sha2.workspace = true
+tar.workspace = true
+flate2.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# PR_SET_PDEATHSIG: the sidecar asks the kernel to end it when the GUI
+# ends, however the GUI ends.
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

@@ -4,6 +4,7 @@ import type {
   GraphDto,
   LlmSettings,
   LlmStatusDto,
+  SidecarInfo,
   NodeDetailDto,
   SearchDto,
   WorkbookDto,
@@ -99,6 +100,7 @@ export function postChat(
   sessionId?: string,
   context?: { workbook: string; node: number },
   toAgent?: boolean,
+  investigate?: boolean,
 ): Promise<ChatTurnDto> {
   return json(fetch("/api/chat", {
     method: "POST",
@@ -109,8 +111,28 @@ export function postChat(
       workbook: context?.workbook,
       node: context?.node,
       to_agent: toAgent,
+      investigate,
     }),
   }));
+}
+
+// The bundled model: what the manifest offers, what is on disk, and the
+// sidecar's state. Starting one returns as soon as the job is accepted;
+// progress arrives as `sidecar` WsEvents.
+export function getSidecar(): Promise<SidecarInfo> {
+  return json(fetch("/api/sidecar"));
+}
+
+export function postSidecar(model: string): Promise<SidecarInfo> {
+  return json(fetch("/api/sidecar", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model }),
+  }));
+}
+
+export function deleteSidecar(): Promise<SidecarInfo> {
+  return json(fetch("/api/sidecar", { method: "DELETE" }));
 }
 
 export function getChatHistory(sessionId: string): Promise<{ session_id: string; turns: ChatTurnDto[] }> {

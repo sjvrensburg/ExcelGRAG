@@ -20,6 +20,7 @@ use tokio::sync::broadcast;
 use crate::chat::ChatSession;
 use crate::dto::{LlmStatusDto, WsEvent};
 use crate::llm;
+use crate::sidecar::{self, Sidecar};
 
 pub struct App {
     pub dir: String,
@@ -44,6 +45,9 @@ pub struct App {
     /// the GUI's settings panel can change it (`set_llm`); readers clone
     /// the `Client` out (`llm()`) so nothing holds this across an `.await`.
     llm: Mutex<LlmSlot>,
+    /// The bundled model's `llama-server`, when one was started from the
+    /// GUI. Stopped by pid when the `App` goes.
+    sidecar: Mutex<Sidecar>,
 }
 
 /// The connection as configured, and the live client when the privacy tier
@@ -70,6 +74,7 @@ impl App {
                 settings: llm.as_ref().map(|c| c.settings().clone()),
                 client: llm,
             }),
+            sidecar: Mutex::new(Sidecar::default()),
         })
     }
 
@@ -159,6 +164,11 @@ impl App {
         self.sessions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The sidecar slot. Held briefly, never across an `.await`.
+    pub fn sidecar(&self) -> MutexGuard<'_, Sidecar> {
+        sidecar::slot(&self.sidecar)
     }
 
     pub fn send(&self, event: WsEvent) {

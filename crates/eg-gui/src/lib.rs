@@ -19,8 +19,10 @@ pub mod app;
 pub mod chat;
 pub mod dto;
 pub mod index_job;
+pub mod investigate;
 pub mod llm;
 pub mod mcp_bridge;
+pub mod sidecar;
 pub mod watch;
 
 use std::sync::Arc;
@@ -94,7 +96,31 @@ pub async fn run(opts: GuiOptions) -> Result<(), String> {
         let _ = webbrowser::open(&url);
     }
 
+    // Stop on SIGINT/SIGTERM rather than dying mid-flight, so the sidecar
+    // is stopped by pid on the way out. A process that is killed outright
+    // skips this; on Linux the sidecar's PR_SET_PDEATHSIG covers that.
+    let app_for_shutdown = Arc::clone(&app);
+    let shutdown = async move {
+        let ctrl_c = tokio::signal::ctrl_c();
+        #[cfg(unix)]
+        {
+            let mut term =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("a SIGTERM handler can be installed");
+            tokio::select! {
+                _ = ctrl_c => {}
+                _ = term.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = ctrl_c.await;
+        }
+        sidecar::stop(&app_for_shutdown);
+        eprintln!("eg gui: stopping");
+    };
     axum::serve(listener, api::router(app))
+        .with_graceful_shutdown(shutdown)
         .await
         .map_err(|e| e.to_string())
 }
