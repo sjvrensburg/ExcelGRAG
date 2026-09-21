@@ -522,6 +522,16 @@ fn expand_one(stored: &StoredGraph, hits: &[&Hit], opts: &ExpandOptions) -> Work
     }
 }
 
+/// A node's cached importance score, scaled by [`ExpandOptions::importance_weight`]
+/// — zero whenever that option is `None`, so a caller who never opts in pays
+/// nothing and changes nothing. The one formula both [`push_dependencies`]
+/// and [`add_children`] use, so a future change to how the weight scales
+/// (clamping, a non-linear transform) cannot land in one and not the other.
+fn weighted_importance(opts: &ExpandOptions, importance: &[f32], node: NodeIndex) -> f32 {
+    let score = importance.get(node.index()).copied().unwrap_or(0.0);
+    opts.importance_weight.unwrap_or(0.0) * score
+}
+
 /// Queue every dependency edge at a node, in both directions.
 fn push_dependencies(
     graph: &Graph,
@@ -542,7 +552,6 @@ fn push_dependencies(
             } else {
                 edge.target()
             };
-            let score = importance.get(to.index()).copied().unwrap_or(0.0);
             queue.push(Step {
                 weight: weight.weight,
                 hops: hops + 1,
@@ -550,7 +559,7 @@ fn push_dependencies(
                 to,
                 kind: weight.kind,
                 inbound,
-                importance: opts.importance_weight.unwrap_or(0.0) * score,
+                importance: weighted_importance(opts, importance, to),
             });
         }
     }
@@ -671,10 +680,9 @@ fn add_children(
         })
         .filter(|(_, _, idx)| !got.taken.contains(idx))
         .collect();
-    let importance_weight = opts.importance_weight.unwrap_or(0.0);
     children.sort_unstable_by(|a, b| {
-        let a_score = importance_weight * importance.get(a.2.index()).copied().unwrap_or(0.0);
-        let b_score = importance_weight * importance.get(b.2.index()).copied().unwrap_or(0.0);
+        let a_score = weighted_importance(opts, importance, a.2);
+        let b_score = weighted_importance(opts, importance, b.2);
         a.0.cmp(&b.0)
             .then_with(|| b.1.cmp(&a.1))
             .then_with(|| b_score.total_cmp(&a_score))

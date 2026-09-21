@@ -16,11 +16,16 @@
 //! `expand.rs`'s own split between the containment walk and the dependency
 //! walk.
 //!
-//! No crate on crates.io implements PageRank over a `petgraph` graph and is
-//! both maintained and free of a heavier dependency than this earns; a fixed
-//! power iteration is a few dozen lines and fully auditable, which fits this
-//! project's offline, reproducible ethos better than an unaudited crate
-//! would.
+//! `petgraph` itself ships `petgraph::algo::page_rank`, but it does not fit:
+//! it has no notion of edge weight (every edge counts as one link, so the
+//! "a heavier edge contributes more" case this module is tested against
+//! could not be expressed), and its complexity is `O(n|V|²|E|)` — quadratic
+//! in node count per iteration, against this module's `O(n|E|)` — because it
+//! recomputes each target's inbound set from scratch every iteration rather
+//! than accumulating rank along edges once. A fixed power iteration over
+//! this crate's own weighted edges is a few dozen lines and fully auditable,
+//! which also fits this project's offline, reproducible ethos better than a
+//! dependency would.
 
 use petgraph::visit::EdgeRef;
 
