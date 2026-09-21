@@ -627,9 +627,19 @@ fn resolve_range(workbook: &Workbook, citation: &str) -> Result<RangeRef, String
                 "{bare} refers to a whole column or row ({refers_to})"
             ));
         }
-        return resolve_range(workbook, refers_to);
+        // One level, by construction: what a name refers to is resolved
+        // as an address, never looked up as another name, so a name whose
+        // target is a name (`Total` → `=Subtotal`, legal in Excel) is
+        // refused here rather than followed.
+        return resolve_address(workbook, refers_to, citation);
     }
-    let parsed = parse_a1(bare).map_err(|e| format!("{citation:?} is not an A1 range: {e}"))?;
+    resolve_address(workbook, bare, citation)
+}
+
+/// The A1 half of [`resolve_range`]: `text` must name a sheet of this
+/// workbook. `citation` is what the caller wrote, for the message.
+fn resolve_address(workbook: &Workbook, text: &str, citation: &str) -> Result<RangeRef, String> {
+    let parsed = parse_a1(text).map_err(|e| format!("{citation:?} is not an A1 range: {e}"))?;
     let Some(name) = &parsed.sheet_name else {
         return Err(format!(
             "{citation:?} names no sheet. A citation needs one, e.g. \"Sheet1!B2\"."
@@ -1400,15 +1410,23 @@ fn unmatched_values(
         return String::new();
     };
     let mut out = String::new();
-    for profile in
-        eg_structure::profile_table(sheet, table, &eg_structure::ProfileOptions::default())
-    {
-        if !wanted
-            .iter()
-            .any(|w| w.eq_ignore_ascii_case(&profile.header))
-        {
-            continue;
-        }
+    // Profiled one column at a time, each as a table whose body is that
+    // column's range: `profile_table` walks its table's whole body, and on
+    // a wide region that is every cell of the table for the sake of one
+    // column, under the engine lock, once per no-match query.
+    let profiles = table
+        .columns
+        .iter()
+        .filter(|c| wanted.iter().any(|w| w.eq_ignore_ascii_case(&c.header)))
+        .flat_map(|c| {
+            let narrowed = Table {
+                body: c.range,
+                columns: vec![c.clone()],
+                ..table.clone()
+            };
+            eg_structure::profile_table(sheet, &narrowed, &eg_structure::ProfileOptions::default())
+        });
+    for profile in profiles {
         match (&profile.distinct, profile.distinct_count) {
             (Some(values), _) if redact => out.push_str(&format!(
                 "  the `{}` column holds {} distinct value(s)\n",

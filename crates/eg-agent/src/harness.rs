@@ -65,6 +65,11 @@ pub struct Outcome {
     pub answer: Option<String>,
     /// Model calls made.
     pub turns: usize,
+    /// The reply was accepted although no tool had run — the send-back
+    /// retries were spent and the model answered anyway. Such an answer
+    /// touched nothing in the workbook, and a host should say so rather
+    /// than show it as an ordinary turn.
+    pub ungrounded: bool,
     /// Every tool call the model made, in order, with the policy's and the
     /// tool's verdicts — the trail a host can replay.
     pub calls: Vec<CallRecord>,
@@ -174,6 +179,7 @@ impl<M: CompletionModel + Clone> Harness<M> {
                     return Ok(Outcome {
                         answer: None,
                         turns: turn,
+                        ungrounded: calls.is_empty(),
                         calls,
                         usage: run.usage(),
                     });
@@ -387,6 +393,7 @@ impl<M: CompletionModel + Clone> Harness<M> {
                     return Ok(Outcome {
                         answer: Some(response.output),
                         turns: turn,
+                        ungrounded: calls.is_empty(),
                         calls,
                         usage: response.usage,
                     });

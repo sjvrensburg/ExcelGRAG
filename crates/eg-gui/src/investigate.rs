@@ -147,12 +147,20 @@ pub async fn run_investigation(
             });
         }
     }
-    let evidence = format!(
-        "investigation: {} model call(s), {} tool call(s) — {}",
-        outcome.turns,
-        outcome.calls.len(),
-        summarise(&outcome.calls)
-    );
+    let evidence = if outcome.ungrounded {
+        format!(
+            "UNGROUNDED: the model answered after {} model call(s) without running any tool; \
+             nothing in this reply came from the workbook",
+            outcome.turns
+        )
+    } else {
+        format!(
+            "investigation: {} model call(s), {} tool call(s) — {}",
+            outcome.turns,
+            outcome.calls.len(),
+            summarise(&outcome.calls)
+        )
+    };
     let turn = ChatTurn {
         evidence,
         citations,
@@ -203,9 +211,16 @@ fn ranges_in(text: &str) -> Vec<String> {
         // A sheet name: quoted, or a run of word characters; then `!`.
         let start = i;
         let end_of_sheet = if bytes[i] == b'\'' {
+            // A quoted sheet name closes with `'!`. An apostrophe that does
+            // not — "the workbook's provision" — is prose, and is stepped
+            // over rather than pairing with a later citation's quote or
+            // ending the scan.
             match text[i + 1..].find('\'') {
-                Some(n) => i + 1 + n + 1,
-                None => break,
+                Some(n) if bytes.get(i + 1 + n + 1) == Some(&b'!') => i + 1 + n + 1,
+                _ => {
+                    i += 1;
+                    continue;
+                }
             }
         } else {
             let mut j = i;
@@ -327,6 +342,10 @@ mod tests {
             ranges_in(text),
             ["Debtors!H2:H2001", "Rates!$A$4:$B$7", "'Q3 Sales'!B2"]
         );
+        // Prose apostrophes neither end the scan nor pair with a citation's.
+        let prose = "The workbook's provision sits in Debtors!H2:H2001; the model's \
+                     reply cites 'Q3 Sales'!B2 too.";
+        assert_eq!(ranges_in(prose), ["Debtors!H2:H2001", "'Q3 Sales'!B2"]);
     }
 
     #[test]
