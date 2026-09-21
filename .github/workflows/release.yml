@@ -77,6 +77,19 @@ jobs:
       # In release mode, so this compiles the artifacts the build step then
       # reuses rather than paying for a second, debug-profile build of
       # everything.
+      # `eg gui` serves the frontend from `frontend/dist`, embedded at
+      # compile time (rust-embed). The directory is gitignored, so a build
+      # that skips this step ships a GUI that answers every request with
+      # "the frontend has not been built" — which is what 0.3.x did.
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build the frontend
+        working-directory: frontend
+        run: npm ci && npm run build
       - name: Test
         env:
           # Keep the override absolute. The application otherwise deliberately
