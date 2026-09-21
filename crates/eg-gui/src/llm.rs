@@ -190,6 +190,9 @@ pub struct Client {
     pub privacy: Privacy,
     settings: LlmSettings,
     key_present: bool,
+    /// Kept for the investigation harness, which builds its own client to
+    /// the same endpoint (`investigate.rs`); never reported.
+    api_key: Option<String>,
 }
 
 impl Client {
@@ -197,8 +200,8 @@ impl Client {
         let settings = config.settings();
         let mut cfg = OpenAIConfig::new().with_api_base(config.base_url);
         let key_present = config.api_key.is_some();
-        if let Some(key) = config.api_key {
-            cfg = cfg.with_api_key(key);
+        if let Some(key) = &config.api_key {
+            cfg = cfg.with_api_key(key.clone());
         }
         Client {
             inner: OpenAiClient::with_config(cfg),
@@ -206,7 +209,17 @@ impl Client {
             privacy: config.privacy,
             settings,
             key_present,
+            api_key: config.api_key,
         }
+    }
+
+    /// The endpoint as a second client would need it: base URL, key, model.
+    pub fn connection(&self) -> (&str, Option<&str>, &str) {
+        (
+            &self.settings.base_url,
+            self.api_key.as_deref(),
+            &self.model,
+        )
     }
 
     pub fn settings(&self) -> &LlmSettings {

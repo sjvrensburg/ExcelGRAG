@@ -187,6 +187,20 @@ pub fn cells_in(workbook: &Workbook, range: RangeRef, limit: usize) -> (Vec<Cell
     (out, capped)
 }
 
+/// How many populated cells a range holds — what `cells_in`'s cap hid. One
+/// pass over the populated cells of the clipped range, so a whole-column
+/// citation costs what the column holds, not what it could.
+pub fn count_in(workbook: &Workbook, range: RangeRef) -> usize {
+    let Some(sheet) = workbook.sheet(range.sheet) else {
+        return 0;
+    };
+    sheet
+        .used_range()
+        .and_then(|used| range.intersection(&used))
+        .map(|clipped| sheet.iter_range(clipped).count())
+        .unwrap_or(0)
+}
+
 /// One cell.
 pub fn cell(workbook: &Workbook, at: CellRef) -> Option<CellFact> {
     let sheet = workbook.sheet(at.sheet)?;

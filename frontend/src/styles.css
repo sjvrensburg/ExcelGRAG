@@ -1188,3 +1188,25 @@ button.close:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Investigations: the live trail under a pending turn, and the collapsed
+   one on a committed turn. */
+.chat-trail { margin-top: 4px; font-size: 12px; }
+.chat-trail-steps { margin: 4px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.45; }
+.chat-trail-steps li { margin: 2px 0; word-break: break-word; }
+.chat-trail-steps li.refused { opacity: 0.8; font-style: italic; }
+.chat-trail-steps li.no { opacity: 0.85; }
+.chat-trail-steps li.model-call { opacity: 0.6; list-style: none; margin-left: -18px; }
+.chat-trail-steps li.model-text { opacity: 0.85; white-space: pre-wrap; }
+.chat-trail-steps .tool-result { white-space: pre-wrap; opacity: 0.85; }
+.chat-turn.investigating { opacity: 0.9; }
+
+/* The bundled model card. */
+.sidecar-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.sidecar-row select { flex: 1; min-width: 0; }
+.sidecar-note { font-size: 12px; opacity: 0.8; margin-top: 4px; }
+.sidecar-status { font-size: 12px; opacity: 0.85; }
+.chat-trail-steps li.model-reasoning { opacity: 0.7; list-style: none; margin-left: -18px; }
+.chat-trail-steps li.model-reasoning summary { cursor: pointer; font-style: italic; }
+.reasoning-text { white-space: pre-wrap; font-size: 11px; opacity: 0.85; max-height: 240px; overflow: auto; margin-top: 4px; }
+.since-last-step { opacity: 0.6; font-weight: normal; }

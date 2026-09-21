@@ -11,11 +11,13 @@ import { Legend } from "./components/Legend";
 import { QuickSearch } from "./components/QuickSearch";
 import { Sidebar } from "./components/Sidebar";
 import type {
+  AgentStepDto,
   AskResponse,
   ChatTurnDto,
   EdgeDto,
   GraphDto,
   LlmStatusDto,
+  SidecarStatus,
   NodeDetailDto,
   SearchDto,
   WorkbookDto,
@@ -40,6 +42,9 @@ export default function App() {
   const [dir, setDir] = useState("");
   const [redactValues, setRedactValues] = useState(false);
   const [llm, setLlm] = useState<LlmStatusDto | null>(null);
+  const [sidecar, setSidecar] = useState<SidecarStatus>({ state: "stopped" });
+  // The steps of the investigation in flight, cleared when its turn lands.
+  const [liveSteps, setLiveSteps] = useState<AgentStepDto[]>([]);
   const [workbooks, setWorkbooks] = useState<WorkbookDto[]>([]);
   const [indexing, setIndexing] = useState(false);
   const [indexResult, setIndexResult] = useState<{ path: string; ok: boolean; nonce: number } | null>(null);
@@ -87,9 +92,10 @@ export default function App() {
       .catch(() => undefined);
   }, []);
 
-  const sendChat = useCallback((text: string, toAgent: boolean) => {
+  const sendChat = useCallback((text: string, toAgent: boolean, investigate: boolean) => {
     setChatBusy(true);
     setChatError(null);
+    if (investigate) setLiveSteps([]);
     const context = chatContext;
     // A directed-at-agent turn carries no engine context of its own — the
     // engine never ran for it — so the canvas selection is dropped along
@@ -99,15 +105,22 @@ export default function App() {
       DEFAULT_SESSION,
       !toAgent && context ? { workbook: context.workbook, node: context.node } : undefined,
       toAgent,
+      investigate,
     )
       .then((turn) => {
         setChatTurns((prev) => appendTurn(prev, turn));
+        setLiveSteps([]);
         // Cleared only on success: a failed request leaves the context chip
         // in place so retrying the same message keeps the same entity
         // attached instead of silently falling back to a bare text search.
         setChatContext(null);
       })
-      .catch((e) => setChatError(message(e)))
+      .catch((e) => {
+        setChatError(message(e));
+        // A failed investigation commits no turn, so nothing would clear
+        // its live steps; they would sit there reading as "still working".
+        setLiveSteps([]);
+      })
       // A turn directed at the agent returns immediately (no engine, no
       // LLM) — this only ever reflects the network round-trip, never "the
       // agent is thinking"; the turn itself shows "waiting for an agent to
@@ -127,8 +140,17 @@ export default function App() {
         case "llm":
           setLlm(event.status);
           break;
+        case "sidecar":
+          setSidecar(event.status);
+          break;
+        case "agent_step":
+          if (event.session_id === DEFAULT_SESSION) {
+            setLiveSteps((prev) => [...prev, event.step]);
+          }
+          break;
         case "hello":
           setLlm(event.llm);
+          setSidecar(event.sidecar);
           setDir(event.dir);
           setRedactValues(event.redact_values);
           setWorkbooks(event.workbooks);
@@ -172,6 +194,10 @@ export default function App() {
         case "chat_turn":
           if (event.session_id === DEFAULT_SESSION) {
             setChatTurns((prev) => appendTurn(prev, event.turn));
+            // A committed turn ends whatever investigation was live — its
+            // own trail travels with it, and a turn with no trail (the
+            // budget ran out before a call) is over just the same.
+            setLiveSteps([]);
           }
           break;
         case "navigate":
@@ -498,6 +524,7 @@ export default function App() {
         indexResult={indexResult}
         llm={llm}
         onLlmChanged={setLlm}
+        sidecar={sidecar}
       />
 
       <main className="main">
@@ -589,6 +616,7 @@ export default function App() {
           onClearContext={() => setChatContext(null)}
           redactValues={redactValues}
           llm={llm}
+          liveSteps={liveSteps}
         />
       </aside>
     </div>

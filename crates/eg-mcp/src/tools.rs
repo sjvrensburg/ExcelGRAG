@@ -572,8 +572,74 @@ fn located(
     Ok((loaded, range, note))
 }
 
+fn unwrap_quotes(text: &str) -> &str {
+    for quote in ['"', '\'', '`'] {
+        if text.len() >= 2 && text.starts_with(quote) && text.ends_with(quote) {
+            return &text[1..text.len() - 1];
+        }
+    }
+    text
+}
+
+/// A citation is an A1 range, or a workbook-scoped defined name: the tools
+/// themselves print `defined name "Tax_Rate"`, and an agent handed that
+/// vocabulary used it as a `what_if` target and was told it was "not an A1
+/// range". A name resolves to what it refers to, by the same rules the
+/// evaluator applies; a name that refers to something no tool can address
+/// (another workbook, a 3-D span, a whole column) says which.
 fn resolve_range(workbook: &Workbook, citation: &str) -> Result<RangeRef, String> {
-    let parsed = parse_a1(citation).map_err(|e| format!("{citation:?} is not an A1 range: {e}"))?;
+    // A model quoting a name the way the tools print it — `"Tax_Rate"` —
+    // means the name. Only a citation wrapped whole in one matching pair is
+    // unwrapped: `'Sales'!B2` starts with a quote too, and that one is the
+    // sheet's.
+    let bare = unwrap_quotes(citation.trim());
+    // A sheet name in double quotes — `"Rates"!A3:E8` — is a model's
+    // spelling, never Excel's: A1 quotes a sheet with single quotes only,
+    // so a leading `"…"!` is unambiguous and is respelled rather than
+    // refused as a sheet called `"Rates"`.
+    let respelled;
+    let bare = if bare.starts_with('"') && bare.contains("\"!") {
+        respelled = format!("'{}", bare[1..].replacen("\"!", "'!", 1));
+        respelled.as_str()
+    } else {
+        bare
+    };
+    if let Some(defined) = workbook
+        .defined_names
+        .iter()
+        .find(|d| d.scope.is_none() && d.name.eq_ignore_ascii_case(bare))
+    {
+        let refers_to = defined.refers_to.trim_start_matches('=');
+        let parsed = parse_a1(refers_to).map_err(|_| {
+            format!(
+                "{bare} is a defined name, but what it refers to ({refers_to}) is not a range \
+                 a tool can read"
+            )
+        })?;
+        if parsed.workbook.is_some() {
+            return Err(format!("{bare} refers to another workbook ({refers_to})"));
+        }
+        if parsed.end_sheet_name.is_some() {
+            return Err(format!("{bare} spans several sheets ({refers_to})"));
+        }
+        if parsed.is_whole_column() || parsed.is_whole_row() {
+            return Err(format!(
+                "{bare} refers to a whole column or row ({refers_to})"
+            ));
+        }
+        // One level, by construction: what a name refers to is resolved
+        // as an address, never looked up as another name, so a name whose
+        // target is a name (`Total` → `=Subtotal`, legal in Excel) is
+        // refused here rather than followed.
+        return resolve_address(workbook, refers_to, citation);
+    }
+    resolve_address(workbook, bare, citation)
+}
+
+/// The A1 half of [`resolve_range`]: `text` must name a sheet of this
+/// workbook. `citation` is what the caller wrote, for the message.
+fn resolve_address(workbook: &Workbook, text: &str, citation: &str) -> Result<RangeRef, String> {
+    let parsed = parse_a1(text).map_err(|e| format!("{citation:?} is not an A1 range: {e}"))?;
     let Some(name) = &parsed.sheet_name else {
         return Err(format!(
             "{citation:?} names no sheet. A citation needs one, e.g. \"Sheet1!B2\"."
@@ -642,12 +708,27 @@ fn read_cells(state: &mut State, args: &Value) -> Result<String, String> {
     let workbook = &loaded.workbook;
     let (cells, capped) = cells_in(workbook, range, limit);
 
-    let mut out = format!(
-        "{note}{} — {} populated cell(s){}\n",
-        workbook.cite_range(range),
-        cells.len(),
-        if capped { ", capped" } else { "" }
-    );
+    // A capped read says how much it left out and what reads the rest. A
+    // bare "capped" was read by a model as "that is all there is": it took
+    // the first forty balances of a two-thousand-row column for the whole
+    // column and named the largest of them as the largest balance.
+    let mut out = if capped {
+        let total = eg_eval::count_in(workbook, range);
+        format!(
+            "{note}{} — showing the first {} of {total} populated cell(s). Raise `limit` \
+             (to at most 500) for more; for a question over the whole range — a \
+             total, a maximum, a count, the rows matching a condition — use \
+             `query_table`, which reads every row.\n",
+            workbook.cite_range(range),
+            cells.len(),
+        )
+    } else {
+        format!(
+            "{note}{} — {} populated cell(s)\n",
+            workbook.cite_range(range),
+            cells.len(),
+        )
+    };
     for fact in &cells {
         out.push_str(&format!("  {:<24}", fact.a1));
         if let Some(formula) = &fact.formula {
@@ -1128,6 +1209,13 @@ fn tables(state: &mut State, args: &Value) -> Result<String, String> {
 }
 
 /// Find the table a caller named by its range.
+///
+/// Either spelling of a table is accepted: the region it was detected as
+/// (header and label columns included, what `context` cites) or its body
+/// (the rows under the header, what `tables` prints). Matching the region
+/// alone refused the exact range `tables` had just listed — an agent was
+/// watched asking for `'Debtors'!B2:M2001` twice, being told it was not a
+/// table, and only getting through by guessing the enclosing region.
 fn table_at(loaded: &eg_ingest::Loaded, citation: &str) -> Result<Table, String> {
     let range = resolve_range(&loaded.workbook, citation)?;
     let sheet = loaded
@@ -1139,6 +1227,13 @@ fn table_at(loaded: &eg_ingest::Loaded, citation: &str) -> Result<Table, String>
             let table = read_table(sheet, &region)
                 .ok_or_else(|| format!("{citation} is a region with no rows under its header"))?;
             return Ok(table);
+        }
+        if region.range.intersects(&range) {
+            if let Some(table) = read_table(sheet, &region) {
+                if table.body == range {
+                    return Ok(table);
+                }
+            }
         }
     }
     Err(format!(
@@ -1225,7 +1320,45 @@ fn query_table(state: &mut State, args: &Value) -> Result<String, String> {
                 (None, Some(c)) => c.to_string(),
                 (None, None) => "—".to_string(),
             };
-            parts.push(format!("{label} {shown}"));
+            // A minimum or maximum names the cell it was found in. Without
+            // it, a model given "max 45033.43" paired the figure with an
+            // account from the ten rows it had read earlier — the wrong
+            // one — because the tool had given it a number and no place.
+            let at = group.at.get(i).copied().flatten().and_then(|row| {
+                let column = query.aggregates[i].column()?;
+                let range = table
+                    .columns
+                    .iter()
+                    .find(|c| c.header.eq_ignore_ascii_case(column))?
+                    .range;
+                let cell = eg_model::RangeRef {
+                    sheet: range.sheet,
+                    top: row,
+                    left: range.left,
+                    bottom: row,
+                    right: range.left,
+                };
+                // And the read that fetches the whole row: a model told the
+                // cell still asked the query five more ways for the row's
+                // key rather than reading the row.
+                let row_range = eg_model::RangeRef {
+                    sheet: range.sheet,
+                    top: row,
+                    // Label columns sit immediately left of the body.
+                    left: table
+                        .body
+                        .left
+                        .saturating_sub(table.label_headers.len() as u16),
+                    bottom: row,
+                    right: table.body.right,
+                };
+                Some(format!(
+                    " (at {}; `read_cells {}` for that row)",
+                    loaded.workbook.cite_range(cell),
+                    loaded.workbook.cite_range(row_range)
+                ))
+            });
+            parts.push(format!("{label} {shown}{}", at.unwrap_or_default()));
         }
         out.push_str(&format!(
             "  {key}({} rows)  {}\n",
@@ -1235,6 +1368,14 @@ fn query_table(state: &mut State, args: &Value) -> Result<String, String> {
     }
     if answer.groups.is_empty() {
         out.push_str("  no rows matched\n");
+        // A filter that matched nothing is usually a filter on a value the
+        // column does not hold — an agent asked how many accounts were
+        // "business debt" filtered `Debt Type is "Business Debt"`, was told
+        // no rows matched, and reported that as the answer. The column held
+        // `Business`. Where a filtered column is categorical enough that its
+        // profile kept the values, say what they are, in the same spirit as
+        // "no sheet called that, here are the ones there are".
+        out.push_str(&unmatched_values(&loaded, &table, &query, redact));
     }
     if answer.groups_not_listed > 0 {
         out.push_str(&format!(
@@ -1243,6 +1384,74 @@ fn query_table(state: &mut State, args: &Value) -> Result<String, String> {
         ));
     }
     Ok(out)
+}
+
+/// For every equality-shaped filter in a query that matched no rows, the
+/// values its column actually holds — when the profile kept them. Empty
+/// when no filter is of that shape or every filtered column has too many
+/// values to list. Under `--redact-values` the count is given and the
+/// values are not: they are cell contents.
+fn unmatched_values(
+    loaded: &eg_ingest::Loaded,
+    table: &Table,
+    query: &Query,
+    redact: bool,
+) -> String {
+    let wanted: Vec<&str> = query
+        .filters
+        .iter()
+        .filter(|f| matches!(f.test, Test::Is(_) | Test::OneOf(_) | Test::Contains(_)))
+        .map(|f| f.column.as_str())
+        .collect();
+    if wanted.is_empty() {
+        return String::new();
+    }
+    let Some(sheet) = loaded.workbook.sheet(table.body.sheet) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    // Profiled one column at a time, each as a table whose body is that
+    // column's range: `profile_table` walks its table's whole body, and on
+    // a wide region that is every cell of the table for the sake of one
+    // column, under the engine lock, once per no-match query.
+    let profiles = table
+        .columns
+        .iter()
+        .filter(|c| wanted.iter().any(|w| w.eq_ignore_ascii_case(&c.header)))
+        .flat_map(|c| {
+            let narrowed = Table {
+                body: c.range,
+                columns: vec![c.clone()],
+                ..table.clone()
+            };
+            eg_structure::profile_table(sheet, &narrowed, &eg_structure::ProfileOptions::default())
+        });
+    for profile in profiles {
+        match (&profile.distinct, profile.distinct_count) {
+            (Some(values), _) if redact => out.push_str(&format!(
+                "  the `{}` column holds {} distinct value(s)\n",
+                profile.header,
+                values.len()
+            )),
+            (Some(values), _) => {
+                let listed: Vec<String> = values
+                    .iter()
+                    .map(|v| format!("{} ({})", v.value, v.count))
+                    .collect();
+                out.push_str(&format!(
+                    "  the `{}` column holds: {}\n",
+                    profile.header,
+                    listed.join(", ")
+                ));
+            }
+            (None, Some(n)) => out.push_str(&format!(
+                "  the `{}` column holds {n} distinct values, too many to list\n",
+                profile.header
+            )),
+            (None, None) => {}
+        }
+    }
+    out
 }
 
 fn read_filter(value: &Value) -> Result<Filter, String> {
@@ -1474,6 +1683,110 @@ mod tests {
 
         let state = State::open(path, false).expect("state opens over what was just indexed");
         (state, dir)
+    }
+
+    /// `tables` prints a table's body; a caller may hand that back, or the
+    /// region `context` cites. Both must find the same table, and the range
+    /// `tables` printed must never be the one `query_table` refuses.
+    #[test]
+    fn a_table_is_found_by_its_body_as_tables_prints_it_and_by_its_region() {
+        let wb = one_sheet_workbook("hash-t", "t.xlsx", "Sales");
+        let loaded = eg_ingest::Loaded {
+            capabilities: eg_ingest::Capabilities::for_format(eg_model::WorkbookFormat::Xlsx),
+            warnings: Vec::new(),
+            workbook: wb,
+        };
+        let sheet = loaded.workbook.sheet(eg_model::SheetId(0)).unwrap();
+        let region = detect_regions(sheet)
+            .into_iter()
+            .next()
+            .expect("one region");
+        let table = read_table(sheet, &region).expect("a table");
+        assert_ne!(table.body, region.range, "the body excludes the header row");
+
+        let by_region = table_at(&loaded, &loaded.workbook.cite_range(region.range)).unwrap();
+        let by_body = table_at(&loaded, &loaded.workbook.cite_range(table.body)).unwrap();
+        assert_eq!(by_region.body, by_body.body);
+        // A quoted sheet name is the same address.
+        let quoted = format!(
+            "'Sales'!{}",
+            loaded
+                .workbook
+                .cite_range(table.body)
+                .split('!')
+                .nth(1)
+                .unwrap()
+        );
+        assert!(table_at(&loaded, &quoted).is_ok(), "{quoted}");
+        // A range that is neither is still refused.
+        assert!(table_at(&loaded, "Sales!B2:B3").is_err());
+    }
+
+    #[test]
+    fn a_filter_that_matches_nothing_names_the_values_the_column_holds() {
+        let wb = one_sheet_workbook("hash-t", "t.xlsx", "Sales");
+        let loaded = eg_ingest::Loaded {
+            capabilities: eg_ingest::Capabilities::for_format(eg_model::WorkbookFormat::Xlsx),
+            warnings: Vec::new(),
+            workbook: wb,
+        };
+        let sheet = loaded.workbook.sheet(eg_model::SheetId(0)).unwrap();
+        let region = detect_regions(sheet)
+            .into_iter()
+            .next()
+            .expect("one region");
+        let table = read_table(sheet, &region).expect("a table");
+        let query = Query {
+            filters: vec![Filter {
+                column: "Revenue".into(),
+                test: Test::Is(CellValue::Number(99.0)),
+            }],
+            ..Default::default()
+        };
+        let shown = unmatched_values(&loaded, &table, &query, false);
+        assert!(shown.contains("`Revenue` column holds:"), "{shown}");
+        assert!(shown.contains("10 (1)"), "{shown}");
+        let redacted = unmatched_values(&loaded, &table, &query, true);
+        assert!(redacted.contains("3 distinct value(s)"), "{redacted}");
+        assert!(!redacted.contains("10"), "{redacted}");
+        // A range test says nothing about values: no list.
+        let above = Query {
+            filters: vec![Filter {
+                column: "Revenue".into(),
+                test: Test::Above(99.0),
+            }],
+            ..Default::default()
+        };
+        assert!(unmatched_values(&loaded, &table, &above, false).is_empty());
+    }
+
+    #[test]
+    fn a_defined_name_is_a_citation() {
+        let mut wb = one_sheet_workbook("hash-t", "t.xlsx", "Sales");
+        wb.defined_names.push(eg_model::DefinedName {
+            name: "North_Revenue".into(),
+            refers_to: "Sales!$B$2".into(),
+            scope: None,
+        });
+        wb.defined_names.push(eg_model::DefinedName {
+            name: "Elsewhere".into(),
+            refers_to: "[1]Other!$A$1".into(),
+            scope: None,
+        });
+        let by_name = resolve_range(&wb, "north_revenue").expect("a name resolves");
+        let by_address = resolve_range(&wb, "Sales!B2").expect("an address resolves");
+        assert_eq!(by_name, by_address);
+        let quoted =
+            resolve_range(&wb, "\"North_Revenue\"").expect("quotes are not part of a name");
+        assert_eq!(quoted, by_address);
+        assert_eq!(resolve_range(&wb, "`Sales!B2`").unwrap(), by_address);
+        // A quoted *sheet name* is not a wrapped citation.
+        assert_eq!(resolve_range(&wb, "'Sales'!B2").unwrap(), by_address);
+        // A double-quoted sheet name is a model's spelling of a single-quoted one.
+        assert_eq!(resolve_range(&wb, "\"Sales\"!B2").unwrap(), by_address);
+        let refused = resolve_range(&wb, "Elsewhere").unwrap_err();
+        assert!(refused.contains("another workbook"), "{refused}");
+        assert!(resolve_range(&wb, "No_Such_Name").is_err());
     }
 
     #[test]
