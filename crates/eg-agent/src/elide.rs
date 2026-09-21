@@ -80,6 +80,7 @@ pub fn elide_history(history: &[Message], cfg: &ElisionConfig) -> Vec<Message> {
         let Message::User { content } = message else {
             continue;
         };
+        let mut elided = false;
         for item in content.iter_mut() {
             let UserContent::ToolResult(result) = item else {
                 continue;
@@ -93,19 +94,23 @@ pub fn elide_history(history: &[Message], cfg: &ElisionConfig) -> Vec<Message> {
             if original_chars == 0 {
                 continue;
             }
-            let before_tokens: usize = result
-                .content
-                .iter()
-                .filter_map(ToolResultContent::as_text)
-                .map(count_tokens)
-                .sum();
             let stub = format!(
                 "[elided: earlier `{}` result, {original_chars} chars, superseded by more recent calls]",
                 result.name
             );
-            let after_tokens = count_tokens(&stub);
             result.content = vec![ToolResultContent::text(stub)];
-            total = total.saturating_sub(before_tokens.saturating_sub(after_tokens));
+            elided = true;
+        }
+        if elided {
+            // Recomputed for the whole message, by the same function the
+            // initial `total` came from — not a sum of per-item deltas. A
+            // BPE encoding is not additive across concatenation
+            // boundaries, so per-item deltas would drift from what
+            // re-encoding the message actually costs, letting `total`
+            // disagree with reality after a few eliminations.
+            let before = message_tokens(&history[i]);
+            let after = message_tokens(message);
+            total = total.saturating_sub(before.saturating_sub(after));
         }
     }
     out
@@ -150,6 +155,23 @@ fn message_text(message: &Message) -> String {
                 rig_core::completion::AssistantContent::ToolCall(tc) => {
                     Some(tc.function.arguments.to_string())
                 }
+                // A reasoning model's thinking arrives here, not as text —
+                // and it is exactly the small, local, reasoning-heavy model
+                // this module is meant to protect that produces the most of
+                // it. Leaving it out would mean the token budget never sees
+                // the very content most likely to blow it.
+                rig_core::completion::AssistantContent::Reasoning(r) => Some(
+                    r.content
+                        .iter()
+                        .filter_map(|part| match part {
+                            rig_core::completion::message::ReasoningContent::Text {
+                                text, ..
+                            } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -225,5 +247,24 @@ mod tests {
     fn tokens_are_counted_not_just_guessed_at_zero() {
         assert!(count_tokens("the quick brown fox") > 0);
         assert_eq!(count_tokens(""), 0);
+    }
+
+    #[test]
+    fn a_reasoning_models_thinking_counts_toward_the_budget() {
+        // Reasoning arrives as `AssistantContent::Reasoning`, not text — a
+        // budget that only looked at `Text`/`ToolCall` would never see it,
+        // and it is exactly what a local reasoning model produces the most
+        // of.
+        let empty = Message::Assistant {
+            id: None,
+            content: vec![],
+        };
+        let thinking = Message::Assistant {
+            id: None,
+            content: vec![rig_core::completion::AssistantContent::reasoning(
+                "considering the workbook's structure at length ".repeat(50),
+            )],
+        };
+        assert!(message_tokens(&thinking) > message_tokens(&empty));
     }
 }
