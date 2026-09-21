@@ -106,13 +106,6 @@ pub struct ExpandOptions {
     /// One keeps everything, which is the honest default: a single hand-written
     /// reference into another sheet is often the whole finding.
     pub min_weight: u64,
-    /// Break ties between dependency steps at the same hop distance and edge
-    /// weight by a node's cached, graph-wide [`eg_graph::store::StoredGraph::importance`]
-    /// score, scaled by this factor. `None` (the default) reproduces the
-    /// exact ordering from before this field existed — hop distance, then
-    /// edge weight, then node index — since distance and weight are never
-    /// overridden, only the tie beneath them.
-    pub importance_weight: Option<f32>,
 }
 
 impl Default for ExpandOptions {
@@ -122,7 +115,6 @@ impl Default for ExpandOptions {
             budget: 40,
             children: 0,
             min_weight: 1,
-            importance_weight: None,
         }
     }
 }
@@ -357,9 +349,6 @@ struct Step {
     kind: EdgeKind,
     /// Whether `to` is read by `from`, rather than the other way round.
     inbound: bool,
-    /// `to`'s cached importance score, scaled by [`ExpandOptions::importance_weight`]
-    /// — zero when that option is `None`, so it never moves the ordering.
-    importance: f32,
 }
 
 impl Ord for Step {
@@ -375,13 +364,10 @@ impl Ord for Step {
         //
         // Ordering by distance first makes every node arrive at its shortest
         // one, which is what the field claims and what the hop limit means.
-        // Importance breaks a tie beneath both — it is zero for every step
-        // unless a caller opted in, so it changes nothing by default.
         other
             .hops
             .cmp(&self.hops)
             .then_with(|| self.weight.cmp(&other.weight))
-            .then_with(|| self.importance.total_cmp(&other.importance))
             .then_with(|| other.to.index().cmp(&self.to.index()))
     }
 }
@@ -442,7 +428,7 @@ fn expand_one(stored: &StoredGraph, hits: &[&Hit], opts: &ExpandOptions) -> Work
         // becomes somewhere to walk from.
         while let Some((idx, hops, asked_about)) = pending.pop_front() {
             if walked.insert(idx) && hops < opts.hops {
-                push_dependencies(graph, idx, hops, opts, &stored.importance, &mut queue);
+                push_dependencies(graph, idx, hops, opts, &mut queue);
                 let descend = if asked_about {
                     dependency_carrying_children(graph, idx, opts)
                 } else {
@@ -473,15 +459,7 @@ fn expand_one(stored: &StoredGraph, hits: &[&Hit], opts: &ExpandOptions) -> Work
             truncated |= stopped;
 
             if opts.children > 0 {
-                truncated |= !add_children(
-                    graph,
-                    idx,
-                    hops,
-                    opts,
-                    &stored.importance,
-                    &sheets,
-                    &mut got,
-                );
+                truncated |= !add_children(graph, idx, hops, opts, &sheets, &mut got);
             }
         }
 
@@ -522,23 +500,12 @@ fn expand_one(stored: &StoredGraph, hits: &[&Hit], opts: &ExpandOptions) -> Work
     }
 }
 
-/// A node's cached importance score, scaled by [`ExpandOptions::importance_weight`]
-/// — zero whenever that option is `None`, so a caller who never opts in pays
-/// nothing and changes nothing. The one formula both [`push_dependencies`]
-/// and [`add_children`] use, so a future change to how the weight scales
-/// (clamping, a non-linear transform) cannot land in one and not the other.
-fn weighted_importance(opts: &ExpandOptions, importance: &[f32], node: NodeIndex) -> f32 {
-    let score = importance.get(node.index()).copied().unwrap_or(0.0);
-    opts.importance_weight.unwrap_or(0.0) * score
-}
-
 /// Queue every dependency edge at a node, in both directions.
 fn push_dependencies(
     graph: &Graph,
     at: NodeIndex,
     hops: usize,
     opts: &ExpandOptions,
-    importance: &[f32],
     queue: &mut BinaryHeap<Step>,
 ) {
     for (direction, inbound) in [(Direction::Outgoing, false), (Direction::Incoming, true)] {
@@ -559,7 +526,6 @@ fn push_dependencies(
                 to,
                 kind: weight.kind,
                 inbound,
-                importance: weighted_importance(opts, importance, to),
             });
         }
     }
@@ -661,7 +627,6 @@ fn add_children(
     of: NodeIndex,
     hops: usize,
     opts: &ExpandOptions,
-    importance: &[f32],
     sheets: &FxHashMap<SheetId, String>,
     got: &mut Collected,
 ) -> bool {
@@ -681,11 +646,8 @@ fn add_children(
         .filter(|(_, _, idx)| !got.taken.contains(idx))
         .collect();
     children.sort_unstable_by(|a, b| {
-        let a_score = weighted_importance(opts, importance, a.2);
-        let b_score = weighted_importance(opts, importance, b.2);
         a.0.cmp(&b.0)
             .then_with(|| b.1.cmp(&a.1))
-            .then_with(|| b_score.total_cmp(&a_score))
             .then_with(|| a.2.index().cmp(&b.2.index()))
     });
 
