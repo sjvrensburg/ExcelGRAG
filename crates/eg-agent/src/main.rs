@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use eg_agent::{Event, Harness, Policy};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Parser)]
 #[command(
@@ -45,6 +45,15 @@ struct Args {
     /// With `--score`, only the first N questions.
     #[arg(long)]
     limit: Option<usize>,
+    /// With `--score`, save each question's mark to this file, for a later
+    /// run to `--compare` against.
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// With `--score`, diff this run's marks against a file an earlier
+    /// `--score --out` saved — e.g. before and after a change to the
+    /// tool-validation gate, to see which questions it moved.
+    #[arg(long)]
+    compare: Option<PathBuf>,
     /// Most model calls per question.
     #[arg(long, default_value_t = Policy::default().max_turns)]
     max_turns: usize,
@@ -70,6 +79,46 @@ struct Question {
     want: Vec<String>,
     #[serde(default)]
     known_gap: Option<String>,
+}
+
+/// One question's outcome, saved by `--out` and read back by `--compare`.
+///
+/// Deliberately smaller than [`eg_agent::harness::CallRecord`]'s own trail:
+/// this is a score to diff against a later run, not a replay log, and a
+/// tool's arguments or full result text are not what "did this question's
+/// mark change" needs.
+#[derive(Clone, Serialize, Deserialize)]
+struct ScoreRow {
+    ask: String,
+    mark: String,
+    turns: usize,
+    calls: usize,
+    /// Whether the run's own trail shows the `invalid_ref` auto-correction
+    /// firing — a rejected structural/schema-gate call immediately followed
+    /// by the `tables` call it triggers. What this exists to measure: how
+    /// much of a before/after difference the gate (and its auto-correction)
+    /// accounts for, versus everything else that also changed between runs.
+    auto_corrected: bool,
+}
+
+/// Whether `calls` shows the `invalid_ref` correction firing: a call the
+/// structural/schema gate rejected, immediately followed by the `tables`
+/// call `eg_agent::invalid_ref::correction` runs in response. Matches
+/// `harness.rs`'s own ordering — the correction is pushed to `calls` right
+/// after the call it corrects, never elsewhere.
+fn was_auto_corrected(calls: &[eg_agent::harness::CallRecord]) -> bool {
+    calls.windows(2).any(|pair| {
+        let [rejected, correction] = pair else {
+            return false;
+        };
+        !rejected.ok
+            && !rejected.refused
+            && rejected
+                .result
+                .starts_with(eg_mcp::tools::STRUCTURAL_GATE_PREFIX)
+            && correction.name == "tables"
+            && correction.ok
+    })
 }
 
 #[tokio::main]
@@ -120,7 +169,7 @@ async fn main() -> Result<()> {
             questions.truncate(n);
         }
         let mut hits = 0;
-        let mut rows = Vec::new();
+        let mut rows: Vec<ScoreRow> = Vec::new();
         for (i, q) in questions.iter().enumerate() {
             println!("\n=== [{}/{}] {}", i + 1, questions.len(), q.ask);
             let mut sink = |e: Event| print_event(&e, verbose);
@@ -131,7 +180,13 @@ async fn main() -> Result<()> {
                 Ok(outcome) => outcome,
                 Err(e) => {
                     println!("--- MISS (run failed: {e})");
-                    rows.push((q.ask.clone(), format!("MISS (failed: {e})"), 0, 0));
+                    rows.push(ScoreRow {
+                        ask: q.ask.clone(),
+                        mark: format!("MISS (failed: {e})"),
+                        turns: 0,
+                        calls: 0,
+                        auto_corrected: false,
+                    });
                     continue;
                 }
             };
@@ -170,11 +225,38 @@ async fn main() -> Result<()> {
                 outcome.usage.total_tokens
             );
             println!("{}", indent(&answer));
-            rows.push((q.ask.clone(), mark, outcome.turns, outcome.calls.len()));
+            rows.push(ScoreRow {
+                ask: q.ask.clone(),
+                mark,
+                turns: outcome.turns,
+                calls: outcome.calls.len(),
+                auto_corrected: was_auto_corrected(&outcome.calls),
+            });
         }
         println!("\n{hits}/{} answered and grounded", questions.len());
-        for (ask, mark, turns, calls) in rows {
-            println!("  {mark:<12} {turns:>2} turns {calls:>2} calls  {ask}");
+        for row in &rows {
+            let note = if row.auto_corrected {
+                " (auto-corrected)"
+            } else {
+                ""
+            };
+            println!(
+                "  {:<12} {:>2} turns {:>2} calls  {}{note}",
+                row.mark, row.turns, row.calls, row.ask
+            );
+        }
+        if let Some(path) = &args.out {
+            let json = serde_json::to_string_pretty(&rows)?;
+            std::fs::write(path, json)
+                .with_context(|| format!("could not write {}", path.display()))?;
+            println!("\nsaved to {}", path.display());
+        }
+        if let Some(path) = &args.compare {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("could not read {}", path.display()))?;
+            let baseline: Vec<ScoreRow> = serde_json::from_str(&text)
+                .with_context(|| format!("{} is not a --score --out file", path.display()))?;
+            print_comparison(&baseline, &rows);
         }
         return Ok(());
     }
@@ -229,6 +311,63 @@ fn print_event(event: &Event, verbose: bool) {
         Event::Ungrounded { reason, .. } => {
             println!("  ✗ sent back: {}", first_lines(reason, 1, false))
         }
+    }
+}
+
+/// A short mark, stripped of its parenthetical detail — `"HIT  (0.85)"` and
+/// `"HIT  (85%)"` are the same outcome for a before/after diff even though
+/// the answer file's wants let a question be answered either way, and a
+/// `MISS`'s known-gap note or run-failure reason would otherwise make two
+/// identical misses look like a change.
+fn mark_kind(mark: &str) -> &str {
+    mark.split_whitespace().next().unwrap_or(mark)
+}
+
+/// Prints a before/after diff of two `--score` runs over the same question
+/// file: which questions moved, and how many of the misses that flipped to
+/// hits did so with the `invalid_ref` auto-correction visible in the trail
+/// — the number that shows what the gate specifically closed, as opposed to
+/// whatever else differed between the two runs (a different model, a
+/// different corpus).
+fn print_comparison(baseline: &[ScoreRow], current: &[ScoreRow]) {
+    use std::collections::HashMap;
+    let before: HashMap<&str, &ScoreRow> = baseline.iter().map(|r| (r.ask.as_str(), r)).collect();
+
+    println!("\n=== compare ===");
+    let mut moved = 0;
+    let mut gate_closed = 0;
+    for row in current {
+        let Some(prior) = before.get(row.ask.as_str()) else {
+            println!("  (new question, no baseline) {}", row.ask);
+            continue;
+        };
+        if mark_kind(&prior.mark) == mark_kind(&row.mark) {
+            continue;
+        }
+        moved += 1;
+        let flipped_to_hit = mark_kind(&prior.mark) != "HIT" && mark_kind(&row.mark) == "HIT";
+        if flipped_to_hit && row.auto_corrected {
+            gate_closed += 1;
+        }
+        let note = if flipped_to_hit && row.auto_corrected {
+            "  (closed by the auto-correction)"
+        } else {
+            ""
+        };
+        println!(
+            "  {} -> {}{note}  {}",
+            mark_kind(&prior.mark),
+            mark_kind(&row.mark),
+            row.ask
+        );
+    }
+    if moved == 0 {
+        println!("  no question's mark changed");
+    } else {
+        println!(
+            "\n{moved} question(s) moved, {gate_closed} of them a miss that the auto-correction \
+             turned into a hit"
+        );
     }
 }
 

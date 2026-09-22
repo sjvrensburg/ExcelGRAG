@@ -170,6 +170,15 @@ impl RangeRef {
             && cell.col <= self.right
     }
 
+    /// Whether `other` lies entirely within `self`, on the same sheet.
+    pub fn contains_range(&self, other: &RangeRef) -> bool {
+        self.sheet == other.sheet
+            && self.top <= other.top
+            && other.bottom <= self.bottom
+            && self.left <= other.left
+            && other.right <= self.right
+    }
+
     pub fn intersects(&self, other: &RangeRef) -> bool {
         self.sheet == other.sheet
             && self.top <= other.bottom

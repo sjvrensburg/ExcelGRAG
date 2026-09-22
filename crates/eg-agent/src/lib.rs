@@ -24,6 +24,7 @@
 pub mod blind_scan;
 pub mod elide;
 pub mod harness;
+pub mod invalid_ref;
 pub mod model;
 pub mod policy;
 pub mod preamble;

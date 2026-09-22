@@ -687,3 +687,82 @@ pub fn reachable_from(graph: &Graph, root: NodeIndex) -> FxHashSet<NodeIndex> {
     }
     seen
 }
+
+/// How a range relates to the structure the graph already modeled on its
+/// sheet — the answer to "does this citation correspond to something real",
+/// cheaply, against a *built* graph rather than the builder's own transient
+/// region list (see [`find_region`], which this does not reuse: that one
+/// exists only during construction, over regions before they are nodes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionFit {
+    /// The range is exactly one region/column/formula-group.
+    Exact(NodeIndex),
+    /// The range sits entirely inside one such node.
+    Inside(NodeIndex),
+    /// The range overlaps one such node without being contained by it.
+    Overlaps(NodeIndex),
+    /// The range touches no region, column or formula-group on its sheet.
+    None,
+}
+
+/// A per-sheet spatial index over a built graph's `Region`/`Column`/
+/// `FormulaGroup` nodes, so a citation can be checked against real structure
+/// without a linear scan of every node in the graph on each call.
+///
+/// Built once per loaded workbook and reused across tool calls; nothing here
+/// mutates the graph.
+pub struct RegionIndex {
+    by_sheet: FxHashMap<SheetId, Vec<(RangeRef, NodeIndex)>>,
+}
+
+impl RegionIndex {
+    /// Indexes every `Region`, `Column` and `FormulaGroup` node's range.
+    /// `Workbook`/`Sheet`/`DefinedName`/`ExternalWorkbook` nodes carry no
+    /// range ([`Node::range`]) and so cannot appear here — a citation that
+    /// resolves to a defined name is dereferenced to a `RangeRef` before it
+    /// ever reaches [`RegionIndex::fit`], not looked up as a node itself.
+    pub fn build(graph: &Graph) -> RegionIndex {
+        let mut by_sheet: FxHashMap<SheetId, Vec<(RangeRef, NodeIndex)>> = FxHashMap::default();
+        for kind in [NodeKind::Region, NodeKind::Column, NodeKind::FormulaGroup] {
+            for idx in nodes_of_kind(graph, kind) {
+                if let (Some(range), Some(sheet)) = (graph[idx].range(), graph[idx].sheet()) {
+                    by_sheet.entry(sheet).or_default().push((range, idx));
+                }
+            }
+        }
+        for entries in by_sheet.values_mut() {
+            entries.sort_unstable_by_key(|(r, _)| (r.top, r.left, r.bottom, r.right));
+        }
+        RegionIndex { by_sheet }
+    }
+
+    /// How `range` fits against the structure indexed on its sheet.
+    ///
+    /// `Exact` beats `Inside` beats `Overlaps` when more than one node
+    /// qualifies (a column is `Inside` its region and also `Overlaps` a
+    /// neighbouring column sharing a boundary cell only in malformed input;
+    /// the first exact or containing match found is preferred to an
+    /// overlap, since "this is part of something real" is the fact a caller
+    /// wants, not which of several overlapping candidates is "best").
+    pub fn fit(&self, range: RangeRef) -> RegionFit {
+        let Some(entries) = self.by_sheet.get(&range.sheet) else {
+            return RegionFit::None;
+        };
+        let mut overlap: Option<NodeIndex> = None;
+        for &(candidate, idx) in entries {
+            if candidate == range {
+                return RegionFit::Exact(idx);
+            }
+            if candidate.contains_range(&range) {
+                return RegionFit::Inside(idx);
+            }
+            if overlap.is_none() && candidate.intersects(&range) {
+                overlap = Some(idx);
+            }
+        }
+        match overlap {
+            Some(idx) => RegionFit::Overlaps(idx),
+            None => RegionFit::None,
+        }
+    }
+}

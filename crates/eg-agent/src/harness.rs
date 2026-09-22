@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 
 use crate::blind_scan;
 use crate::elide;
+use crate::invalid_ref;
 use crate::policy::{Ledger, Policy};
 use crate::preamble::PREAMBLE;
 use crate::progress::ProgressSummary;
@@ -219,6 +220,75 @@ impl<M: CompletionModel + Clone> Harness<M> {
             };
             text.push_str(&format!("\n\n{preamble}\n{scan_text}"));
         }
+        text
+    }
+
+    /// The `invalid_ref` counterpart to [`Self::auto_scan`]: a structural or
+    /// schema gate named a citation that is not real structure, so run
+    /// `tables` scoped to the sheet it named and append what is really
+    /// there, instead of leaving the model to guess a second coordinate.
+    ///
+    /// Budgeted through the same [`Policy::admit`] a model-issued `tables`
+    /// call would get, so a run that already looked at this sheet's tables
+    /// does not look again.
+    #[allow(clippy::too_many_arguments)]
+    async fn auto_correct(
+        &self,
+        engine: &Arc<Mutex<eg_mcp::State>>,
+        ledger: &mut Ledger,
+        turn: usize,
+        calls: &mut Vec<CallRecord>,
+        rejected_args: &Value,
+        mut text: String,
+        sink: &mut (dyn FnMut(Event) + Send),
+    ) -> String {
+        let (tool, correction_args) = invalid_ref::correction(rejected_args);
+        if self.policy.admit(ledger, tool, &correction_args).is_err() {
+            // Already looked at this sheet's tables this run, or the budget
+            // is spent — the rejection message already named `tables` as
+            // the way out, so nothing is lost by staying quiet.
+            return text;
+        }
+        sink(Event::ToolCall {
+            turn,
+            name: tool.to_string(),
+            args: correction_args.clone(),
+        });
+        let (ok, result_text) = match tools::execute(
+            Arc::clone(engine),
+            tool.to_string(),
+            correction_args.clone(),
+            self.redact_values,
+        )
+        .await
+        {
+            Ok(Ok(t)) => (true, t),
+            Ok(Err(message)) => (false, message),
+            Err(harness) => (false, harness),
+        };
+        sink(Event::ToolResult {
+            turn,
+            name: tool.to_string(),
+            ok,
+            refused: false,
+            text: result_text.clone(),
+        });
+        calls.push(CallRecord {
+            turn,
+            name: tool.to_string(),
+            args: correction_args,
+            ok,
+            refused: false,
+            result: result_text.clone(),
+        });
+        let preamble = if ok {
+            "Looked automatically, since that citation was not real structure — here is what \
+             is actually on that sheet:"
+        } else {
+            "Tried to look automatically at what is really on that sheet, since the citation \
+             was not real structure, but the lookup itself failed:"
+        };
+        text.push_str(&format!("\n\n{preamble}\n{result_text}"));
         text
     }
 
@@ -470,6 +540,19 @@ impl<M: CompletionModel + Clone> Harness<M> {
                         if blind_scan::should_auto_scan(&name, ok, &text) {
                             text = self
                                 .auto_scan(
+                                    &engine,
+                                    &mut ledger,
+                                    turn,
+                                    &mut calls,
+                                    &args,
+                                    text,
+                                    &mut *sink,
+                                )
+                                .await;
+                            calls[search_record].result = text.clone();
+                        } else if invalid_ref::should_auto_correct(ok, refused, &text) {
+                            text = self
+                                .auto_correct(
                                     &engine,
                                     &mut ledger,
                                     turn,

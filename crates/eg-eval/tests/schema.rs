@@ -1,7 +1,7 @@
 //! Reading the relations a workbook states in its formulas.
 
 use eg_eval::{infer_schema, LookupKind};
-use eg_model::{Cell, CellValue, Sheet, SheetId, Workbook, WorkbookFormat};
+use eg_model::{Cell, CellValue, RangeRef, Sheet, SheetId, Workbook, WorkbookFormat};
 
 fn formula(text: &str) -> Cell {
     Cell {
@@ -135,6 +135,41 @@ fn a_match_that_is_not_exact_is_a_banding_too() {
     ]);
     let schema = infer_schema(&wb);
     assert!(schema.lookups[0].approximate);
+}
+
+#[test]
+fn keys_from_and_keys_into_find_the_relation_by_either_side() {
+    let wb = book(&[
+        "VLOOKUP(C2,Rates!$A$1:$B$2,2,FALSE)",
+        "VLOOKUP(C3,Rates!$A$1:$B$2,2,FALSE)",
+        "VLOOKUP(C4,Rates!$A$1:$B$2,2,FALSE)",
+    ]);
+    let schema = infer_schema(&wb);
+    let key = schema.lookups[0].key.expect("a plain reference names one");
+    let table = schema.lookups[0].table;
+
+    assert_eq!(schema.keys_from(key).count(), 1, "found by its key column");
+    assert_eq!(schema.keys_into(table).count(), 1, "found by its table");
+
+    // A range elsewhere on the workbook, naming neither side, finds nothing.
+    let elsewhere = RangeRef::new(SheetId(0), 10, 10, 10, 10);
+    assert_eq!(schema.keys_from(elsewhere).count(), 0);
+    assert_eq!(schema.keys_into(elsewhere).count(), 0);
+}
+
+#[test]
+fn keys_from_excludes_an_approximate_lookup() {
+    let wb = book(&[
+        "VLOOKUP(C2,Rates!$A$1:$B$2,2)",
+        "VLOOKUP(C3,Rates!$A$1:$B$2,2)",
+    ]);
+    let schema = infer_schema(&wb);
+    let key = schema.lookups[0].key.expect("a plain reference names one");
+    assert_eq!(
+        schema.keys_from(key).count(),
+        0,
+        "a banding is not a joinable key"
+    );
 }
 
 #[test]

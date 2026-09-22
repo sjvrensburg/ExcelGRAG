@@ -29,7 +29,8 @@ pub mod store;
 
 pub use audit::{audit, AuditOptions, AuditReport, Finding, FindingKind};
 pub use build::{
-    build, build_with, nodes_of_kind, reachable_from, BuiltGraph, Graph, GraphOptions,
+    build, build_with, nodes_of_kind, reachable_from, BuiltGraph, Graph, GraphOptions, RegionFit,
+    RegionIndex,
 };
 pub use check::{check, Violation};
 pub use node::{
