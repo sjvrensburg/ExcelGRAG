@@ -208,10 +208,16 @@ impl<M: CompletionModel + Clone> Harness<M> {
                 refused: false,
                 result: scan_text.clone(),
             });
-            text.push_str(&format!(
-                "\n\nScanned automatically, since that number is not in what this corpus \
-                 indexes:\n{scan_text}"
-            ));
+            // The preamble asserts the scan happened, not what it found — say
+            // so plainly when it didn't complete, or a model reads a failed
+            // scan as a confirmed absence.
+            let preamble = if scan_ok {
+                "Scanned automatically, since that number is not in what this corpus indexes:"
+            } else {
+                "Tried to scan automatically for that number, since it is not in what this \
+                 corpus indexes, but the scan itself failed:"
+            };
+            text.push_str(&format!("\n\n{preamble}\n{scan_text}"));
         }
         text
     }

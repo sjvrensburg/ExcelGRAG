@@ -52,6 +52,15 @@ pub fn numeric_words(query: &str) -> Vec<Value> {
         let value = if let Ok(i) = word.parse::<i64>() {
             json!(i)
         } else if let Ok(f) = word.parse::<f64>() {
+            // Rust's float parser accepts "nan"/"inf"/"infinity" (any case)
+            // as words, not just digits, and `json!(f)` turns a non-finite
+            // float into `Value::Null` rather than an error — a cell can
+            // hold neither, and `find_value` refuses `null` outright. Skip
+            // here rather than spend a scan slot on a call guaranteed to
+            // fail.
+            if !f.is_finite() {
+                continue;
+            }
             json!(f)
         } else {
             continue;
@@ -107,5 +116,18 @@ mod tests {
     #[test]
     fn ignores_a_query_with_no_number() {
         assert!(numeric_words("bad debt provision").is_empty());
+    }
+
+    #[test]
+    fn ignores_words_rusts_float_parser_accepts_but_a_cell_cannot_hold() {
+        // "nan", "inf" and "infinity" all parse as `f64`, and `json!(f64)`
+        // turns a non-finite float into `Value::Null` (serde_json has no
+        // JSON representation for either) — silently, not an `Err`. Left
+        // unfiltered, a query containing one of these words would hand
+        // `find_value` a `{"value": null}` scan that always refuses
+        // ("an empty cell is not a value"), spending one of the run's scan
+        // slots on a word that was never a number to look for.
+        let words = numeric_words("what is the value at infinity and nan and -Infinity cell");
+        assert!(words.is_empty(), "{words:?}");
     }
 }
