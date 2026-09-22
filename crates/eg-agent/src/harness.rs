@@ -18,6 +18,7 @@ use rig_core::completion::{AssistantContent, CompletionModel, ToolDefinition, Us
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::blind_scan;
 use crate::elide;
 use crate::policy::{Ledger, Policy};
 use crate::preamble::PREAMBLE;
@@ -136,6 +137,89 @@ impl<M: CompletionModel + Clone> Harness<M> {
     pub fn with_preamble(mut self, preamble: impl Into<String>) -> Self {
         self.preamble = preamble.into();
         self
+    }
+
+    /// Scan for the numbers `search`'s own banner named as blind, and fold
+    /// the results into what the model is told the `search` call returned.
+    ///
+    /// Runs inside the tool-call step, before the model sees anything, so a
+    /// model that would not have taken the hint gets the scan anyway; a
+    /// model that would have called `find_value` itself finds it already
+    /// done and one turn cheaper. Each scan still goes through
+    /// [`Policy::admit`] — it counts against the same scan budget a
+    /// model-issued `find_value` would, and a query already scanned in this
+    /// run (by the model or by an earlier call here) is not repeated.
+    #[allow(clippy::too_many_arguments)]
+    async fn auto_scan(
+        &self,
+        engine: &Arc<Mutex<eg_mcp::State>>,
+        ledger: &mut Ledger,
+        turn: usize,
+        calls: &mut Vec<CallRecord>,
+        search_args: &Value,
+        mut text: String,
+        sink: &mut (dyn FnMut(Event) + Send),
+    ) -> String {
+        let query = search_args
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let workbook = search_args.get("workbook").cloned();
+        for value in blind_scan::numeric_words(query) {
+            let mut scan_args = json!({ "value": value });
+            if let Some(wb) = &workbook {
+                scan_args["workbook"] = wb.clone();
+            }
+            if self.policy.admit(ledger, "find_value", &scan_args).is_err() {
+                // Already scanned this run, or the scan budget is spent —
+                // either way `search`'s own banner still tells the model
+                // where things stand, so nothing is lost by staying quiet.
+                continue;
+            }
+            sink(Event::ToolCall {
+                turn,
+                name: "find_value".to_string(),
+                args: scan_args.clone(),
+            });
+            let (scan_ok, scan_text) = match tools::execute(
+                Arc::clone(engine),
+                "find_value".to_string(),
+                scan_args.clone(),
+                self.redact_values,
+            )
+            .await
+            {
+                Ok(Ok(t)) => (true, t),
+                Ok(Err(message)) => (false, message),
+                Err(harness) => (false, harness),
+            };
+            sink(Event::ToolResult {
+                turn,
+                name: "find_value".to_string(),
+                ok: scan_ok,
+                refused: false,
+                text: scan_text.clone(),
+            });
+            calls.push(CallRecord {
+                turn,
+                name: "find_value".to_string(),
+                args: scan_args,
+                ok: scan_ok,
+                refused: false,
+                result: scan_text.clone(),
+            });
+            // The preamble asserts the scan happened, not what it found — say
+            // so plainly when it didn't complete, or a model reads a failed
+            // scan as a confirmed absence.
+            let preamble = if scan_ok {
+                "Scanned automatically, since that number is not in what this corpus indexes:"
+            } else {
+                "Tried to scan automatically for that number, since it is not in what this \
+                 corpus indexes, but the scan itself failed:"
+            };
+            text.push_str(&format!("\n\n{preamble}\n{scan_text}"));
+        }
+        text
     }
 
     /// Run one question to its end, reporting each step to `sink` as it
@@ -354,36 +438,55 @@ impl<M: CompletionModel + Clone> Harness<M> {
                             name: name.clone(),
                             args: args.clone(),
                         });
-                        let (ok, refused, text) = match self.policy.admit(&mut ledger, &name, &args)
-                        {
-                            Err(reason) => (false, true, reason),
-                            Ok(()) => match tools::execute(
-                                Arc::clone(&engine),
-                                name.clone(),
-                                args.clone(),
-                                self.redact_values,
-                            )
-                            .await
-                            {
-                                Ok(Ok(text)) => (true, false, text),
-                                Ok(Err(message)) => (false, false, message),
-                                Err(harness) => (false, false, harness),
-                            },
-                        };
+                        let (ok, refused, mut text) =
+                            match self.policy.admit(&mut ledger, &name, &args) {
+                                Err(reason) => (false, true, reason),
+                                Ok(()) => match tools::execute(
+                                    Arc::clone(&engine),
+                                    name.clone(),
+                                    args.clone(),
+                                    self.redact_values,
+                                )
+                                .await
+                                {
+                                    Ok(Ok(text)) => (true, false, text),
+                                    Ok(Err(message)) => (false, false, message),
+                                    Err(harness) => (false, false, harness),
+                                },
+                            };
+                        // Pushed before the auto-scan below, not after: the
+                        // trail must read in the order things actually
+                        // happened, and a scan the auto-scan triggers is a
+                        // consequence of this call, not a prerequisite of it.
+                        calls.push(CallRecord {
+                            turn,
+                            name: name.clone(),
+                            args: args.clone(),
+                            ok,
+                            refused,
+                            result: text.clone(),
+                        });
+                        let search_record = calls.len() - 1;
+                        if blind_scan::should_auto_scan(&name, ok, &text) {
+                            text = self
+                                .auto_scan(
+                                    &engine,
+                                    &mut ledger,
+                                    turn,
+                                    &mut calls,
+                                    &args,
+                                    text,
+                                    &mut *sink,
+                                )
+                                .await;
+                            calls[search_record].result = text.clone();
+                        }
                         sink(Event::ToolResult {
                             turn,
                             name: name.clone(),
                             ok,
                             refused,
                             text: text.clone(),
-                        });
-                        calls.push(CallRecord {
-                            turn,
-                            name: name.clone(),
-                            args,
-                            ok,
-                            refused,
-                            result: text.clone(),
                         });
                         results.push(UserContent::tool_result_for(
                             id,

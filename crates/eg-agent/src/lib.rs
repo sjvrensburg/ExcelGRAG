@@ -21,6 +21,7 @@
 //! [`eg_mcp::State`] was opened on: `redact_values` at open time makes every
 //! value its kind, and no tool here can talk its way past that.
 
+pub mod blind_scan;
 pub mod elide;
 pub mod harness;
 pub mod model;
