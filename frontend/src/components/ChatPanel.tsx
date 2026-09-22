@@ -127,6 +127,7 @@ export function ChatPanel({
                 <span className="chat-source-tag">
                   {turn.source === "agent" ? "agent" : "you"}
                 </span>
+                <ReasonerTag reasoner={turn.reasoner} model={turn.model} />
                 {turn.reply_to != null && <span className="chat-reply-tag">reply to</span>}
                 {turn.message}
                 {turn.directed_to === "agent" && (
@@ -231,6 +232,31 @@ export function ChatPanel({
       {error && <div className="error-note">{error}</div>}
     </section>
   );
+}
+
+// Who reasoned, next to who asked (`chat-source-tag`) — the two axes a
+// shared session otherwise makes you reconstruct from the trail and the
+// model panel. "none" is left unlabelled; it is the common case and a tag
+// on every turn would be noise, not signal.
+function ReasonerTag({ reasoner, model }: { reasoner: ChatTurnDto["reasoner"]; model?: string }) {
+  switch (reasoner) {
+    case "llm":
+      return <span className="chat-reasoner-tag reasoner-llm">via {model ?? "model"}</span>;
+    case "agent":
+      return (
+        <span className="chat-reasoner-tag reasoner-agent" title="the GUI's configured model drove the workbook tools itself">
+          investigated by {model ?? "model"}
+        </span>
+      );
+    case "external_reply":
+      return (
+        <span className="chat-reasoner-tag reasoner-external" title="typed by the attached agent's own model, not the GUI's">
+          from your agent
+        </span>
+      );
+    default:
+      return null;
+  }
 }
 
 // The tool calls a committed investigation made: name and arguments, with

@@ -568,6 +568,17 @@ pub enum DirectedDto {
     Agent,
 }
 
+/// Whose model, if any, produced a turn's `answer` — see `chat::Reasoner`.
+/// Orthogonal to `source`: `source` says who asked, this says who reasoned.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasonerDto {
+    None,
+    Llm,
+    Agent,
+    ExternalReply,
+}
+
 /// One turn of a chat session, as the wire sees it. Deliberately the same
 /// shape regardless of which LLM privacy tier produced it — `answer` is
 /// either the LLM's composed reply or, with no LLM configured, the rendered
@@ -601,6 +612,11 @@ pub struct ChatTurnDto {
     /// one the model drove itself. Empty for a pipeline turn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trail: Vec<TrailStepDto>,
+    /// Whose model, if any, produced `answer` — see `ReasonerDto`.
+    pub reasoner: ReasonerDto,
+    /// The model name behind `reasoner`, when it names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// One tool call of an investigation, as persisted and shown: what was
