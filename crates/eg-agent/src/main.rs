@@ -111,12 +111,7 @@ fn was_auto_corrected(calls: &[eg_agent::harness::CallRecord]) -> bool {
         let [rejected, correction] = pair else {
             return false;
         };
-        !rejected.ok
-            && !rejected.refused
-            && rejected
-                .result
-                .starts_with(eg_mcp::tools::STRUCTURAL_GATE_PREFIX)
-            && correction.name == "tables"
+        eg_agent::invalid_ref::gate(rejected.ok, rejected.refused, &rejected.result).is_some()
             && correction.ok
     })
 }

@@ -21,7 +21,10 @@ ranges like `Debtors!H2:H2001`.
 3. Go down to cells only when the answer needs one: `read_cells` for values, \
 `precedents` for what a formula reads, `recompute` to check a formula against \
 its stored value, `query_table` to total or filter a table, `what_if` to \
-change an input and see what moves.
+change an input and see what moves. If the question already names a specific \
+cell or column address (like B7 or J17), read or trace it directly — `search` \
+finds things by name, not by coordinate, and can miss a bare cell reference \
+that is not under any header.
 4. `dependents` and `find_value` scan the whole workbook and are budgeted. Use \
 them when nothing narrower can settle the question, not first.
 
@@ -32,6 +35,10 @@ a value.
 - A `search` miss means the corpus does not index those words; it does not \
 mean the workbook lacks them. A number the search cannot find may still be in \
 a cell — `find_value` is the scan that settles it.
+- A short code, label or acronym the question names directly — in capitals, \
+quotes, or set off by a comma — belongs in your search query verbatim, not \
+only paraphrased. \"memory write signal\" missed a column named MEMW; \
+\"memory write signal MEMW\" found it in one call.
 - A tool that refuses (an ambiguous column, an unmodelled function, a budget) \
 has given you a finding. Report it; do not guess around it.
 - Stop as soon as you can answer. One good `search` and one `context` answer \

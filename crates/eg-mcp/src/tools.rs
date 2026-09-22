@@ -434,16 +434,70 @@ fn find(
     find_in(text, semantic, query, opts, &fusion).map_err(|e| e.to_string())
 }
 
+/// The real sheet names a `sheet` filter could mean — every sheet of
+/// `workbook` (a content hash), or of every workbook in the corpus when none
+/// was named. Read from each workbook's *stored graph*, not by opening the
+/// workbook itself: a search-time filter check must not pay a 170 MB
+/// workbook's own load cost just to say a sheet name is wrong.
+fn known_sheet_names(state: &State, workbook: Option<&str>) -> Vec<String> {
+    let hashes: Vec<String> = match workbook {
+        Some(hash) => vec![hash.to_string()],
+        None => state.corpus.entries().map(|(h, _)| h.to_string()).collect(),
+    };
+    let mut names = Vec::new();
+    for hash in hashes {
+        let Ok(Some(stored)) = state.corpus.get(&hash) else {
+            continue;
+        };
+        let built = stored.into_built();
+        for idx in eg_graph::nodes_of_kind(&built.graph, eg_graph::NodeKind::Sheet) {
+            names.push(built.graph[idx].label());
+        }
+    }
+    names
+}
+
+/// Reject a `sheet` filter naming no sheet this corpus actually indexes —
+/// the same "no sheet called {name:?}. This workbook has: …" shape
+/// `resolve_address` already gives a citation naming an unknown sheet,
+/// extended to `search`/`context`'s free-text filter. Without this, a
+/// hallucinated sheet name silently narrowed a search to zero hits
+/// ("nothing matched") rather than saying the sheet itself does not exist —
+/// a model reading "nothing matched" tries a different *query*, never
+/// thinking to question the *sheet* it named, and the corpus's real sheet
+/// names never reach it.
+fn check_sheet_filter(state: &State, workbook: Option<&str>, sheet: &str) -> Result<(), String> {
+    let names = known_sheet_names(state, workbook);
+    if names.iter().any(|n| n.eq_ignore_ascii_case(sheet)) {
+        return Ok(());
+    }
+    Err(if names.is_empty() {
+        format!("no sheet called {sheet:?}. This corpus indexes no sheets yet.")
+    } else {
+        format!(
+            "no sheet called {sheet:?}. This corpus has: {}",
+            names.join(", ")
+        )
+    })
+}
+
 fn search(state: &mut State, args: &Value) -> Result<String, String> {
     let query = want_str(args, "query")?;
     let workbook = match opt_str(args, "workbook")? {
         Some(want) => Some(state.resolve(Some(&want))?.0),
         None => None,
     };
+    // Blank rather than absent — a model's way of saying "no preference" as
+    // often as a real one — is treated as no filter rather than a
+    // hallucinated sheet, so it is never validated or rejected.
+    let sheet = opt_str(args, "sheet")?.filter(|s| !s.trim().is_empty());
+    if let Some(sheet) = &sheet {
+        check_sheet_filter(state, workbook.as_deref(), sheet)?;
+    }
     let opts = SearchOptions {
         limit: opt_bounded(args, "limit", 8, 1, 100)?,
         workbook,
-        sheet: opt_str(args, "sheet")?,
+        sheet,
         ..Default::default()
     };
     let found = find(state, &query, &opts, opt_bool(args, "lexical_only")?)?;
@@ -487,10 +541,14 @@ fn context(state: &mut State, args: &Value) -> Result<String, String> {
         Some(want) => Some(state.resolve(Some(&want))?.0),
         None => None,
     };
+    let sheet = opt_str(args, "sheet")?.filter(|s| !s.trim().is_empty());
+    if let Some(sheet) = &sheet {
+        check_sheet_filter(state, workbook.as_deref(), sheet)?;
+    }
     let opts = SearchOptions {
         limit: seeds,
         workbook,
-        sheet: opt_str(args, "sheet")?,
+        sheet,
         ..Default::default()
     };
     let found = find(state, &query, &opts, opt_bool(args, "lexical_only")?)?;
@@ -2023,6 +2081,55 @@ mod tests {
             !scoped.contains("Beta") && !scoped.contains("beta.xlsx"),
             "a workbook filter must not let the other workbook's nodes into the passage: {scoped}"
         );
+    }
+
+    #[test]
+    fn a_hallucinated_sheet_filter_is_refused_not_silently_empty() {
+        let (mut state, _dir) = two_workbook_state();
+        let err = search(
+            &mut state,
+            &json!({ "query": "revenue", "sheet": "Sheet1", "lexical_only": true }),
+        )
+        .unwrap_err();
+        assert!(err.contains("no sheet called \"Sheet1\""), "{err}");
+        assert!(
+            err.contains("Alpha Sales") && err.contains("Beta Sales"),
+            "{err}"
+        );
+
+        let err = context(
+            &mut state,
+            &json!({ "query": "revenue", "sheet": "Sheet1", "lexical_only": true }),
+        )
+        .unwrap_err();
+        assert!(err.contains("no sheet called \"Sheet1\""), "{err}");
+    }
+
+    #[test]
+    fn a_real_sheet_filter_still_works_and_a_workbook_scope_narrows_the_names_offered() {
+        let (mut state, _dir) = two_workbook_state();
+        assert!(search(
+            &mut state,
+            &json!({ "query": "revenue", "sheet": "Alpha Sales", "lexical_only": true }),
+        )
+        .is_ok());
+
+        // Scoped to alpha.xlsx, "Beta Sales" is not among that workbook's own
+        // sheets, so the filter is refused there too — but the offered names
+        // are alpha's alone, not the whole corpus's.
+        let err = search(
+            &mut state,
+            &json!({
+                "query": "revenue",
+                "workbook": "hash-alpha",
+                "sheet": "Beta Sales",
+                "lexical_only": true
+            }),
+        )
+        .unwrap_err();
+        let offered = err.split("has: ").nth(1).expect("offers a list");
+        assert!(offered.contains("Alpha Sales"), "{err}");
+        assert!(!offered.contains("Beta Sales"), "{err}");
     }
 
     #[test]
