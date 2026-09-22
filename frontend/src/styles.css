@@ -838,6 +838,22 @@ button.close:hover {
   font-style: italic;
 }
 
+.chat-reasoner-tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 550;
+  color: var(--text-faint);
+  margin-right: 6px;
+  font-style: italic;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.chat-reasoner-tag.reasoner-external {
+  color: var(--accent);
+  font-style: normal;
+}
+
 .chat-directed-tag,
 .chat-reply-tag {
   display: inline-block;

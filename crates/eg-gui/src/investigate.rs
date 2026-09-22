@@ -48,7 +48,8 @@ pub async fn run_investigation(
         );
     }
     let (base_url, api_key, model_name) = llm.connection();
-    let model = eg_agent::openai_compatible(base_url, api_key, model_name)?;
+    let model_name = model_name.to_string();
+    let model = eg_agent::openai_compatible(base_url, api_key, &model_name)?;
     let harness =
         Harness::new(model, Policy::default()).with_redacted_values(!llm.privacy.allows_values());
 
@@ -166,6 +167,8 @@ pub async fn run_investigation(
         citations,
         answer,
         trail,
+        reasoner: chat::Reasoner::Agent,
+        model: Some(model_name),
         ..ChatTurn::new(source, message)
     };
     let sticky = graph.as_ref().map(|(hash, _)| (Some(hash.clone()), None));
