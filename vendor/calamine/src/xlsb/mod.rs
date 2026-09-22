@@ -1416,6 +1416,32 @@ mod formula_tests {
         );
     }
 
+    /// A `PtgFuncA` call (ptg class 0x21/0x41/0x61, no explicit arg count —
+    /// the arg count comes from `FTAB_ARGC[iftab]`) to `iftab`.
+    fn ptg_func(ptg: u8, iftab: u16) -> Vec<u8> {
+        let mut v = vec![ptg];
+        v.extend_from_slice(&iftab.to_le_bytes());
+        v
+    }
+
+    #[test]
+    fn mmult_takes_two_arguments_not_one() {
+        // `FTAB_ARGC[165]` ("MMULT") was 1, not 2 — a real regression found on
+        // a raytracer's matrix-multiply formulas: `MMULT`'s call consumed only
+        // its second argument, leaving the first (a 3-D area reference, in the
+        // workbook this was found on) unconsumed on the stack, so the whole
+        // formula — and with it every formula on the sheet, since one failure
+        // aborts the sheet's entire formula read — failed with `StackLen`
+        // instead of a formula only `MMULT`'s own two arguments were part of.
+        let mut rgce = ptg_area(0x45, (0, 0), (0, 0), true); // A1:A1
+        rgce.extend(ptg_area(0x45, (1, 0), (1, 0), true)); // A2:A2
+        rgce.extend(ptg_func(0x61, 165)); // MMULT(A1:A1,A2:A2)
+        assert_eq!(
+            parse_formula(&rgce, &[], &[], (0, 0)).unwrap(),
+            "MMULT(A1:A1,A2:A2)"
+        );
+    }
+
     #[test]
     fn a_three_d_reference_keeps_its_sheet_and_its_column() {
         let sheets = ["Summary".to_string(), "Q3 Sales".to_string()];

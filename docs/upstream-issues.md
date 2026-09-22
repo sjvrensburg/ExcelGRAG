@@ -910,3 +910,51 @@ differs, for the wrong reason.
 The table gains `#VALUE!` and `#GETTING_DATA` as names of their own, and an
 unrecognised body returns `OdsError::CellError` naming the text, matching what
 the other two readers do.
+
+## 13. `MMULT` is recorded as taking one argument instead of two
+
+**Not reported upstream yet.** Found on a real, independently-authored
+workbook — not the reference workbook, and not ExcelGRAG's own fixtures —
+while widening the test corpus beyond financial-model-shaped spreadsheets: a
+raytracer implemented in Excel formulas (s0lly/Raytracer-In-Excel), whose
+matrix-transform formulas use `MMULT`.
+
+`FTAB_ARGC`, `xlsb`'s fixed table of how many operands each built-in function
+pops off the formula-token stack, lists index 165 (`"MMULT"`) as taking `1`
+argument. `MMULT(array1, array2)` takes two. A `PtgFuncA` call to `MMULT`
+(ptg class 0x21/0x41/0x61, argument count implied by this table rather than
+carried in the token stream) consumed only its second argument and pushed a
+result, leaving its first argument — whatever was under it on the stack —
+never consumed.
+
+That leftover item does not surface as a wrong formula; it surfaces as
+`XlsbError::StackLen` from the final `stack.len() == 1` check at the end of
+`parse_formula`, once every other token has been processed and the stack
+still holds more than one item. And because
+`crates/eg-ingest/src/lib.rs`'s `worksheet_formula` call aborts a sheet's
+*entire* formula read on the first `Err`
+(`warnings.push(format!("no formulas for sheet {name:?}: {e}"))`), one
+formula anywhere on a sheet using `MMULT` was enough to drop every formula on
+that sheet — 3,519 and 14,465 formulas respectively, on the two affected
+sheets of the workbook this was found on.
+
+### Verification
+
+On `RaytracerInExcel_CopyFormulae.xlsb` (private, not committed — see
+`private/community/` and `CLAUDE.md`'s note on confidential workbooks, which
+this section follows even though the workbook itself is merely unlicensed
+rather than confidential):
+
+| | Sheet "Objects" | Sheet "Screen" |
+|---|---|---|
+| Formulas before the fix | 0 (whole-sheet read failed) | 0 (whole-sheet read failed) |
+| Formulas after the fix | 3,519 | 14,465 |
+
+`vendor/calamine/src/xlsb/mod.rs` gains a fixture-free unit test
+(`mmult_takes_two_arguments_not_one`) constructing a minimal `MMULT(A1:A1,A2:A2)`
+token stream by hand and asserting it decodes rather than erroring; all 73 of
+calamine's own tests still pass.
+
+### The fix
+
+`FTAB_ARGC[165]` (`"MMULT"`) changes from `1` to `2`. One line.
