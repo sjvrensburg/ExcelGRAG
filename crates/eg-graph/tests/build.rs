@@ -5,9 +5,9 @@
 
 use eg_graph::{
     build, build_with, check, BuildReport, BuiltGraph, EdgeKind, FormulaGroupNode, Graph,
-    GraphOptions, Node, NodeKind, WorkbookNode,
+    GraphOptions, Node, NodeKind, RegionFit, RegionIndex, WorkbookNode,
 };
-use eg_model::{Cell, CellValue, DefinedName, Sheet, SheetId, Workbook, WorkbookFormat};
+use eg_model::{Cell, CellValue, DefinedName, RangeRef, Sheet, SheetId, Workbook, WorkbookFormat};
 
 fn grid(id: u16, name: &str, rows: &[&str]) -> Sheet {
     let mut sheet = Sheet::new(SheetId(id), name);
@@ -76,6 +76,61 @@ fn the_structural_layers_are_wired_root_to_group() {
 
     // The group sits under the region and under the column heading it.
     assert_eq!(r.edges_of(EdgeKind::HeaderOf), 1);
+}
+
+#[test]
+fn region_index_classifies_ranges_against_built_structure() {
+    let wb = workbook(vec![
+        grid(
+            0,
+            "Sales",
+            &["Region Q1 Q2", "North 10 =A2*2", "South 20 =A3*2"],
+        ),
+        grid(1, "Empty", &[". . .", ". . .", ". . ."]),
+    ]);
+    let built = build(&wb);
+    let index = RegionIndex::build(&built.graph);
+
+    let region = built
+        .graph
+        .node_weights()
+        .find(|n| n.kind() == NodeKind::Region)
+        .and_then(Node::range)
+        .expect("the sheet has one region");
+    match index.fit(region) {
+        RegionFit::Exact(_) => {}
+        other => panic!("expected Exact for the region's own range, got {other:?}"),
+    }
+
+    let column = built
+        .graph
+        .node_weights()
+        .find(|n| n.kind() == NodeKind::Column && n.label() == "Q1")
+        .and_then(Node::range)
+        .expect("Q1 is a column of the region");
+    match index.fit(column) {
+        RegionFit::Inside(_) => {}
+        other => panic!("expected Inside for a column within its region, got {other:?}"),
+    }
+
+    // A range spanning both the row-label column and Q1 overlaps two
+    // indexed nodes (the region, containing it exactly, and the columns it
+    // straddles) without being contained by a column alone — `Inside` wins
+    // over `Overlaps` because it is fully covered by the region.
+    let straddling = RangeRef::new(region.sheet, region.top, region.left, region.bottom, 1);
+    match index.fit(straddling) {
+        RegionFit::Inside(_) | RegionFit::Exact(_) => {}
+        other => panic!("expected the straddling range to sit inside the region, got {other:?}"),
+    }
+
+    // Blank sheet: no region, column or formula group anywhere.
+    let blank = RangeRef::new(SheetId(1), 0, 0, 2, 2);
+    assert_eq!(index.fit(blank), RegionFit::None);
+
+    // Unknown sheet entirely (e.g. one dropped from the index because it
+    // has no structural nodes at all).
+    let nowhere = RangeRef::new(SheetId(9), 0, 0, 0, 0);
+    assert_eq!(index.fit(nowhere), RegionFit::None);
 }
 
 #[test]

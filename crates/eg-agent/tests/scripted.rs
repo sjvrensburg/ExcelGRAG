@@ -629,3 +629,76 @@ async fn an_auto_scan_respects_the_scan_budget() {
     let names: Vec<&str> = outcome.calls.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, ["search"], "no scan when the budget is spent");
 }
+
+/// A range far outside anything on the demo fixture's `Debtors` sheet —
+/// syntactically fine, semantically nowhere, the shape a hallucinated
+/// coordinate takes. See `demo_fixture_path`: the real file on disk is
+/// unrelated in content to the synthetic `debtors_workbook`, but its real
+/// sheet names are what `resolve_range` checks against, and `Debtors` is
+/// one of them.
+const HALLUCINATED_RANGE: &str = "Debtors!ZZ9000:AAA9010";
+
+#[tokio::test]
+async fn a_structural_gate_rejection_is_corrected_automatically() {
+    let (engine, _dir) = debtors_engine();
+    let model = Scripted::new(vec![
+        vec![AssistantContent::tool_call(
+            "c1",
+            "read_cells",
+            json!({ "citation": HALLUCINATED_RANGE }),
+        )],
+        vec![AssistantContent::text("done")],
+    ]);
+    let harness = Harness::new(model.clone(), Policy::default());
+    let outcome = harness
+        .ask(engine, "what is in that range?", &mut |_| {})
+        .await
+        .expect("the run completes");
+
+    // No second model call spent on the correction — it happens inside the
+    // turn that got the rejection, exactly as `auto_scan` does for a blind
+    // search result.
+    assert_eq!(outcome.turns, 2);
+    let names: Vec<&str> = outcome.calls.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["read_cells", "tables"]);
+    assert!(!outcome.calls[0].ok && !outcome.calls[0].refused);
+    assert!(outcome.calls[1].ok && !outcome.calls[1].refused);
+    assert_eq!(outcome.calls[1].args, json!({ "sheet": "Debtors" }));
+
+    let requests = model.requests.lock().unwrap();
+    let second = serde_json::to_string(&requests[1].chat_history).unwrap();
+    assert!(second.contains("Looked automatically"), "{second}");
+    assert!(
+        second.contains(eg_mcp::tools::STRUCTURAL_GATE_PREFIX),
+        "{second}"
+    );
+}
+
+#[tokio::test]
+async fn an_auto_correction_respects_the_repeat_call_dedupe() {
+    let (engine, _dir) = debtors_engine();
+    let model = Scripted::new(vec![
+        vec![AssistantContent::tool_call(
+            "c1",
+            "tables",
+            json!({ "sheet": "Debtors" }),
+        )],
+        vec![AssistantContent::tool_call(
+            "c2",
+            "read_cells",
+            json!({ "citation": HALLUCINATED_RANGE }),
+        )],
+        vec![AssistantContent::text("done")],
+    ]);
+    let harness = Harness::new(model, Policy::default());
+    let outcome = harness
+        .ask(engine, "what is in that range?", &mut |_| {})
+        .await
+        .expect("the run completes");
+
+    // The model already called `tables --sheet Debtors` itself; the
+    // correction is the identical call, so it is refused rather than
+    // repeated, the same as a model-issued repeat would be.
+    let names: Vec<&str> = outcome.calls.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["tables", "read_cells"]);
+}

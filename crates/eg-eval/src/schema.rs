@@ -110,6 +110,20 @@ impl Schema {
     pub fn keys(&self) -> impl Iterator<Item = &Lookup> {
         self.lookups.iter().filter(|l| !l.approximate)
     }
+
+    /// Keys whose looking-up side (`from`, or `key` when the key column is
+    /// knowable) overlaps `column` — the relations this column of a table
+    /// participates in as the side doing the lookup.
+    pub fn keys_from(&self, column: RangeRef) -> impl Iterator<Item = &Lookup> {
+        self.keys().filter(move |l| {
+            l.from.intersects(&column) || l.key.is_some_and(|k| k.intersects(&column))
+        })
+    }
+
+    /// Keys whose table this range is, or overlaps — the looked-into side.
+    pub fn keys_into(&self, table: RangeRef) -> impl Iterator<Item = &Lookup> {
+        self.keys().filter(move |l| l.table.intersects(&table))
+    }
 }
 
 /// Read every lookup relation a workbook states.

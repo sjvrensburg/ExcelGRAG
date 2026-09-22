@@ -21,7 +21,7 @@ use eg_eval::{
     cell as cell_fact, cells_holding, cells_in, dependents_of, precedents_of, recompute, subgraph,
     value_json, GraphDirection, GraphOptions, Outcome,
 };
-use eg_eval::{infer_schema, Lookup};
+use eg_eval::{infer_schema, Lookup, Schema};
 use eg_index::SearchOptions;
 use eg_model::{parse_a1, redact_formula_literals, CellValue, RangeRef, Workbook};
 use eg_retrieve::{expand, find_in, render, ExpandOptions, Fusion, RenderOptions, Search};
@@ -565,11 +565,51 @@ fn located(
     let (_, path) = state.resolve(opt_str(args, "workbook")?.as_deref())?;
     let (loaded, load_seconds) = state.workbook(&path)?;
     let range = resolve_range(&loaded.workbook, &citation)?;
+    check_structural_fit(&loaded.workbook, range)?;
     let note = match load_seconds {
         Some(seconds) => format!("(opened {path} in {seconds:.1}s)\n"),
         None => String::new(),
     };
     Ok((loaded, range, note))
+}
+
+/// Prefix on a structural-gate rejection, kept fixed so a caller (an agent's
+/// harness, `--score`) can recognise this family of refusal by its wording
+/// rather than guessing at free-form text — the same role `QueryError`'s
+/// `Display` plays for `query_table`.
+pub const STRUCTURAL_GATE_PREFIX: &str = "not a known structure: ";
+
+/// Reject a *range* citation (more than one cell) that overlaps no table or
+/// block `eg-structure` found on its sheet — the shape a hallucinated
+/// coordinate takes: syntactically valid, semantically nowhere.
+///
+/// A single-cell citation stays lenient. Region detection is heuristic, and
+/// "is this cell empty?" or "read the cell just past this table" are
+/// legitimate questions a hard gate on one cell would wrongly refuse; the
+/// clearer failure this exists for is a multi-cell range that lands
+/// entirely in blank space or a completely different part of the sheet than
+/// the tool's own semantics assume.
+fn check_structural_fit(workbook: &Workbook, range: RangeRef) -> Result<(), String> {
+    if range.cell_count() <= 1 {
+        return Ok(());
+    }
+    let Some(sheet) = workbook.sheet(range.sheet) else {
+        // resolve_range already guarantees the sheet exists; defensive only.
+        return Ok(());
+    };
+    if detect_regions(sheet)
+        .iter()
+        .any(|region| region.range.intersects(&range))
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "{STRUCTURAL_GATE_PREFIX}{} does not overlap any table or block eg-structure found on \
+         {:?}. Call `tables` or `context` to see what is really there before citing a range on \
+         it — a range that lands nowhere real is usually a guessed coordinate, not this one.",
+        workbook.cite_range(range),
+        sheet.name,
+    ))
 }
 
 fn unwrap_quotes(text: &str) -> &str {
@@ -1267,6 +1307,12 @@ fn query_table(state: &mut State, args: &Value) -> Result<String, String> {
     }
 
     let answer = query_run(&loaded.workbook, &table, &query).map_err(|e| e.to_string())?;
+    let schema_hint = schema_gate_hint(
+        &loaded.workbook,
+        &infer_schema(&loaded.workbook),
+        &table,
+        &query,
+    );
     let labels: Vec<String> = query.aggregates.iter().map(Aggregate::label).collect();
     // A total *is* a value — a number the workbook never wrote down — so it is
     // redacted like any other when this server was told to.
@@ -1383,7 +1429,65 @@ fn query_table(state: &mut State, args: &Value) -> Result<String, String> {
             answer.groups_not_listed
         ));
     }
+    if let Some(hint) = schema_hint {
+        out.push_str(&hint);
+    }
     Ok(out)
+}
+
+/// Advisory only, never a hard rejection: `infer_schema` is heuristic, and a
+/// standalone raw-column query can be exactly what was wanted — `query.rs`'s
+/// own doc says this layer is deliberately "not SQL, not a join." When a
+/// filtered or grouped column is itself the looking-up side of a known,
+/// non-approximate lookup into a *different* table, name what it joins
+/// into, so the agent can follow it with a second `query_table` call if the
+/// value it actually wants lives there rather than in this column's raw
+/// code.
+fn schema_gate_hint(
+    workbook: &Workbook,
+    schema: &Schema,
+    table: &Table,
+    query: &Query,
+) -> Option<String> {
+    let named: Vec<&str> = query
+        .filters
+        .iter()
+        .map(|f| f.column.as_str())
+        .chain(query.group_by.iter().map(String::as_str))
+        .collect();
+    let mut lines = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for name in &named {
+        let Some(column) = table
+            .columns
+            .iter()
+            .find(|c| c.header.eq_ignore_ascii_case(name))
+        else {
+            continue;
+        };
+        for lookup in schema.keys_from(column.range) {
+            if lookup.table.intersects(&table.body) {
+                continue;
+            }
+            if !seen.insert((column.header.clone(), lookup.table)) {
+                continue;
+            }
+            lines.push(format!(
+                "  {:?} is used as a lookup key into {} — if the value you want is there, not \
+                 in this column's own code, query that table instead.",
+                column.header,
+                workbook.cite_range(lookup.table),
+            ));
+        }
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "\nnote: this query's args ignore a relation this workbook declares:\n{}\n",
+            lines.join("\n")
+        ))
+    }
 }
 
 /// For every equality-shaped filter in a query that matched no rows, the
@@ -1761,6 +1865,84 @@ mod tests {
     }
 
     #[test]
+    fn schema_gate_hint_names_the_table_a_filtered_key_column_joins_into() {
+        // schema_gate_hint's own logic is what this tests, not region
+        // detection — the table is built by hand rather than run through
+        // `detect_regions`/`read_table`, which is heuristic and covered by
+        // its own tests elsewhere.
+        let mut wb = one_sheet_workbook("hash-t", "t.xlsx", "Work");
+        wb.sheets
+            .push(eg_model::Sheet::new(eg_model::SheetId(1), "Rates"));
+        let type_col = eg_model::RangeRef::new(eg_model::SheetId(0), 1, 0, 3, 0);
+        let amount_col = eg_model::RangeRef::new(eg_model::SheetId(0), 1, 1, 3, 1);
+        let table = Table {
+            body: eg_model::RangeRef::new(eg_model::SheetId(0), 1, 0, 3, 1),
+            title: None,
+            columns: vec![
+                eg_structure::TableColumn {
+                    header: "Type".into(),
+                    range: type_col,
+                    kind: eg_structure::ColumnKind::Text,
+                    populated: 3,
+                },
+                eg_structure::TableColumn {
+                    header: "Amount".into(),
+                    range: amount_col,
+                    kind: eg_structure::ColumnKind::Number,
+                    populated: 3,
+                },
+            ],
+            labels: None,
+            label_headers: Vec::new(),
+        };
+
+        // No lookup formula in this fixture, so infer_schema finds nothing —
+        // the hint must stay silent when there is nothing to advise on.
+        let empty_schema = infer_schema(&wb);
+        let query = Query {
+            filters: vec![Filter {
+                column: "Type".into(),
+                test: Test::Is(CellValue::Text("Residential".into())),
+            }],
+            ..Default::default()
+        };
+        assert!(schema_gate_hint(&wb, &empty_schema, &table, &query).is_none());
+
+        // A schema built by hand, as if a VLOOKUP had declared the relation
+        // `infer_schema` would otherwise recover from a real formula.
+        let rates_table = eg_model::RangeRef::new(eg_model::SheetId(1), 0, 0, 1, 1);
+        let schema = Schema {
+            lookups: vec![Lookup {
+                from: type_col,
+                key: Some(type_col),
+                table: rates_table,
+                column: Some(2),
+                returns: Some(rates_table),
+                kind: eg_eval::LookupKind::Vlookup,
+                cells: 3,
+                approximate: false,
+            }],
+            groups: 1,
+            with_lookups: 1,
+            unrecognised: 0,
+            unresolvable: 0,
+        };
+        let hint = schema_gate_hint(&wb, &schema, &table, &query).expect("a hint");
+        assert!(hint.contains("Type"), "{hint}");
+        assert!(hint.contains("Rates"), "{hint}");
+
+        // Filtering on a column with no declared relation stays silent.
+        let unrelated = Query {
+            filters: vec![Filter {
+                column: "Amount".into(),
+                test: Test::Above(0.0),
+            }],
+            ..Default::default()
+        };
+        assert!(schema_gate_hint(&wb, &schema, &table, &unrelated).is_none());
+    }
+
+    #[test]
     fn a_defined_name_is_a_citation() {
         let mut wb = one_sheet_workbook("hash-t", "t.xlsx", "Sales");
         wb.defined_names.push(eg_model::DefinedName {
@@ -1787,6 +1969,33 @@ mod tests {
         let refused = resolve_range(&wb, "Elsewhere").unwrap_err();
         assert!(refused.contains("another workbook"), "{refused}");
         assert!(resolve_range(&wb, "No_Such_Name").is_err());
+    }
+
+    #[test]
+    fn a_citation_inside_a_real_table_passes_the_structural_gate() {
+        let wb = one_sheet_workbook("hash-t", "t.xlsx", "Sales");
+        let range = resolve_range(&wb, "Sales!A1:B4").expect("the whole table");
+        assert!(check_structural_fit(&wb, range).is_ok());
+    }
+
+    #[test]
+    fn a_range_in_blank_space_fails_the_structural_gate() {
+        let wb = one_sheet_workbook("hash-t", "t.xlsx", "Sales");
+        // Nothing lives at Z1:AA4 on this sheet.
+        let range = resolve_range(&wb, "Sales!Z1:AA4").expect("syntax is fine");
+        let err = check_structural_fit(&wb, range).unwrap_err();
+        assert!(err.starts_with(STRUCTURAL_GATE_PREFIX), "{err}");
+        assert!(err.contains("Sales"), "{err}");
+    }
+
+    #[test]
+    fn a_single_cell_in_blank_space_stays_lenient() {
+        let wb = one_sheet_workbook("hash-t", "t.xlsx", "Sales");
+        let range = resolve_range(&wb, "Sales!Z1").expect("syntax is fine");
+        assert!(
+            check_structural_fit(&wb, range).is_ok(),
+            "a lone cell may legitimately be asked about even if blank"
+        );
     }
 
     #[test]
