@@ -901,7 +901,7 @@ pub const FTAB_ARGC: [u8; FTAB_LEN] = [
     1,   // "CLEAN",
     1,   // "MDETERM",
     1,   // "MINVERSE",
-    1,   // "MMULT",
+    2,   // "MMULT",
     2,   // "FILES",
     6,   // "IPMT",
     6,   // "PPMT",
