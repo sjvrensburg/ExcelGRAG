@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{self, SearchParams};
 use crate::app::App;
-use crate::dto::{ChatTurnDto, DirectedDto, TrailStepDto, TurnSourceDto, WsEvent};
+use crate::dto::{ChatTurnDto, DirectedDto, ReasonerDto, TrailStepDto, TurnSourceDto, WsEvent};
 
 pub const DEFAULT_SESSION: &str = "default";
 
@@ -77,6 +77,49 @@ impl From<Directed> for DirectedDto {
     }
 }
 
+/// Whose model, if any, put words in a turn's `answer` — orthogonal to
+/// `source` (who *asked*). The two axes together are what a shared session
+/// otherwise makes hard to read at a glance: an agent asking is not the same
+/// as an agent's own model reasoning, and a human asking is not the same as
+/// no model reasoning at all.
+///
+/// - `None` — the rendered passage itself; no LLM ran (privacy `off`, or
+///   none configured).
+/// - `Llm` — the fixed find→expand→render pipeline, phrased by the GUI's
+///   configured chat model (`llm.compose`) — bundled sidecar or a hosted
+///   endpoint, named in `model` below.
+/// - `Agent` — an investigation (`investigate.rs`): the GUI's configured
+///   model drove the workbook tools itself, whether the turn was asked by
+///   the browser human or by an external agent over the MCP bridge's `chat
+///   {investigate: true}`. The tool-calling loop is always the GUI's own
+///   model here, never the external agent's — that is the case "an
+///   external agent drives the GUI but an external provider answers".
+/// - `ExternalReply` — free text an external agent typed itself, answering
+///   a turn a human routed to it (`Directed::Agent` /
+///   [`reply_to_agent_turn`]). The one case where the reasoning happened
+///   entirely outside this process, in whatever the attached MCP client's
+///   own model is.
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Reasoner {
+    #[default]
+    None,
+    Llm,
+    Agent,
+    ExternalReply,
+}
+
+impl From<Reasoner> for ReasonerDto {
+    fn from(reasoner: Reasoner) -> Self {
+        match reasoner {
+            Reasoner::None => ReasonerDto::None,
+            Reasoner::Llm => ReasonerDto::Llm,
+            Reasoner::Agent => ReasonerDto::Agent,
+            Reasoner::ExternalReply => ReasonerDto::ExternalReply,
+        }
+    }
+}
+
 /// One turn, as persisted. Deliberately the same shape regardless of which
 /// LLM privacy tier produced it: `answer` is either the LLM's composed reply
 /// or, with no LLM configured, the rendered passage itself. Even in
@@ -114,6 +157,14 @@ pub struct ChatTurn {
     /// (`investigate`). Arguments and verdicts only — see `TrailStepDto`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trail: Vec<TrailStepDto>,
+    /// Whose model, if any, produced `answer` — see [`Reasoner`].
+    #[serde(default)]
+    pub reasoner: Reasoner,
+    /// The model name behind `reasoner`, when it names one (`Llm`/`Agent`).
+    /// Absent for `None` and for `ExternalReply`, whose model is whatever
+    /// the attached MCP client used and is not visible to this process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl ChatTurn {
@@ -137,6 +188,8 @@ impl ChatTurn {
             directed_to: None,
             reply_to: None,
             trail: Vec::new(),
+            reasoner: Reasoner::None,
+            model: None,
         }
     }
 
@@ -153,6 +206,8 @@ impl ChatTurn {
             directed_to: self.directed_to.map(Into::into),
             reply_to: self.reply_to,
             trail: self.trail.clone(),
+            reasoner: self.reasoner.into(),
+            model: self.model.clone(),
         }
     }
 
@@ -345,7 +400,7 @@ pub async fn run_turn(
     // existing, tested `read_cells` MCP tool rather than re-deriving A1
     // parsing here — one more blocking engine call, locked and released on
     // its own.
-    let answer = match &llm {
+    let (answer, reasoner, model) = match &llm {
         Some(llm) if llm.privacy.allows_llm() => {
             let values = if llm.privacy.allows_values() {
                 let app_for_values = Arc::clone(app);
@@ -359,15 +414,17 @@ pub async fn run_turn(
             } else {
                 None
             };
-            llm.compose(
-                message,
-                &engine_result.passage,
-                &engine_result.citations,
-                values.as_deref(),
-            )
-            .await
+            let answer = llm
+                .compose(
+                    message,
+                    &engine_result.passage,
+                    &engine_result.citations,
+                    values.as_deref(),
+                )
+                .await;
+            (answer, Reasoner::Llm, Some(llm.settings().model.clone()))
         }
-        _ => engine_result.passage.clone(),
+        _ => (engine_result.passage.clone(), Reasoner::None, None),
     };
 
     // 5. Re-lock sessions, append, persist, update sticky scope.
@@ -376,6 +433,8 @@ pub async fn run_turn(
         evidence: engine_result.evidence,
         citations: engine_result.citations,
         answer,
+        reasoner,
+        model,
         ..ChatTurn::new(source, message)
     };
     commit_turn(
@@ -530,6 +589,7 @@ pub fn reply_to_agent_turn(
     let turn = ChatTurn {
         answer: answer.to_string(),
         reply_to: Some(reply_to),
+        reasoner: Reasoner::ExternalReply,
         ..ChatTurn::new(TurnSource::Agent, question)
     };
     commit_turn(app, session_id, turn, None)
@@ -612,6 +672,11 @@ mod tests {
             "an answerable question should cite something"
         );
         assert_eq!(turn.id, 1);
+        assert_eq!(
+            turn.reasoner,
+            ReasonerDto::None,
+            "no LLM is configured in this test corpus, so nothing reasoned"
+        );
 
         // Persisted to disk, and readable back by a fresh App over the same dir.
         let persisted = load_session(dir.path().to_str().unwrap(), DEFAULT_SESSION);
@@ -802,6 +867,11 @@ mod tests {
         assert_eq!(
             reply.message, question.message,
             "the reply carries the question forward"
+        );
+        assert_eq!(
+            reply.reasoner,
+            ReasonerDto::ExternalReply,
+            "the answer was typed by the attached agent's own model, not the GUI's"
         );
 
         assert!(

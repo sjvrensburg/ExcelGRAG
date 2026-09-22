@@ -153,6 +153,17 @@ export interface ChatTurnDto {
   // The tool calls an investigation made, when the model drove this turn
   // itself. Arguments and verdicts, never results.
   trail?: TrailStepDto[];
+  // Whose model, if any, produced `answer` — orthogonal to `source`, which
+  // says who *asked*. "none": the rendered passage, no LLM ran. "llm": the
+  // fixed pipeline, phrased by the configured chat model. "agent": an
+  // investigation — the GUI's own configured model drove the tools itself,
+  // whether asked by the browser or by an external agent over MCP.
+  // "external_reply": free text an external agent typed itself, answering a
+  // question a human routed to it — the one case reasoned entirely outside
+  // this process.
+  reasoner: "none" | "llm" | "agent" | "external_reply";
+  // The model name behind `reasoner`, when it names one ("llm"/"agent").
+  model?: string;
 }
 
 export interface TrailStepDto {
