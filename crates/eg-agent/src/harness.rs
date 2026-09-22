@@ -224,13 +224,15 @@ impl<M: CompletionModel + Clone> Harness<M> {
     }
 
     /// The `invalid_ref` counterpart to [`Self::auto_scan`]: a structural or
-    /// schema gate named a citation that is not real structure, so run
-    /// `tables` scoped to the sheet it named and append what is really
-    /// there, instead of leaving the model to guess a second coordinate.
+    /// unknown-sheet gate rejected a call, so run a corrective follow-up —
+    /// `tables` scoped to a real sheet the citation named, or the same
+    /// call retried without a sheet filter that turned out not to exist —
+    /// and append what it found, instead of leaving the model to guess a
+    /// second coordinate.
     ///
-    /// Budgeted through the same [`Policy::admit`] a model-issued `tables`
-    /// call would get, so a run that already looked at this sheet's tables
-    /// does not look again.
+    /// Budgeted through the same [`Policy::admit`] a model-issued call
+    /// would get, so a run that already made the identical correction does
+    /// not make it again.
     #[allow(clippy::too_many_arguments)]
     async fn auto_correct(
         &self,
@@ -238,25 +240,27 @@ impl<M: CompletionModel + Clone> Harness<M> {
         ledger: &mut Ledger,
         turn: usize,
         calls: &mut Vec<CallRecord>,
+        rejected_name: &str,
         rejected_args: &Value,
+        kind: invalid_ref::Gate,
         mut text: String,
         sink: &mut (dyn FnMut(Event) + Send),
     ) -> String {
-        let (tool, correction_args) = invalid_ref::correction(rejected_args);
-        if self.policy.admit(ledger, tool, &correction_args).is_err() {
-            // Already looked at this sheet's tables this run, or the budget
-            // is spent — the rejection message already named `tables` as
-            // the way out, so nothing is lost by staying quiet.
+        let (tool, correction_args) = invalid_ref::correction(rejected_name, rejected_args, kind);
+        if self.policy.admit(ledger, &tool, &correction_args).is_err() {
+            // Already made this same correction this run, or the budget is
+            // spent — the rejection message already named the way out, so
+            // nothing is lost by staying quiet.
             return text;
         }
         sink(Event::ToolCall {
             turn,
-            name: tool.to_string(),
+            name: tool.clone(),
             args: correction_args.clone(),
         });
         let (ok, result_text) = match tools::execute(
             Arc::clone(engine),
-            tool.to_string(),
+            tool.clone(),
             correction_args.clone(),
             self.redact_values,
         )
@@ -268,25 +272,27 @@ impl<M: CompletionModel + Clone> Harness<M> {
         };
         sink(Event::ToolResult {
             turn,
-            name: tool.to_string(),
+            name: tool.clone(),
             ok,
             refused: false,
             text: result_text.clone(),
         });
         calls.push(CallRecord {
             turn,
-            name: tool.to_string(),
+            name: tool.clone(),
             args: correction_args,
             ok,
             refused: false,
             result: result_text.clone(),
         });
+        let what = match kind {
+            invalid_ref::Gate::Structural => "that citation was not real structure",
+            invalid_ref::Gate::UnknownSheet => "that sheet does not exist",
+        };
         let preamble = if ok {
-            "Looked automatically, since that citation was not real structure — here is what \
-             is actually on that sheet:"
+            format!("Looked automatically, since {what} — here is what the retry found:")
         } else {
-            "Tried to look automatically at what is really on that sheet, since the citation \
-             was not real structure, but the lookup itself failed:"
+            format!("Tried to look automatically, since {what}, but the retry itself failed:")
         };
         text.push_str(&format!("\n\n{preamble}\n{result_text}"));
         text
@@ -550,14 +556,16 @@ impl<M: CompletionModel + Clone> Harness<M> {
                                 )
                                 .await;
                             calls[search_record].result = text.clone();
-                        } else if invalid_ref::should_auto_correct(ok, refused, &text) {
+                        } else if let Some(kind) = invalid_ref::gate(ok, refused, &text) {
                             text = self
                                 .auto_correct(
                                     &engine,
                                     &mut ledger,
                                     turn,
                                     &mut calls,
+                                    &name,
                                     &args,
+                                    kind,
                                     text,
                                     &mut *sink,
                                 )

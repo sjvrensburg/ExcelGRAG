@@ -702,3 +702,38 @@ async fn an_auto_correction_respects_the_repeat_call_dedupe() {
     let names: Vec<&str> = outcome.calls.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, ["tables", "read_cells"]);
 }
+
+#[tokio::test]
+async fn an_unknown_sheet_filter_on_search_is_retried_without_it() {
+    let (engine, _dir) = debtors_engine();
+    let model = Scripted::new(vec![
+        vec![AssistantContent::tool_call(
+            "c1",
+            "search",
+            json!({ "query": "revenue", "sheet": "Sheet1", "lexical_only": true }),
+        )],
+        vec![AssistantContent::text("done")],
+    ]);
+    let harness = Harness::new(model.clone(), Policy::default());
+    let outcome = harness
+        .ask(engine, "where is revenue?", &mut |_| {})
+        .await
+        .expect("the run completes");
+
+    // The correction is the same tool, retried in the same step — not a
+    // second model call, and not `tables` (search/context retry themselves
+    // rather than falling back, since dropping the bad sheet filter is
+    // enough to get a real answer).
+    assert_eq!(outcome.turns, 2);
+    let names: Vec<&str> = outcome.calls.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["search", "search"]);
+    assert!(!outcome.calls[0].ok && !outcome.calls[0].refused);
+    assert!(outcome.calls[0].result.starts_with("no sheet called"));
+    assert!(outcome.calls[1].ok && !outcome.calls[1].refused);
+    assert!(outcome.calls[1].args.get("sheet").is_none());
+
+    let requests = model.requests.lock().unwrap();
+    let second = serde_json::to_string(&requests[1].chat_history).unwrap();
+    assert!(second.contains("Looked automatically"), "{second}");
+    assert!(second.contains("no sheet called"), "{second}");
+}

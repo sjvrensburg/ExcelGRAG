@@ -1,0 +1,37 @@
+[
+  {
+    "ask": "which cell computes the ALU operation code, ALU OP, on the SOS sheet",
+    "want": ["SOS!D20"],
+    "why": "D20's formula decodes the opcode nibble into an ALU op; the label ALU OP sits at D19, one row above the cell that actually computes it — a citation naming D19 instead is a near-miss, not a hit."
+  },
+  {
+    "ask": "which cell holds the memory read signal, MEMR",
+    "want": ["SOS!V20"],
+    "why": "the label MEMR sits at V19; the formula that actually drives it is V20."
+  },
+  {
+    "ask": "which cell holds the memory write signal, MEMW",
+    "want": ["SOS!T20"],
+    "why": "the label MEMW sits at T19; the formula that actually drives it is T20."
+  },
+  {
+    "ask": "which cell computes REG2's value on the SOS sheet",
+    "want": ["SOS!F28"],
+    "why": "the label [REG2] sits at F27; the formula reading the register's contents is F28."
+  },
+  {
+    "ask": "which cell computes ADDRESS Y for the fetch unit",
+    "want": ["SOS!L137"],
+    "why": "the label ADDRESS Y sits at L136; the formula is L137, a FLOOR.MATH over J133 — a very different part of the sheet from where the label lives."
+  },
+  {
+    "ask": "which cell decodes the top byte of the fetched instruction into J17",
+    "want": ["SOS!J17"],
+    "why": "J17 is itself the decode formula, FLOOR.MATH(T13/POWER(2,24)) — a plain cell reference this far from any table header is exactly the shape a model is tempted to guess at rather than look up."
+  },
+  {
+    "ask": "trace what feeds the ALU operation code decision at D20",
+    "want": ["J17", "SOS!D20"],
+    "why": "D20's formula reads J17 (and the constant it's compared against); a grounded trace names J17 as a precedent, not a plausible-looking neighbour."
+  }
+]
