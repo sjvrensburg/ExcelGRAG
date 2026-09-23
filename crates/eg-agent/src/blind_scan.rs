@@ -31,10 +31,17 @@ const SCAN_HINT: &str = "scan the cells (`find_value`, `eg where`)";
 /// still costs `find_value`'s own budget (`Policy::max_scans`) on top.
 pub const MAX_AUTO_SCANS: usize = 3;
 
-/// Whether a `search` tool's result is a genuinely blind answer on a number
-/// this corpus could not index — the case `find_value` exists for.
+/// Whether a `search` or `context` tool's result is a genuinely blind answer
+/// on a number this corpus could not index — the case `find_value` exists
+/// for. `context` renders the identical banner through the same
+/// `Search::warning`/`::evidence` path `search` does (`tools.rs`'s `context`
+/// pushes `found.warning()` verbatim), so a model that reached for `context`
+/// instead of `search` on a numeric question gets the same automatic scan.
 pub fn should_auto_scan(tool_name: &str, ok: bool, text: &str) -> bool {
-    tool_name == "search" && ok && text.contains(BLIND_BANNER) && text.contains(SCAN_HINT)
+    (tool_name == "search" || tool_name == "context")
+        && ok
+        && text.contains(BLIND_BANNER)
+        && text.contains(SCAN_HINT)
 }
 
 /// The numeric words of a query, in the same terms `eg-retrieve`'s own
@@ -87,7 +94,11 @@ mod tests {
                      `workbooks` says what is actually indexed. A number can be in a \
                      cell and in no index — scan the cells (`find_value`, `eg where`).";
         assert!(should_auto_scan("search", true, text));
-        assert!(!should_auto_scan("context", true, text), "wrong tool");
+        assert!(
+            should_auto_scan("context", true, text),
+            "same banner, same fix"
+        );
+        assert!(!should_auto_scan("query_table", true, text), "wrong tool");
         assert!(!should_auto_scan("search", false, text), "not ok");
         assert!(
             !should_auto_scan("search", true, "NOTHING MATCHED."),

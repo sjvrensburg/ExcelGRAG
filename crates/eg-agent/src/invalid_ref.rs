@@ -74,14 +74,19 @@ pub fn should_auto_correct(ok: bool, refused: bool, text: &str) -> bool {
 /// scope its correction to. `None` when the citation named no sheet at all
 /// — `tables` unscoped still shows every table in the workbook, which is
 /// still a correction, just a wider one.
+///
+/// Goes through `eg_model::parse_a1` rather than a bare `split_once('!')` —
+/// a quoted sheet name escapes an embedded apostrophe by doubling it
+/// (`'Bob''s Sheet'!A1`), and a naive trim of the outer quote characters
+/// leaves that doubled quote in place, scoping the correction to a sheet
+/// name that does not exist.
 fn named_sheet(args: &Value) -> Option<String> {
     let citation = args
         .get("citation")
         .or_else(|| args.get("table"))
         .and_then(Value::as_str)?;
-    let (sheet, _rest) = citation.split_once('!')?;
-    let trimmed = sheet.trim().trim_matches(['\'', '"']);
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
+    let sheet = eg_model::parse_a1(citation).ok()?.sheet_name?;
+    (!sheet.is_empty()).then_some(sheet)
 }
 
 /// The corrective tool to run, and the arguments to run it with, for a call
@@ -169,6 +174,14 @@ mod tests {
         let (tool, correction_args) = correction("precedents", &args, Gate::Structural);
         assert_eq!(tool, "tables");
         assert_eq!(correction_args["sheet"], json!("Sales"));
+    }
+
+    #[test]
+    fn a_quoted_sheet_name_with_an_escaped_apostrophe_is_unescaped() {
+        let args = json!({ "citation": "'Bob''s Sheet'!Z1:AA9" });
+        let (tool, correction_args) = correction("precedents", &args, Gate::Structural);
+        assert_eq!(tool, "tables");
+        assert_eq!(correction_args["sheet"], json!("Bob's Sheet"));
     }
 
     #[test]

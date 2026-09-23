@@ -11,6 +11,7 @@ description = "An agent harness over an ExcelGRAG corpus: a model drives the eg-
 # Not workspace-aliased, matching eg-cli/eg-gui's convention for this
 # downstream, non-pipeline crate.
 eg-mcp = { path = "../eg-mcp" }
+eg-model.workspace = true
 
 anyhow.workspace = true
 clap.workspace = true
@@ -28,7 +29,6 @@ name = "eg-agent"
 path = "src/main.rs"
 
 [dev-dependencies]
-eg-model.workspace = true
 eg-graph.workspace = true
 eg-index.workspace = true
 tempfile = "3"

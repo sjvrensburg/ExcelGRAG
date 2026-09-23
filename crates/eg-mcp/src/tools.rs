@@ -1335,7 +1335,8 @@ fn table_at(loaded: &eg_ingest::Loaded, citation: &str) -> Result<Table, String>
         }
     }
     Err(format!(
-        "{citation} is not a table of this workbook — `tables` lists the ranges that are"
+        "{STRUCTURAL_GATE_PREFIX}{citation} is not a table of this workbook — `tables` lists \
+         the ranges that are"
     ))
 }
 

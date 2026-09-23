@@ -748,21 +748,23 @@ impl RegionIndex {
         let Some(entries) = self.by_sheet.get(&range.sheet) else {
             return RegionFit::None;
         };
+        let mut inside: Option<NodeIndex> = None;
         let mut overlap: Option<NodeIndex> = None;
         for &(candidate, idx) in entries {
             if candidate == range {
                 return RegionFit::Exact(idx);
             }
-            if candidate.contains_range(&range) {
-                return RegionFit::Inside(idx);
+            if inside.is_none() && candidate.contains_range(&range) {
+                inside = Some(idx);
             }
             if overlap.is_none() && candidate.intersects(&range) {
                 overlap = Some(idx);
             }
         }
-        match overlap {
-            Some(idx) => RegionFit::Overlaps(idx),
-            None => RegionFit::None,
+        match (inside, overlap) {
+            (Some(idx), _) => RegionFit::Inside(idx),
+            (None, Some(idx)) => RegionFit::Overlaps(idx),
+            (None, None) => RegionFit::None,
         }
     }
 }
