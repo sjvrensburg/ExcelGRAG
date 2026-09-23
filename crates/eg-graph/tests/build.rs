@@ -108,9 +108,30 @@ fn region_index_classifies_ranges_against_built_structure() {
         .find(|n| n.kind() == NodeKind::Column && n.label() == "Q1")
         .and_then(Node::range)
         .expect("Q1 is a column of the region");
+    // The column's own range is indexed as a node in its own right, so
+    // querying it exactly is `Exact`, not `Inside` — `Exact` beats `Inside`
+    // even though the region also contains it.
     match index.fit(column) {
+        RegionFit::Exact(_) => {}
+        other => panic!("expected Exact for the column's own range, got {other:?}"),
+    }
+
+    // A genuine sub-range of the column — one row of it — is `Inside` the
+    // column, not `Exact`, since no indexed node has exactly that range.
+    assert!(
+        column.bottom > column.top,
+        "Q1 needs at least two rows for this to be a strict sub-range"
+    );
+    let partial_column = RangeRef::new(
+        column.sheet,
+        column.top,
+        column.left,
+        column.top,
+        column.right,
+    );
+    match index.fit(partial_column) {
         RegionFit::Inside(_) => {}
-        other => panic!("expected Inside for a column within its region, got {other:?}"),
+        other => panic!("expected Inside for a sub-range of the column, got {other:?}"),
     }
 
     // A range spanning both the row-label column and Q1 overlaps two
