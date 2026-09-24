@@ -289,7 +289,15 @@ above it.
   scripted-model tests in `tests/scripted.rs` prove the loop's contract with
   no model at all. When running against a local model server, stop **your
   own** server by pid — `pkill llama-server` once took down the user's
-  systemd model services alongside it.
+  systemd model services alongside it. **Any kill that matches by name is
+  the same mistake**: `kill $(pgrep -f llama-server)`, `killall`, `pkill -f`.
+  On 2026-09-22 that exact `pgrep` form, run by a session that had read this
+  paragraph, took down the box's resident model servers for ~20 h and failed
+  every Hermes cron job the next morning. Capture the pid when you start the
+  server (`llama-server … & SERVER_PID=$!`) and `kill "$SERVER_PID"`; if you
+  lost it, find the one listening on *your* port (`ss -ltnp 'sport = :8080'`)
+  and kill that pid alone. Every other `llama-server` on this machine belongs
+  to a systemd unit and is not yours to stop.
 
 ## Invariants worth not breaking
 
