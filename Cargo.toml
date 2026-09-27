@@ -92,7 +92,8 @@ lto = "thin"
 codegen-units = 1
 
 # Vendored calamine source carrying the reader fixes listed below, plus
-# defined-name scope preservation, ODS error cells, and correct XLS XTI lookup.
+# defined-name scope preservation, ODS error cells, correct XLS XTI lookup, and
+# XLS references into other workbooks kept out of this one.
 #
 #   tafia/calamine#712 (branch xlsb-shared-formulas, stacked on #715) — XLSB/XLS
 #     shared and array formulas, and the transposed `>`/`>=` operators. Without

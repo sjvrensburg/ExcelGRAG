@@ -1029,3 +1029,52 @@ a sheet that used to return its other formulas returned none, and `eg-ingest`
 drops a sheet's formulas entirely on an error, as issue 13 describes. A
 definition that fails is now logged with `debug!` and costs only its own
 members, which is what the `.xls` reader already did.
+
+## 16. An `.xls` reference into another workbook is resolved against this one
+
+**Affects:** `.xls` (BIFF8). Pre-existing upstream, in `master` and in every
+open branch; the `.xls` half of issue 7. **Not reported upstream yet.**
+**Fixed** in `vendor/calamine`.
+
+An XTI names a supporting book (`isup_book`) and a tab *of that book*. The
+reader kept only the tab and looked it up among this workbook's sheets, so a
+reference into a linked workbook named whichever of our sheets sat at the same
+position. As with issue 7, nothing about the result looks wrong: it names a
+real sheet, and the graph records a real dependency on it.
+
+calamine's own `OOM_alloc.xls` has three `SupBook` records, this workbook and
+two linked ones, and four of its fourteen XTIs point into the linked ones. Tab
+1 of a linked book came back as our `Data` and tab 2 as our `EIM New Deals`:
+
+```
+'WE 2-15 EOL Data'!B6
+read as     Data!S9+Data!S10+-'EIM New Deals'!S9-'EIM New Deals'!S10
+SheetJS     'Thrusday 02-15-01'!S9+'Thrusday 02-15-01'!S10+-'Thursday 02-08-01'!S9-…
+now         '[2]Thrusday 02-15-01'!S9+'[2]Thrusday 02-15-01'!S10+-'[2]Thursday 02-08-01'!S9-…
+```
+
+`eg check` on that file had 67 formulas disagreeing with their stored values,
+every one of them a reference into a linked workbook, and 12 more agreeing by
+coincidence. Now none disagree, and those 79 are reported as references into
+a workbook that is not open.
+
+### The fix
+
+Unlike XLSB, a BIFF8 `SupBook` for another workbook records that workbook's
+sheet names, so a reference into it can be written as Excel stores one in
+`.xlsx`: the book's index in brackets, then the sheet, quoted as one name —
+`'[2]Thrusday 02-15-01'!S9`, and `'[2]Jan:Mar'!A1` for a span. A tab whose
+name the record did not keep is written `[2]#Sheet5`, as issue 7 does. An
+add-in or DDE/OLE book, or an index with no `SupBook` behind it, is `#REF`.
+A workbook with no `SupBook` records keeps the old behaviour, every reference
+being local. Defined names resolve their sheet the same way.
+
+Every one of the file's 704 formulas now matches SheetJS, apart from the
+book index SheetJS leaves out. `eg-model` already reads the bracket as a
+workbook qualifier, so the graph lifts these references onto two
+`ExternalWorkbook` nodes instead of onto our own sheets; before, it found no
+external references at all. `crates/eg-graph/tests/external.rs` holds that
+against the vendored fixture, and the vendored `xls.rs` has unit tests for the
+`SupBook` layouts, a sheet name split across a `Continue` record, and each way
+an XTI can resolve. No other `.xls` in calamine's suite or here checks any
+differently.
