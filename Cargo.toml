@@ -94,18 +94,19 @@ codegen-units = 1
 # Vendored calamine source carrying the reader fixes listed below, plus
 # defined-name scope preservation, ODS error cells, and correct XLS XTI lookup.
 #
-#   tafia/calamine#712 (branch xlsb-shared-formulas) — XLSB/XLS shared and array
-#     formulas, and the transposed `>`/`>=` operators. Without it 70% of the
-#     formulas in a real XLSB workbook are silently lost.
+#   tafia/calamine#712 (branch xlsb-shared-formulas, stacked on #715) — XLSB/XLS
+#     shared and array formulas, and the transposed `>`/`>=` operators. Without
+#     it 70% of the formulas in a real XLSB workbook are silently lost. Also
+#     `.xls`'s own swapped relativity flags and 3-D reference columns.
 #   tafia/calamine#713 (branch quote-sheet-names) — a sheet name needing quotes
 #     is written bare, so `'Q3 SALES'!A1` reads as a sheet called `SALES`.
-#   branch xlsb-relative-columns, not yet submitted — a reference's relativity
+#   tafia/calamine#715 (branch xlsb-relative-columns) — a reference's relativity
 #     flags are read as part of its column, and the two flags are the wrong way
 #     round. Together they misread the references of most filled formulas.
-#   branch xlsb-formula-error-cells, not yet submitted — a formula cell whose
+#   tafia/calamine#716 (branch xlsb-formula-error-cells) — a formula cell whose
 #     cached value is an error is skipped, so the cell is absent rather than
 #     merely valueless.
-#   branch xlsb-external-supbooks, not yet submitted — a reference into another
+#   tafia/calamine#717 (branch xlsb-external-supbooks) — a reference into another
 #     workbook is resolved against this one's sheets, naming a real sheet and
 #     recording a real dependency on the wrong one.
 #

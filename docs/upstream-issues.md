@@ -26,7 +26,9 @@ by reading the generated demo workbook in more than one format, are in the
 vendored reader; they are
 reported as [#719](https://github.com/tafia/calamine/issues/719) and
 [#720](https://github.com/tafia/calamine/issues/720), each with a reproduction
-against the committed demo fixture.
+against the committed demo fixture. Issues 14 and 15 were found by the upstream
+review of #712. Issue 14 is the `.xls` half of issue 5, so #712 was rebased onto
+#715 and now carries both; issue 15 is a fix to #712's own code.
 
 Every submission discloses that it was written by AI.
 
@@ -222,10 +224,11 @@ produced a wrong answer before it was pinned down:
   with **single-byte columns**. Reading it as the wider `Ref8U` yields plausible
   rows and nonsense columns, so nothing matches and every member silently stays
   unresolved. The formula begins at offset 8 for `ShrFmla` and 12 for `Array`.
-- `PtgRefN` is 4 bytes in BIFF8 but 3 before it, and the two layouts **swap the
-  relative-flag bits**: BIFF8 uses `fColRel = 0x8000` and `fRwRel = 0x4000` on
-  the column field, while BIFF2-5 uses `fRwRel = 0x8000` and `fColRel = 0x4000`
-  on the row field.
+- `PtgRefN` is 4 bytes in BIFF8 but 3 before it, and the two layouts keep the
+  relative-flag bits in **different fields**: BIFF8 on the column field, with
+  `fColRel = 0x4000` and `fRwRel = 0x8000`, and BIFF2-5 on the row field, with
+  `fRwRel = 0x8000` and `fColRel = 0x4000`. This bullet first gave the BIFF8
+  bits the other way round, and the code followed it; see issue 14.
 - `parse_dimensions` cannot be reused for these ranges. It accepts only the
   10- and 14-byte `Dimensions` record and returns an error otherwise — an error
   that propagates out of the sheet read and drops every formula on the sheet.
@@ -397,8 +400,9 @@ that order: the flags were being taken as part of the column, and once they were
 not, they turned out to mean the opposite of what the reader believed.
 
 MS-XLSB orders the field column-first, so `0x4000` marks the column relative and
-`0x8000` the row — the reverse of the BIFF8 layout the `.xls` reader documents.
-Same two bits, different format.
+`0x8000` the row, the same layout as BIFF8's `ColRelU`. This section first called
+it the reverse of the BIFF8 layout the `.xls` reader documents; the `.xls` reader
+had the same swap, which is issue 14.
 
 ### 5a. The flags are read as part of the column
 
@@ -958,3 +962,70 @@ calamine's own tests still pass.
 ### The fix
 
 `FTAB_ARGC[165]` (`"MMULT"`) changes from `1` to `2`. One line.
+
+## 14. `.xls` reads the relativity flags the wrong way round too
+
+**Affects:** `.xls` (BIFF8). Pre-existing upstream in `PtgRef` and `PtgArea`,
+and copied from there into #712's `PtgRefN`/`PtgAreaN` decoding.
+
+**Found by** the upstream review of #712. **Fixed** on #712, which was rebased
+onto #715 so that both readers change together, and in `vendor/calamine`.
+
+A BIFF8 `ColRelU` is laid out exactly like XLSB's `ColRelShort`: 14 bits of
+column, then `0x4000` marking the column relative and `0x8000` the row. Issue 5
+fixed XLSB on the belief that BIFF8 was the other way round, and the `.xls`
+notes under issue 3 said the same. Both were wrong, and the `.xls` reader read
+the flags swapped.
+
+For `PtgRef` and `PtgArea` that only moves the `$` signs. For the N-class tokens
+it decides whether a stored number is an offset or an index, so it reads the
+wrong cell. Nothing caught it, for the same reason as issue 5: fully relative
+and fully absolute references read the same either way, and neither the Excel
+fixtures nor the demo workbook has a mixed one.
+
+`tests/fixtures/vendor/relative_references.xls` has them. LibreOffice wrote it
+from the `.xlsx` beside it, whose formula text openpyxl stored as written:
+
+```
+written                       read before
+$A2+B$1                       A$2+$B1
+$A2*B$1+C2    (shared)        H$1*$IQ2+C2
+SUM(A$1:$B2)  (shared)        SUM($IO2:J$1)
+```
+
+After the fix all 18 formulas read as written, which SheetJS (through
+`sheet-oracle`) confirms from the same bytes. `eg check` on that file goes from
+6 of 18 agreeing with LibreOffice's cached values to all 18. The demo workbook,
+the reference workbook and the community XLSB check exactly as before.
+`xls_mixed_references_read_as_written` in the parity suite holds it.
+
+Two smaller defects were fixed alongside:
+
+- **A relative offset did not wrap.** `RgceLocRel` wraps round the sheet
+  (modulo 0x10000 rows and 0x100 columns in BIFF8, 0x4000 rows before it).
+  Unwrapped, one row up from row 0 gave a row of `u32::MAX`, and adding one to
+  print it panicked in a debug build.
+- **`PtgRef3d` printed its row as a `u16` plus one**, which overflows on the
+  last row of a sheet. It now prints through the same `push_a1` as every other
+  reference.
+
+The upstream fix also covers what issue 9 fixed here in the 3-D tokens: column
+masking, flag order, and resolving the sheet through the XTI table. It does not
+write both ends of a 3-D span (`Jan:Mar!`), which remains a local fix. One
+consequence upstream: #713's test
+`sheet_name_with_a_space_is_quoted_in_a_formula` pins the old `PtgRef3d`
+decoding (`'EIM New Deals'!AK$12` for what is `J12`), so it fails once #712 and
+#713 are both merged, and needs changing to check only the quoting.
+
+## 15. One undecodable shared definition loses every formula on an XLSB sheet
+
+**Affects:** `.xlsb`, in #712's own code. **Found by** the upstream review of
+#712. **Fixed** on #712 and in `vendor/calamine`.
+
+Resolving a member of a shared formula decoded the group's definition with `?`,
+so one definition the parser could not read failed `worksheet_formula` for the
+whole sheet. Before #712 the members came back empty, so this was a regression:
+a sheet that used to return its other formulas returned none, and `eg-ingest`
+drops a sheet's formulas entirely on an error, as issue 13 describes. A
+definition that fails is now logged with `debug!` and costs only its own
+members, which is what the `.xls` reader already did.

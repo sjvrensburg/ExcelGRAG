@@ -778,10 +778,7 @@ fn wide_str<'a>(buf: &'a [u8], str_len: &mut usize) -> Result<Cow<'a, str>, Xlsb
 ///
 /// The low 14 bits are the column — XLSB sheets have 16,384 of them — and the
 /// top two are relativity flags. MS-XLSB orders them column-first: `0x4000`
-/// marks the column relative and `0x8000` the row, which is the reverse of the
-/// BIFF8 layout the `.xls` reader uses. Same two bits, different format, and
-/// nothing in either reader's output makes the difference visible until a
-/// number comes out wrong.
+/// marks the column relative and `0x8000` the row, as BIFF8's `ColRelU` does.
 ///
 /// Reading the field whole is not a display bug but a wrong reference: a
 /// relative column 2 is stored as `0x4002`, which taken as a column index is
@@ -820,8 +817,35 @@ fn xti_sheet(book: i32, tab: i32, this_book: Option<usize>, sheets: &[(String, S
     }
 }
 
-/// Formula parsing
+/// Write the sheet an `ixti` names, or the marker Excel writes when nothing
+/// stands behind it.
 ///
+/// `ixti` indexes the EXTERNSHEET table, whose entries this reader has already
+/// resolved to names. A truncated or malformed one leaves a formula naming an
+/// entry that is not there; indexing straight into the list panicked, and a
+/// panic here takes down the load of the whole workbook — and, through a
+/// corpus build, every other workbook in the run — over one bad formula. The
+/// BIFF reader has always written `#REF` for this, unquoted because it is an
+/// error marker and not a name.
+fn push_xti_sheet(sheets: &[String], ixti: u16, formula: &mut String) {
+    match sheets.get(ixti as usize) {
+        Some(sheet) => push_sheet_name(sheet, formula),
+        None => formula.push_str("#REF"),
+    }
+}
+
+/// Refuse a token whose operand runs past the end of the record.
+fn check_len(found: usize, expected: usize, typ: &'static str) -> Result<(), XlsbError> {
+    if found < expected {
+        return Err(XlsbError::Len {
+            typ,
+            expected,
+            found,
+        });
+    }
+    Ok(())
+}
+
 /// Decode a 6-byte `Loc` reference whose relative components are offsets.
 ///
 /// Returns `(row, col, row_is_relative, col_is_relative)` with absolute
@@ -911,6 +935,8 @@ pub(crate) fn shared_formula_anchor_row(rgce: &[u8]) -> Option<u32> {
     (rgce.len() >= 5 && rgce[0] == 0x01).then(|| read_u32(&rgce[1..5]))
 }
 
+/// Formula parsing
+///
 /// [MS-XLSB 2.2.2]
 /// [MS-XLSB 2.5.97]
 ///
@@ -920,35 +946,6 @@ pub(crate) fn shared_formula_anchor_row(rgce: &[u8]) -> Option<u32> {
 /// It is required because the `N`-class reference tokens `PtgRefN` and
 /// `PtgAreaN` — the ones shared and array formulas are built from — store
 /// *offsets from the cell being evaluated* rather than absolute positions.
-/// Write the sheet an `ixti` names, or the marker Excel writes when nothing
-/// stands behind it.
-///
-/// `ixti` indexes the EXTERNSHEET table, whose entries this reader has already
-/// resolved to names. A truncated or malformed one leaves a formula naming an
-/// entry that is not there; indexing straight into the list panicked, and a
-/// panic here takes down the load of the whole workbook — and, through a
-/// corpus build, every other workbook in the run — over one bad formula. The
-/// BIFF reader has always written `#REF` for this, unquoted because it is an
-/// error marker and not a name.
-fn push_xti_sheet(sheets: &[String], ixti: u16, formula: &mut String) {
-    match sheets.get(ixti as usize) {
-        Some(sheet) => push_sheet_name(sheet, formula),
-        None => formula.push_str("#REF"),
-    }
-}
-
-/// Refuse a token whose operand runs past the end of the record.
-fn check_len(found: usize, expected: usize, typ: &'static str) -> Result<(), XlsbError> {
-    if found < expected {
-        return Err(XlsbError::Len {
-            typ,
-            expected,
-            found,
-        });
-    }
-    Ok(())
-}
-
 fn parse_formula(
     mut rgce: &[u8],
     sheets: &[String],

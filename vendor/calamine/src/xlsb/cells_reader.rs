@@ -5,6 +5,8 @@
 use std::collections::HashMap;
 use std::io::{Read, Seek};
 
+use log::debug;
+
 use crate::{
     datatype::DataRef,
     formats::{format_excel_f64_ref, CellFormat},
@@ -257,10 +259,14 @@ where
             }) else {
                 continue;
             };
+            // A definition that cannot be decoded costs its members, not the
+            // sheet: before members were resolved they came back empty, and
+            // failing here would lose every other formula along with them.
             let rgce = &definitions[index].1;
-            let formula = parse_formula(rgce, self.extern_sheets, self.metadata_names, pos)?;
-            if !formula.is_empty() {
-                cells.push(Cell::new(pos, formula));
+            match parse_formula(rgce, self.extern_sheets, self.metadata_names, pos) {
+                Ok(formula) if !formula.is_empty() => cells.push(Cell::new(pos, formula)),
+                Ok(_) => {}
+                Err(e) => debug!("{e}"),
             }
         }
 
