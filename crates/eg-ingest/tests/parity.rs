@@ -229,6 +229,44 @@ fn binary_formats_decode_comparison_operators_correctly() {
 }
 
 #[test]
+fn xls_mixed_references_read_as_written() {
+    // A reference absolute in one axis and relative in the other is the only
+    // kind that tells the two relativity flags apart, and none of the Excel
+    // fixtures has one. This pair has every mix of `$` in plain, area and 3-D
+    // references, and two filled-down columns stored as shared formulas, where
+    // the flags decide which cell is read rather than where the `$` goes.
+    //
+    // Formulas only: the .xlsx was written by openpyxl, which stores formula
+    // text but no cached values, so its values are all empty.
+    let xlsx = load(vendor("relative_references.xlsx")).expect("load xlsx");
+    let xls = load(vendor("relative_references.xls")).expect("load xls");
+    let formulas = |loaded: &eg_ingest::Loaded| {
+        let mut all = Vec::new();
+        for sheet in &loaded.workbook.sheets {
+            for (at, cell) in sheet.iter() {
+                if let Some(f) = &cell.formula {
+                    all.push((sheet.name.clone(), at.to_a1(), f.clone()));
+                }
+            }
+        }
+        all.sort();
+        all
+    };
+    let expected = formulas(&xlsx);
+    assert_eq!(expected.len(), 18, "the fixture's formula count");
+    assert_eq!(formulas(&xls), expected);
+
+    let sheet = xls.workbook.sheet_by_name("Sheet1").expect("Sheet1");
+    let formula = |row, col| sheet.get(row, col).and_then(|c| c.formula.as_deref());
+    assert_eq!(formula(0, 5), Some("$A2+B$1"), "F1");
+    assert_eq!(
+        formula(6, 7),
+        Some("$A7*B$1+C7"),
+        "H7, a shared-formula member"
+    );
+}
+
+#[test]
 fn xlsb_actually_yields_formulas() {
     // Guards against a regression where XLSB silently returns no formulas at
     // all: every assertion above would still pass if both sides had none.

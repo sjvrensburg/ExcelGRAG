@@ -1484,11 +1484,24 @@ fn sign_extend(v: u32, bits: u32) -> i32 {
     ((v << shift) as i32) >> shift
 }
 
+/// Split a BIFF8 `ColRelU` column field into `(col, col_relative, row_relative)`.
+///
+/// The low 14 bits are the column and the top two are relativity flags, column
+/// first: `0x4000` marks the column relative and `0x8000` the row. BIFF2-5
+/// keeps the same two flags in the row field instead.
+fn read_col_rel_u(field: u16) -> (u32, bool, bool) {
+    (
+        u32::from(field & 0x3FFF),
+        field & 0x4000 != 0,
+        field & 0x8000 != 0,
+    )
+}
+
 /// Decode an `N`-class reference operand.
 ///
 /// Returns `(row, col, row_is_relative, col_is_relative, bytes_consumed)` with
 /// absolute zero-based indices. Relative components are stored as signed offsets
-/// from the cell that owns the formula: 16-bit row and 14-bit column in BIFF8,
+/// from the cell that owns the formula: 16-bit row and 8-bit column in BIFF8,
 /// 14-bit row and 8-bit column before it.
 fn read_ref_n(
     rgce: &[u8],
@@ -1517,22 +1530,18 @@ fn read_ref_n(
             8,
         )
     } else {
-        // BIFF8: rw(2) is the full row. grbitCol(2) is an RgceLocRel, whose
+        // BIFF8: rw(2) is the full row. grbitCol(2) is a ColRelNegU, whose
         // column occupies only the low **8** bits -- this format has 256
         // columns, not 16384 -- followed by six unused bits, then
-        // fColRel = 0x8000 and fRwRel = 0x4000. Masking 14 bits here instead
+        // fColRel = 0x4000 and fRwRel = 0x8000. Masking 14 bits here instead
         // would read a negative column offset such as 0xFF as +255.
-        let col = read_u16(&rgce[2..4]) as u32;
-        (
-            read_u16(rgce) as u32,
-            col & 0x00FF,
-            col & 0x4000 != 0,
-            col & 0x8000 != 0,
-            16,
-            8,
-        )
+        let (col, col_rel, row_rel) = read_col_rel_u(read_u16(&rgce[2..4]));
+        (read_u16(rgce) as u32, col & 0x00FF, row_rel, col_rel, 16, 8)
     };
 
+    // An offset that runs off the sheet wraps round it, as RgceLocRel
+    // specifies: modulo 0x10000 rows and 0x100 columns in BIFF8, and 0x4000
+    // rows before it. The field widths are exactly those moduli.
     let row = if row_rel {
         (anchor.0 as i32).wrapping_add(sign_extend(row_field, row_bits)) as u32
     } else {
@@ -1544,7 +1553,13 @@ fn read_ref_n(
         col_field
     };
 
-    Ok((row, col, row_rel, col_rel, need))
+    Ok((
+        row & ((1 << row_bits) - 1),
+        col & ((1 << col_bits) - 1),
+        row_rel,
+        col_rel,
+        need,
+    ))
 }
 
 /// Decode a `PtgAreaN` operand as its two corners.
@@ -1686,14 +1701,7 @@ fn parse_defined_names(rgce: &[u8], biff: Biff) -> Result<(Option<usize>, String
     };
     Ok(res)
 }
-/// Formula parsing
-///
-/// `CellParsedFormula` [MS-XLS 2.5.198.3]
-///
-/// `anchor` is the cell owning the formula, as a zero-based `(row, col)`. The
-/// `N`-class tokens `PtgRefN` and `PtgAreaN`, which shared and array formulas
-/// are built from, store offsets from the evaluating cell rather than absolute
-/// positions, so they cannot be decoded without it.
+
 /// Write the sheet, or sheet span, that an `ixti` names.
 ///
 /// `ixti` indexes the EXTERNSHEET (XTI) table, *not* the sheet tabs. The two
@@ -1724,6 +1732,14 @@ fn push_xti_sheet(xtis: &[Xti], sheets: &[String], ixti: u16, formula: &mut Stri
     }
 }
 
+/// Formula parsing
+///
+/// `CellParsedFormula` [MS-XLS 2.5.198.3]
+///
+/// `anchor` is the cell owning the formula, as a zero-based `(row, col)`. The
+/// `N`-class tokens `PtgRefN` and `PtgAreaN`, which shared and array formulas
+/// are built from, store offsets from the evaluating cell rather than absolute
+/// positions, so they cannot be decoded without it.
 fn parse_formula(
     mut rgce: &[u8],
     sheets: &[String],
@@ -1744,21 +1760,14 @@ fn parse_formula(
         match ptg {
             0x3a | 0x5a | 0x7a => {
                 // PtgRef3d
+                // ixti(2) + rw(2) + ColRelU(2)
                 let ixti = read_u16(&rgce[0..2]);
-                let rowu = read_u16(&rgce[2..]);
-                let colu = read_u16(&rgce[4..]);
+                let row = read_u16(&rgce[2..4]) as u32;
+                let (col, col_rel, row_rel) = read_col_rel_u(read_u16(&rgce[4..6]));
                 stack.push(formula.len());
                 push_xti_sheet(xtis, sheets, ixti, &mut formula);
                 formula.push('!');
-                let col = colu & 0x3fff;
-                if colu & 0x4000 == 0 {
-                    formula.push('$');
-                }
-                push_column(col as u32, &mut formula);
-                if colu & 0x8000 == 0 {
-                    formula.push('$');
-                }
-                write!(&mut formula, "{}", rowu + 1).unwrap();
+                push_a1(&mut formula, row, col, row_rel, col_rel);
                 rgce = &rgce[6..];
             }
             0x3b | 0x5b | 0x7b => {
@@ -1767,28 +1776,17 @@ fn parse_formula(
                 stack.push(formula.len());
                 push_xti_sheet(xtis, sheets, ixti, &mut formula);
                 formula.push('!');
+                // ixti(2) + rwFirst(2) + rwLast(2) + colFirst(2) + colLast(2)
                 let first_row = read_u16(&rgce[2..4]);
                 let last_row = read_u16(&rgce[4..6]);
                 let first_col = read_u16(&rgce[6..8]);
                 let last_col = read_u16(&rgce[8..10]);
-                if first_col & 0x4000 == 0 {
-                    formula.push('$');
-                }
-                push_column((first_col & 0x3fff) as u32, &mut formula);
-                if first_col & 0x8000 == 0 {
-                    formula.push('$');
-                }
-                write!(&mut formula, "{}", first_row as u32 + 1).unwrap();
+                let (c1, c1_rel, r1_rel) = read_col_rel_u(first_col);
+                push_a1(&mut formula, first_row as u32, c1, r1_rel, c1_rel);
                 if first_row != last_row || first_col != last_col {
+                    let (c2, c2_rel, r2_rel) = read_col_rel_u(last_col);
                     formula.push(':');
-                    if last_col & 0x4000 == 0 {
-                        formula.push('$');
-                    }
-                    push_column((last_col & 0x3fff) as u32, &mut formula);
-                    if last_col & 0x8000 == 0 {
-                        formula.push('$');
-                    }
-                    write!(&mut formula, "{}", last_row as u32 + 1).unwrap();
+                    push_a1(&mut formula, last_row as u32, c2, r2_rel, c2_rel);
                 }
                 rgce = &rgce[10..];
             }
@@ -2053,16 +2051,10 @@ fn parse_formula(
                     formula.push_str(&format!("{row}"));
                     rgce = &rgce[3..];
                 } else {
-                    let row = read_u16(rgce) + 1;
-                    let col = read_u16(&[rgce[2], rgce[3] & 0x3F]);
-                    if rgce[3] & 0x80 != 0x80 {
-                        formula.push('$');
-                    }
-                    push_column(col as u32, &mut formula);
-                    if rgce[3] & 0x40 != 0x40 {
-                        formula.push('$');
-                    }
-                    formula.push_str(&format!("{row}"));
+                    // BIFF8 PtgRef: rw(2) + ColRelU(2)
+                    let row = read_u16(rgce) as u32;
+                    let (col, col_rel, row_rel) = read_col_rel_u(read_u16(&rgce[2..4]));
+                    push_a1(&mut formula, row, col, row_rel, col_rel);
                     rgce = &rgce[4..];
                 }
             }
@@ -2081,27 +2073,15 @@ fn parse_formula(
                     write!(&mut formula, "${row_last}").unwrap();
                     rgce = &rgce[6..];
                 } else {
-                    // columnFirst/columnLast are ColRelU: 14-bit column + fColRel/fRwRel flags.
-                    let col_first = read_u16(&[rgce[4], rgce[5] & 0x3F]);
-                    let col_last = read_u16(&[rgce[6], rgce[7] & 0x3F]);
-                    let row_first = read_u16(&rgce[0..2]) as u32 + 1;
-                    let row_last = read_u16(&rgce[2..4]) as u32 + 1;
-                    if rgce[5] & 0x80 != 0x80 {
-                        formula.push('$');
-                    }
-                    push_column(col_first as u32, &mut formula);
-                    if rgce[5] & 0x40 != 0x40 {
-                        formula.push('$');
-                    }
-                    write!(&mut formula, "{row_first}:").unwrap();
-                    if rgce[7] & 0x80 != 0x80 {
-                        formula.push('$');
-                    }
-                    push_column(col_last as u32, &mut formula);
-                    if rgce[7] & 0x40 != 0x40 {
-                        formula.push('$');
-                    }
-                    write!(&mut formula, "{row_last}").unwrap();
+                    // BIFF8 PtgArea: rwFirst(2) + rwLast(2) + colFirst(2) + colLast(2),
+                    // each column a ColRelU carrying the relativity of its corner.
+                    let row_first = read_u16(&rgce[0..2]) as u32;
+                    let row_last = read_u16(&rgce[2..4]) as u32;
+                    let (col_first, c1_rel, r1_rel) = read_col_rel_u(read_u16(&rgce[4..6]));
+                    let (col_last, c2_rel, r2_rel) = read_col_rel_u(read_u16(&rgce[6..8]));
+                    push_a1(&mut formula, row_first, col_first, r1_rel, c1_rel);
+                    formula.push(':');
+                    push_a1(&mut formula, row_last, col_last, r2_rel, c2_rel);
                     rgce = &rgce[8..];
                 }
             }
@@ -2333,10 +2313,10 @@ mod formula_tests {
         let mut v = vec![ptg];
         v.extend_from_slice(&(row as u16).to_le_bytes());
         let mut c = (col as u8) as u16;
-        if row_rel {
+        if col_rel {
             c |= 0x4000;
         }
-        if col_rel {
+        if row_rel {
             c |= 0x8000;
         }
         v.extend_from_slice(&c.to_le_bytes());
@@ -2401,6 +2381,52 @@ mod formula_tests {
         area.extend_from_slice(&(REL | 0x00F8).to_le_bytes()); // colFirst: -8
         area.extend_from_slice(&(REL | 0x00FF).to_le_bytes()); // colLast:  -1
         assert_eq!(parse(&area, (37, 9), Biff::Biff8), "B38:I38");
+    }
+
+    #[test]
+    fn biff8_relativity_flags_are_column_first() {
+        // Spelled out as bytes rather than built by a helper, so the test
+        // cannot share a mistake with the decoder: in a BIFF8 ColRelU,
+        // 0x4000 marks the column relative and 0x8000 the row.
+
+        // PtgRef to C2 (rw 1, col 2), once per flag combination.
+        let cases = [(0xC0, "C2"), (0x00, "$C$2"), (0x40, "C$2"), (0x80, "$C2")];
+        for (flags, want) in cases {
+            let t = [0x44, 0x01, 0x00, 0x02, flags];
+            assert_eq!(parse(&t, (0, 0), Biff::Biff8), want, "flags {flags:#04x}");
+        }
+
+        // PtgArea $A2:B$3, whose corners carry opposite flags.
+        let t = [0x25, 0x01, 0x00, 0x02, 0x00, 0x00, 0x80, 0x01, 0x40];
+        assert_eq!(parse(&t, (0, 0), Biff::Biff8), "$A2:B$3");
+
+        // PtgRefN for $A one row up (rw -1, column absolute, row relative),
+        // evaluated at C6. Read with the flags swapped this was `C$65536`.
+        let t = [0x4C, 0xFF, 0xFF, 0x00, 0x80];
+        assert_eq!(parse(&t, (5, 2), Biff::Biff8), "$A5");
+
+        // PtgRefN for B$1 (row absolute 0, column one left), evaluated at C6.
+        let t = [0x4C, 0x00, 0x00, 0xFF, 0x40];
+        assert_eq!(parse(&t, (5, 2), Biff::Biff8), "B$1");
+    }
+
+    #[test]
+    fn ptg_ref_n_offsets_wrap_round_the_sheet() {
+        // One row up and one column left of A1 is the sheet's last cell, not
+        // a row index of u32::MAX, which overflowed when printed.
+        let t = ref_n_biff8(0x4C, -1, -1, true, true);
+        assert_eq!(parse(&t, (0, 0), Biff::Biff8), "IV65536");
+
+        // And past the far edge, back to the first.
+        let t = ref_n_biff8(0x4C, 1, 1, true, true);
+        assert_eq!(parse(&t, (65535, 255), Biff::Biff8), "A1");
+
+        // BIFF2-5 sheets have 16,384 rows.
+        let rw: u16 = ((-1i16 as u16) & 0x3FFF) | 0x8000 | 0x4000;
+        let mut t = vec![0x4Cu8];
+        t.extend_from_slice(&rw.to_le_bytes());
+        t.push(0);
+        assert_eq!(parse(&t, (0, 2), Biff::Biff5), "C16384");
     }
 
     #[test]
