@@ -462,11 +462,36 @@ impl<RS: Read + Seek> Reader<RS> for Xls<RS> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Xti {
-    _isup_book: u16,
+    /// Index of the `SupBook` the tabs index into.
+    isup_book: u16,
     itab_first: i16,
     itab_last: i16,
+    /// What `isup_book` turned out to name, once every `SupBook` is read.
+    book: XtiBook,
+}
+
+/// The book an `Xti` points into.
+#[derive(Debug, Clone)]
+enum XtiBook {
+    /// This workbook: the tabs index our own sheets.
+    This,
+    /// Another workbook. Its sheets are written as a formula writes them, the
+    /// book's index in brackets before the name: `[1]Sheet1`.
+    External { first: String, last: String },
+    /// An add-in, a DDE or OLE link, or a book index nothing stands behind.
+    Unknown,
+}
+
+/// A supporting book, as its `SupBook` record declares it [MS-XLS 2.4.271].
+#[derive(Debug)]
+enum SupBook {
+    This,
+    /// Another workbook, with its sheet names as they were when this one was
+    /// saved.
+    External(Vec<String>),
+    Other,
 }
 
 impl<RS: Read + Seek> Xls<RS> {
@@ -489,6 +514,7 @@ impl<RS: Read + Seek> Xls<RS> {
         let mut strings = Vec::new();
         let mut defined_names = Vec::new();
         let mut xtis = Vec::new();
+        let mut sup_books = Vec::new();
         let mut formats = BTreeMap::new();
         let mut xfs = Vec::new();
         let mut biff = Biff::Biff8; // Binary Interchange File Format (BIFF) version
@@ -544,6 +570,8 @@ impl<RS: Read + Seek> Xls<RS> {
                     }
                     // Lbl (MS-XLS 2.4.150)
                     0x0018 => defined_names.push(parse_lbl(&r, &encoding, biff)?),
+                    // SupBook (MS-XLS 2.4.271)
+                    0x01AE => sup_books.push(parse_sup_book(&mut r, &encoding)),
                     // ExternSheet (MS-XLS 2.4.106)
                     0x0017 => xtis.extend(parse_extern_sheet(&r, biff)),
                     // SST (MS-XLS 2.4.265)
@@ -567,11 +595,15 @@ impl<RS: Read + Seek> Xls<RS> {
         {
             xtis = (0..sheet_names.len())
                 .map(|i| Xti {
-                    _isup_book: 0,
+                    isup_book: 0,
                     itab_first: i as i16,
                     itab_last: i as i16,
+                    book: XtiBook::This,
                 })
                 .collect();
+        }
+        for xti in &mut xtis {
+            xti.book = xti_book(&sup_books, xti);
         }
         self.formats = xfs
             .into_iter()
@@ -588,11 +620,14 @@ impl<RS: Read + Seek> Xls<RS> {
             .into_iter()
             .map(|(name, _, (i, mut f))| {
                 if let Some(i) = i {
-                    let sh = xtis
-                        .get(i)
-                        .and_then(|xti| sheet_names.get(xti.itab_first as usize))
-                        .map_or("#REF", |sh| &sh.1);
-                    f = format!("{sh}!{f}");
+                    let sh = xtis.get(i).and_then(|xti| match &xti.book {
+                        XtiBook::This => sheet_names
+                            .get(xti.itab_first as usize)
+                            .map(|sh| sh.1.as_str()),
+                        XtiBook::External { first, .. } => Some(first.as_str()),
+                        XtiBook::Unknown => None,
+                    });
+                    f = format!("{}!{f}", sh.unwrap_or("#REF"));
                 }
                 (name, f)
             })
@@ -926,15 +961,102 @@ fn parse_extern_sheet(r: &Record<'_>, biff: Biff) -> Vec<Xti> {
                 .chunks_exact(6)
                 .take(cxti)
                 .map(|xti| Xti {
-                    _isup_book: read_u16(&xti[..2]),
+                    isup_book: read_u16(&xti[..2]),
                     itab_first: read_i16(&xti[2..4]),
                     itab_last: read_i16(&xti[4..]),
+                    book: XtiBook::This,
                 })
                 .collect()
         }
         // BIFF5 and earlier: individual sheet name references; formula
         // tokens embed sheet indices directly, so no XTI table needed.
         Biff::Biff2 | Biff::Biff3 | Biff::Biff4 | Biff::Biff5 => Vec::new(),
+    }
+}
+
+/// `SupBook` [MS-XLS 2.4.271]
+///
+/// `ctab(2) cch(2)`, then for another workbook its path and the names of its
+/// `ctab` sheets. `cch` doubles as a marker: `0x0401` is this workbook and
+/// `0x3A01` an add-in; otherwise it is the length of the path. A record cut
+/// short keeps the names read so far, and the rest resolve as `#Sheet{n}`.
+fn parse_sup_book(r: &mut Record<'_>, encoding: &XlsEncoding) -> SupBook {
+    if r.data.len() < 4 {
+        return SupBook::Other;
+    }
+    let ctab = read_u16(r.data) as usize;
+    let cch = read_u16(&r.data[2..]);
+    match cch {
+        0x0401 => return SupBook::This,
+        0x0001..=0x00FF => {}
+        _ => return SupBook::Other,
+    }
+    r.data = &r.data[4..];
+
+    // Each string is a flag byte, whose low bit says the characters are two
+    // bytes wide, then the characters, which may run on into a Continue.
+    let read = |r: &mut Record<'_>, len: usize| -> Option<String> {
+        if r.data.is_empty() {
+            r.continue_record();
+        }
+        if r.data.is_empty() {
+            return None;
+        }
+        let high_byte = r.data[0] & 0x1 != 0;
+        r.data = &r.data[1..];
+        read_dbcs(encoding, len, r, high_byte).ok()
+    };
+    // The path: `virtPath`, an XLUnicodeStringNoCch. A formula writes the
+    // book's index, not its path, so only its length matters here.
+    let mut names = Vec::with_capacity(ctab);
+    if read(r, cch as usize).is_some() {
+        // Then `rgst`, one XLUnicodeString per sheet.
+        for _ in 0..ctab {
+            if r.data.is_empty() {
+                r.continue_record();
+            }
+            if r.data.len() < 2 {
+                break;
+            }
+            let len = read_u16(r.data) as usize;
+            r.data = &r.data[2..];
+            match read(r, len) {
+                Some(name) => names.push(name),
+                None => break,
+            }
+        }
+    }
+    SupBook::External(names)
+}
+
+/// Decide which book an `Xti` points into.
+///
+/// `isup_book` indexes the `SupBook` records and the tabs index the sheets
+/// *of that book*, so a tab means one of ours only when the book is this one.
+/// Resolving a tab of another workbook against our sheets names a real sheet
+/// of ours, on which a real dependency is then recorded: the sheet at the same
+/// position, which in a workbook linking to an earlier copy of itself holds
+/// something plausible and wrong. With no `SupBook` records at all, as before
+/// BIFF8, every reference is necessarily local.
+fn xti_book(sup_books: &[SupBook], xti: &Xti) -> XtiBook {
+    if sup_books.is_empty() {
+        return XtiBook::This;
+    }
+    match sup_books.get(xti.isup_book as usize) {
+        Some(SupBook::This) => XtiBook::This,
+        Some(SupBook::External(names)) if xti.itab_first >= 0 => {
+            let name = |tab: i16| match names.get(tab as usize) {
+                Some(name) => format!("[{}]{name}", xti.isup_book),
+                // The name was not recorded; say which sheet it was, as the
+                // XLSB reader does for a book that never records names.
+                None => format!("[{}]#Sheet{}", xti.isup_book, tab as i32 + 1),
+            };
+            XtiBook::External {
+                first: name(xti.itab_first),
+                last: name(xti.itab_last.max(xti.itab_first)),
+            }
+        }
+        _ => XtiBook::Unknown,
     }
 }
 
@@ -1714,8 +1836,26 @@ fn parse_defined_names(rgce: &[u8], biff: Biff) -> Result<(Option<usize>, String
 /// An XTI spanning tabs is a 3-D reference (`Jan:Dec!B2`), and both ends are
 /// written: which sheets a reference names is the whole of what a dependency
 /// edge is lifted onto.
+///
+/// A reference into another workbook is written in the form Excel stores it
+/// in, `'[1]Sheet 1'!A1`, one quoted name covering book and sheets alike.
 fn push_xti_sheet(xtis: &[Xti], sheets: &[String], ixti: u16, formula: &mut String) {
     let span = xtis.get(ixti as usize);
+    if let Some(Xti {
+        book: XtiBook::External { first, last },
+        ..
+    }) = span
+    {
+        let mut name = first.clone();
+        if last != first {
+            name.push(':');
+            // Only the book's first mention carries the brackets.
+            name.push_str(last.split_once(']').map_or(last.as_str(), |(_, s)| s));
+        }
+        push_sheet_name(&name, formula);
+        return;
+    }
+    let span = span.filter(|xti| matches!(xti.book, XtiBook::This));
     match span.and_then(|xti| sheets.get(xti.itab_first as usize)) {
         Some(first) => {
             push_sheet_name(first, formula);
@@ -2488,5 +2628,136 @@ mod formula_tests {
         ))));
         assert!(!is_shared_formula_member(&[]));
         assert!(!is_shared_formula_member(&[0x00, 0x00]));
+    }
+}
+
+#[cfg(test)]
+mod sup_book_tests {
+    use super::*;
+
+    fn encoding() -> XlsEncoding {
+        XlsEncoding::from_codepage(1200).expect("utf-16 codepage")
+    }
+
+    /// An XLUnicodeString with one-byte characters: `cch(2) flags(1) chars`.
+    fn string(s: &str) -> Vec<u8> {
+        let mut v = (s.len() as u16).to_le_bytes().to_vec();
+        v.push(0);
+        v.extend_from_slice(s.as_bytes());
+        v
+    }
+
+    /// A `SupBook` for another workbook: `ctab(2) cch(2)`, the path without
+    /// its `cch`, then each sheet name.
+    fn external(path: &str, sheets: &[&str]) -> Vec<u8> {
+        let mut v = (sheets.len() as u16).to_le_bytes().to_vec();
+        v.extend_from_slice(&string(path)[..]);
+        for sheet in sheets {
+            v.extend(string(sheet));
+        }
+        v
+    }
+
+    fn record<'a>(data: &'a [u8], cont: Vec<&'a [u8]>) -> Record<'a> {
+        Record {
+            typ: 0x01AE,
+            data,
+            cont,
+        }
+    }
+
+    fn xti(isup_book: u16, first: i16, last: i16, books: &[SupBook]) -> Xti {
+        let mut xti = Xti {
+            isup_book,
+            itab_first: first,
+            itab_last: last,
+            book: XtiBook::This,
+        };
+        xti.book = xti_book(books, &xti);
+        xti
+    }
+
+    fn sheet_text(xti: Xti, sheets: &[String]) -> String {
+        let mut f = String::new();
+        push_xti_sheet(&[xti], sheets, 0, &mut f);
+        f
+    }
+
+    #[test]
+    fn a_sup_book_is_this_workbook_another_or_neither() {
+        let this = [0x03, 0x00, 0x01, 0x04];
+        assert!(matches!(
+            parse_sup_book(&mut record(&this, vec![]), &encoding()),
+            SupBook::This
+        ));
+        let add_in = [0x01, 0x00, 0x01, 0x3A];
+        assert!(matches!(
+            parse_sup_book(&mut record(&add_in, vec![]), &encoding()),
+            SupBook::Other
+        ));
+
+        let data = external("Book2.xls", &["Jan", "Q3 Sales"]);
+        match parse_sup_book(&mut record(&data, vec![]), &encoding()) {
+            SupBook::External(names) => assert_eq!(names, ["Jan", "Q3 Sales"]),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_sheet_name_may_run_on_into_a_continue_record() {
+        // Split inside the second name: the continuation opens with a fresh
+        // flag byte, as it does for any string cut by a record boundary.
+        let data = external("Book2.xls", &["Jan", "February"]);
+        let cut = data.len() - 4;
+        let mut cont = vec![0u8];
+        cont.extend_from_slice(&data[cut..]);
+        match parse_sup_book(&mut record(&data[..cut], vec![&cont]), &encoding()) {
+            SupBook::External(names) => assert_eq!(names, ["Jan", "February"]),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_cut_short_sup_book_keeps_the_names_it_has() {
+        let data = external("Book2.xls", &["Jan", "February"]);
+        let cut = data.len() - 4;
+        match parse_sup_book(&mut record(&data[..cut], vec![]), &encoding()) {
+            SupBook::External(names) => assert_eq!(names, ["Jan"]),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_tab_of_another_workbook_is_not_one_of_ours() {
+        let sheets = ["Data".to_string(), "EIM New Deals".to_string()];
+        let books = [
+            SupBook::This,
+            SupBook::External(vec!["New Deals".into(), "Thrusday 02-15-01".into()]),
+            SupBook::Other,
+        ];
+
+        // Tab 1 of this workbook, and tab 1 of the other one.
+        assert_eq!(sheet_text(xti(0, 1, 1, &books), &sheets), "'EIM New Deals'");
+        assert_eq!(
+            sheet_text(xti(1, 1, 1, &books), &sheets),
+            "'[1]Thrusday 02-15-01'"
+        );
+        // A span of the other workbook's sheets carries the book once.
+        assert_eq!(
+            sheet_text(xti(1, 0, 1, &books), &sheets),
+            "'[1]New Deals:Thrusday 02-15-01'"
+        );
+        // A tab whose name the record did not keep, and a book that is not a
+        // workbook or does not exist.
+        assert_eq!(sheet_text(xti(1, 4, 4, &books), &sheets), "'[1]#Sheet5'");
+        assert_eq!(sheet_text(xti(2, 0, 0, &books), &sheets), "#REF");
+        assert_eq!(sheet_text(xti(9, 0, 0, &books), &sheets), "#REF");
+        assert_eq!(sheet_text(xti(1, -1, -1, &books), &sheets), "#REF");
+    }
+
+    #[test]
+    fn without_sup_books_every_reference_is_local() {
+        let sheets = ["Data".to_string()];
+        assert_eq!(sheet_text(xti(3, 0, 0, &[]), &sheets), "Data");
     }
 }

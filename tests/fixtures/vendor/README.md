@@ -22,3 +22,7 @@ formula text but no cached values. They are here for the one thing no Excel
 fixture has: references that are absolute in one axis and relative in the
 other, which is the only kind that tells the two relativity flags apart.
 There is no `.xlsb` member.
+
+`OOM_alloc.xls` is also from calamine's suite and has no twin. It is here
+because it links to two other workbooks, which makes it the only fixture with
+references that must not resolve to this workbook's own sheets.
