@@ -470,24 +470,21 @@ decision, never the number it came out at. Report those on the terminal, where
 the person who asked for them is; a commit message says the check passed.
 Sheet names appear in committed prose only as consistent pseudonyms.
 
-**The workbook code-names in committed text were reviewed and kept.**
-`TR450-6-WORK DOC` (`docs/upstream-issues.md`, `eg-ingest/examples/unquoted_sheets.rs`,
-`eg-eval/examples/trace.rs`, `eg-retrieve`), `TR450-6-WORK DOC` (`docs/design.md`),
-`BZ200`, `HQ880_20231231`, `HQ880` and `SIGNALS` were put to the user before
-the repository was made public, along with the fact that `TR450` and `TR450`
-name the same sheet two ways and so cannot both be the consistent pseudonym the
-rule above asks for. The decision was to publish as they stand. Do not re-open
-this, and do not scrub them on your own initiative — they are in the history
-back to `e6a0aab` regardless, so a working-tree change would achieve nothing
-but noise. Reconciling the two spellings is still worth doing if the file is
-being edited anyway; disclosure is not the reason.
+**Every sheet name in committed text is a pseudonym, back to the first
+commit.** On 2026-10-10 the real names, and the reference workbook's cell
+values, were replaced throughout the history (and in the calamine fork and
+its PRs). The pseudonyms in use: `TR450-6-WORK DOC` (and `TR450` alone),
+`HQ880`, `HQ880_20231231`, `SIGNALS`, `JOURNAL_ADJ`, `PIVOT GROUPS`,
+`ALLOC_BY_CAT BAND`, `PIVOT PER LINE`, `PIVOT PER LINE PER WEEK`,
+`PIVOT LINE ADJ`, `PIVOT_LINE AND KIND`. Reuse them; never write a sheet's
+real name. A pseudonym keeps whatever property the text depends on — a
+cell-reference-shaped prefix, a space that forces quoting.
 
-`docs/upstream-issues.md` and the calamine reports it links are the deliberate
-exception, reviewed and kept on those terms: their measurements and cell values
-are the evidence behind live bug reports, and a report without its evidence is
-one nobody can act on. Sheet names are pseudonymised in what goes upstream,
-which costs nothing — the arithmetic never depended on them. Don't scrub that
-file.
+`docs/upstream-issues.md` and the calamine reports it links keep their
+measurements, because those are the evidence behind live bug reports and a
+report without its evidence is one nobody can act on. Cell *values* quoted
+there are synthetic stand-ins that preserve the arithmetic, not the workbook's
+own figures; keep it that way.
 
 To inspect a confidential workbook safely:
 
