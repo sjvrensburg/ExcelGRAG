@@ -737,3 +737,86 @@ async fn an_unknown_sheet_filter_on_search_is_retried_without_it() {
     assert!(second.contains("Looked automatically"), "{second}");
     assert!(second.contains("no sheet called"), "{second}");
 }
+
+#[tokio::test]
+async fn a_trace_records_every_model_call_as_sent_and_received() {
+    // Issue 17: one record per model call, carrying the request the model
+    // was given — preamble, tools, history — and what came back.
+    let (engine, _dir) = engine();
+    let model = Scripted::new(vec![
+        vec![AssistantContent::tool_call(
+            "c1",
+            "search",
+            json!({ "query": "revenue", "lexical_only": true }),
+        )],
+        vec![AssistantContent::text("Revenue is on the Sales sheet.")],
+    ]);
+    let records = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let sink = Arc::clone(&records);
+    let harness = Harness::new(model, Policy::default())
+        .with_trace(Arc::new(move |record| sink.lock().unwrap().push(record)));
+    harness
+        .ask(engine, "where is revenue?", &mut |_| {})
+        .await
+        .expect("the run completes");
+
+    let records = records.lock().unwrap();
+    assert_eq!(records.len(), 2, "one per model call");
+    assert_eq!(records[0]["turn"], 1);
+    assert_eq!(records[0]["question"], "where is revenue?");
+    let first = records[0]["request"].to_string();
+    assert!(first.contains("sales.xlsx"), "the system prompt as sent");
+    assert_eq!(
+        records[0]["request"]["tools"].as_array().unwrap().len(),
+        eg_mcp::tools::TOOLS.len()
+    );
+    assert!(records[0]["response"]["choice"]
+        .to_string()
+        .contains("search"));
+    // The second request carries the tool result the first call produced.
+    assert!(records[1]["request"]["chat_history"]
+        .to_string()
+        .contains("Revenue"));
+    assert!(records[1]["response"]["choice"]
+        .to_string()
+        .contains("Revenue is on the Sales sheet."));
+    assert!(records.iter().all(|r| r["error"].is_null()));
+}
+
+#[tokio::test]
+async fn a_scoped_question_makes_every_call_against_its_workbook() {
+    // Issue 20: one corpus, many workbooks, a question about one of them.
+    let (engine, _dir) = engine();
+    let model = Scripted::new(vec![
+        vec![AssistantContent::tool_call(
+            "c1",
+            "search",
+            json!({ "query": "revenue", "lexical_only": true, "workbook": "elsewhere.xlsx" }),
+        )],
+        vec![AssistantContent::text("Revenue is on the Sales sheet.")],
+    ]);
+    let harness = Harness::new(model.clone(), Policy::default());
+    let outcome = harness
+        .ask_in(
+            engine.clone(),
+            "where is revenue?",
+            Some("sales.xlsx"),
+            &mut |_| {},
+        )
+        .await
+        .expect("the run completes");
+    assert_eq!(outcome.calls[0].args["workbook"], "sales.xlsx");
+    assert!(outcome.calls[0].ok, "{}", outcome.calls[0].result);
+    let preamble = serde_json::to_string(&model.requests.lock().unwrap()[0].chat_history).unwrap();
+    assert!(
+        preamble.contains("This question is about one workbook"),
+        "{preamble}"
+    );
+
+    // A scope naming no workbook of the corpus stops before the model runs.
+    let harness = Harness::new(Scripted::new(Vec::new()), Policy::default());
+    assert!(harness
+        .ask_in(engine, "anything", Some("missing.xlsx"), &mut |_| {})
+        .await
+        .is_err());
+}

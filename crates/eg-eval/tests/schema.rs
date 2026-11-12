@@ -23,10 +23,7 @@ fn book(lookups: &[&str]) -> Workbook {
         work.set(row, 3, formula(text));
     }
     let mut rates = Sheet::new(SheetId(1), "Rates");
-    for (i, (key, rate)) in [("Retail", 8.0), ("Business", 11.0)]
-        .iter()
-        .enumerate()
-    {
+    for (i, (key, rate)) in [("Retail", 8.0), ("Business", 11.0)].iter().enumerate() {
         rates.set(i as u32, 0, Cell::literal(CellValue::Text(key.to_string())));
         rates.set(i as u32, 1, Cell::literal(CellValue::Number(*rate)));
     }

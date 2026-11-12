@@ -479,3 +479,185 @@ fn a_minimum_and_a_maximum_say_which_row_they_were_found_in() {
     assert_eq!(residential.values[0], Some(1200.0));
     assert_eq!(residential.at[0], Some(1), "North's row");
 }
+
+/// `book()`, with its row-label column named the way detection names one.
+fn keyed_book() -> (Workbook, Table) {
+    let (workbook, _) = book();
+    let mut keyed = region(4, 3, &["Type", "Debt", "Note"]);
+    keyed.label_headers = vec!["Customer".into()];
+    let table = read_table(&workbook.sheets[0], &keyed).unwrap();
+    (workbook, table)
+}
+
+#[test]
+fn the_row_label_column_can_be_filtered_and_grouped_on() {
+    // Issue 16: the column a table is keyed by was kept out of the body, and
+    // with it out of every query — "how many rows per customer" could not be
+    // asked at all.
+    let (workbook, table) = keyed_book();
+    let answer = query(
+        &workbook,
+        &table,
+        &Query {
+            filters: vec![Filter {
+                column: "Customer".into(),
+                test: Test::OneOf(vec![
+                    CellValue::Text("north".into()),
+                    CellValue::Text("East".into()),
+                ]),
+            }],
+            group_by: vec!["Customer".into()],
+            aggregates: vec![Aggregate::Count, Aggregate::Sum("Debt".into())],
+            limit: 10,
+        },
+    )
+    .unwrap();
+    let keys: Vec<&CellValue> = answer.groups.iter().map(|g| &g.key[0]).collect();
+    assert_eq!(
+        keys,
+        vec![
+            &CellValue::Text("North".into()),
+            &CellValue::Text("East".into())
+        ]
+    );
+    assert_eq!(answer.groups[0].values[1], Some(1200.0));
+    // It read the label column, so it says so.
+    assert_eq!(answer.over, RangeRef::new(SheetId(0), 1, 0, 4, 3));
+
+    // A query that never names it still reports the body alone.
+    let plain = query(
+        &workbook,
+        &table,
+        &Query {
+            aggregates: vec![Aggregate::Sum("Debt".into())],
+            limit: 10,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(plain.over, table.body);
+}
+
+#[test]
+fn a_row_label_column_is_counted_but_never_totalled() {
+    let (workbook, table) = keyed_book();
+    let distinct = query(
+        &workbook,
+        &table,
+        &Query {
+            aggregates: vec![Aggregate::CountDistinct("Customer".into())],
+            limit: 10,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(distinct.one().unwrap().counts[0], Some(4));
+
+    let err = query(
+        &workbook,
+        &table,
+        &Query {
+            aggregates: vec![Aggregate::Sum("Customer".into())],
+            limit: 10,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, QueryError::LabelColumn { .. }), "{err}");
+}
+
+/// `Code | Code | Debt`: a row-label column and a body column sharing a
+/// header, which real sheets do — a key repeated as data, or two unheaded
+/// columns.
+fn shared_header_book() -> (Workbook, Table) {
+    let sheet = grid(&["Code Code Debt", "A1 X 10", "A2 Y 20", "A3 X 30"]);
+    let mut keyed = region(3, 2, &["Code", "Debt"]);
+    keyed.label_headers = vec!["Code".into()];
+    let table = read_table(&sheet, &keyed).unwrap();
+    let workbook = Workbook {
+        path: "shared.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash".into(),
+        sheets: vec![sheet],
+        defined_names: Vec::new(),
+        external_links: Vec::new(),
+    };
+    (workbook, table)
+}
+
+#[test]
+fn a_body_header_shared_with_a_label_column_still_names_the_body_column() {
+    // Naming the label columns must not make a query that worked before
+    // they were nameable start failing as ambiguous.
+    let (workbook, table) = shared_header_book();
+    let answer = query(
+        &workbook,
+        &table,
+        &Query {
+            group_by: vec!["code".into()],
+            aggregates: vec![Aggregate::Sum("Debt".into())],
+            limit: 10,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let keys: Vec<&CellValue> = answer.groups.iter().map(|g| &g.key[0]).collect();
+    assert_eq!(
+        keys,
+        vec![&CellValue::Text("X".into()), &CellValue::Text("Y".into())],
+        "grouped by the body's Code (X/Y), not the labels (A1/A2/A3)"
+    );
+    assert_eq!(answer.groups[0].values[0], Some(40.0));
+    assert_eq!(answer.over, table.body, "no label column was read");
+
+    // And a caller after the column a query read gets that same one.
+    let named = eg_eval::query::column_named(&table, "Code").unwrap();
+    assert_eq!(named.range.left, 1, "column B, not the label column A");
+    assert!(!table.is_label(named));
+}
+
+#[test]
+fn a_label_column_is_found_when_no_body_column_has_its_header() {
+    let (workbook, table) = keyed_book();
+    let named = eg_eval::query::column_named(&table, "customer").unwrap();
+    assert!(table.is_label(named));
+    assert!(query(
+        &workbook,
+        &table,
+        &Query {
+            group_by: vec!["Customer".into()],
+            aggregates: vec![Aggregate::Count],
+            limit: 10,
+            ..Default::default()
+        },
+    )
+    .is_ok());
+}
+
+#[test]
+fn two_body_columns_with_one_header_are_still_refused_beside_a_label_column() {
+    let sheet = grid(&["Code Total Total", "A1 1 2", "A2 3 4"]);
+    let mut keyed = region(2, 2, &["Total", "Total"]);
+    keyed.label_headers = vec!["Code".into()];
+    let table = read_table(&sheet, &keyed).unwrap();
+    let workbook = Workbook {
+        path: "twice.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash".into(),
+        sheets: vec![sheet],
+        defined_names: Vec::new(),
+        external_links: Vec::new(),
+    };
+    let err = query(
+        &workbook,
+        &table,
+        &Query {
+            aggregates: vec![Aggregate::Sum("Total".into())],
+            limit: 10,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, QueryError::AmbiguousColumn(_)), "{err}");
+    assert!(eg_eval::query::column_named(&table, "Total").is_none());
+}

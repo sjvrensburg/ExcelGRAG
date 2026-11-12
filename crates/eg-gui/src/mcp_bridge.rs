@@ -216,7 +216,7 @@ impl ServerHandler for McpBridge {
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_instructions(
                 "ExcelGRAG's GUI-attached MCP server. All the usual eg tools (workbooks, \
-                 search, context, read_cells, precedents, dependents, find_value, recompute, \
+                 sheets, search, context, read_cells, precedents, dependents, find_value, recompute, \
                  tables, query_table, schema, what_if, graph) are available, plus `chat` and \
                  `gui_show`, which are visible in a browser tab open on this same corpus.",
             )

@@ -113,5 +113,42 @@
     "ask": "if the tax rate were 20 percent, what would the provision after tax be",
     "want": ["5842572.67"],
     "why": "a what-if: change Tax_Rate (Rates!B11) to 0.2 and read Summary!B11, which `what_if` reports as moved"
+  },
+  {
+    "ask": "how many sheets does this workbook have, and are any of them hidden",
+    "want": ["7 sheets", "seven sheets", "7 sheet"],
+    "want_result": ["7 sheet(s)"],
+    "workbook": "impairment.xlsx",
+    "why": "`sheets` lists every tab with its visibility; none of the seven is hidden"
+  },
+  {
+    "ask": "is there a Budget sheet in this workbook",
+    "want": ["no budget", "no \"budget\"", "no 'budget'", "no sheet named budget", "no sheet called budget", "isn't a budget", "is not a budget", "doesn't have a budget", "does not have a budget", "does not contain a budget", "doesn't contain a budget"],
+    "want_result": ["sheet(s) in"],
+    "why": "an answer of absence: only the full list from `sheets` can say no with confidence"
+  },
+  {
+    "ask": "what is on the fourth tab",
+    "want": ["Feb"],
+    "workbook": "impairment.xlsx",
+    "why": "tab order comes from `sheets`; the fourth is Feb"
+  },
+  {
+    "ask": "how many distinct accounts are in the debtors table",
+    "want": ["2000"],
+    "want_result": ["distinct Account"],
+    "why": "a distinct count over Account, the column that labels the table's rows, which `query_table` once could not name; grounded on the count itself, since `tables` prints 2000 rows too"
+  },
+  {
+    "ask": "which formulas use the Days Overdue column",
+    "want": ["G2:G2001", "Ageing Bucket"],
+    "why": "`dependents` on Debtors!F2:F2001: four filled-down columns, each reported once with its count"
+  },
+  {
+    "ask": "does any formula in the workbook read the Notes sheet",
+    "want": ["no formula", "nothing", "not read", "none", "no cell", "isn't read", "is not referenced", "not referenced"],
+    "want_result": ["read by 0 formula"],
+    "workbook": "impairment.xlsx",
+    "why": "an answer of absence: `dependents` reports it read by 0 formulas, and the reply says nothing reads it"
   }
 ]
