@@ -252,6 +252,11 @@ async fn main() -> Result<()> {
             let state = engine
                 .lock()
                 .map_err(|_| anyhow!("the engine lock is poisoned"))?;
+            if let Some(wb) = &args.workbook {
+                state
+                    .resolve(Some(wb))
+                    .map_err(|e| anyhow!("--workbook {wb:?}: {e}"))?;
+            }
             for q in &questions {
                 if let Some(wb) = &q.workbook {
                     state

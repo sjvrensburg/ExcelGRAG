@@ -498,13 +498,11 @@ fn sheets(state: &mut State, args: &Value) -> Result<String, String> {
             eg_model::Visibility::Hidden => "hidden",
             eg_model::Visibility::VeryHidden => "very hidden",
         };
-        let formulas = sheet.iter().filter(|(_, c)| c.formula.is_some()).count();
+        // No formula count: it would walk every cell of every sheet under
+        // the engine lock, and a listing of tabs must stay cheap. The cell
+        // count is the map's length.
         let used = match sheet.used_range() {
-            Some(used) => format!(
-                "uses {}, {} cell(s), {formulas} formula(s)",
-                used.to_a1(),
-                sheet.len()
-            ),
+            Some(used) => format!("uses {}, {} cell(s)", used.to_a1(), sheet.len()),
             None => "empty".to_string(),
         };
         out.push_str(&format!(
@@ -1562,10 +1560,7 @@ fn query_table(state: &mut State, args: &Value) -> Result<String, String> {
             // one — because the tool had given it a number and no place.
             let at = group.at.get(i).copied().flatten().and_then(|row| {
                 let column = query.aggregates[i].column()?;
-                let range = table
-                    .all_columns()
-                    .find(|c| c.header.eq_ignore_ascii_case(column))?
-                    .range;
+                let range = eg_eval::query::column_named(&table, column)?.range;
                 let cell = eg_model::RangeRef {
                     sheet: range.sheet,
                     top: row,
@@ -1642,14 +1637,13 @@ fn schema_gate_hint(
     let mut lines = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for name in &named {
-        let Some(column) = table
-            .all_columns()
-            .find(|c| c.header.eq_ignore_ascii_case(name))
-        else {
+        let Some(column) = eg_eval::query::column_named(table, name) else {
             continue;
         };
         for lookup in schema.keys_from(column.range) {
-            if lookup.table.intersects(&table.body) {
+            // The table's whole width: a lookup into its own row-label
+            // column is into this table, not another one.
+            if lookup.table.intersects(&table.span()) {
                 continue;
             }
             if !seen.insert((column.header.clone(), lookup.table)) {
@@ -1701,20 +1695,26 @@ fn unmatched_values(
     // column's range: `profile_table` walks its table's whole body, and on
     // a wide region that is every cell of the table for the sake of one
     // column, under the engine lock, once per no-match query.
-    let profiles = table
-        .all_columns()
-        .filter(|c| wanted.iter().any(|w| w.eq_ignore_ascii_case(&c.header)))
-        .flat_map(|c| {
-            let narrowed = Table {
-                body: c.range,
-                columns: vec![c.clone()],
-                labels: None,
-                label_headers: Vec::new(),
-                label_columns: Vec::new(),
-                ..table.clone()
-            };
-            eg_structure::profile_table(sheet, &narrowed, &eg_structure::ProfileOptions::default())
-        });
+    // Each filtered column once, resolved as the query resolved it.
+    let mut columns: Vec<&eg_structure::TableColumn> = Vec::new();
+    for w in &wanted {
+        if let Some(c) = eg_eval::query::column_named(table, w) {
+            if !columns.iter().any(|seen| seen.range == c.range) {
+                columns.push(c);
+            }
+        }
+    }
+    let profiles = columns.into_iter().flat_map(|c| {
+        let narrowed = Table {
+            body: c.range,
+            columns: vec![c.clone()],
+            labels: None,
+            label_headers: Vec::new(),
+            label_columns: Vec::new(),
+            ..table.clone()
+        };
+        eg_structure::profile_table(sheet, &narrowed, &eg_structure::ProfileOptions::default())
+    });
     for profile in profiles {
         match (&profile.distinct, profile.distinct_count) {
             (Some(values), _) if redact => out.push_str(&format!(

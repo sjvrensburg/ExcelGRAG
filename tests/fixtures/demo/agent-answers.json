@@ -123,7 +123,7 @@
   },
   {
     "ask": "is there a Budget sheet in this workbook",
-    "want": ["no budget", "is no", "isn't", "is not", "does not", "doesn't", "no sheet"],
+    "want": ["no budget", "no sheet named budget", "no sheet called budget", "isn't a budget", "is not a budget", "doesn't have a budget", "does not have a budget", "does not contain a budget", "doesn't contain a budget"],
     "want_result": ["sheet(s) in"],
     "why": "an answer of absence: only the full list from `sheets` can say no with confidence"
   },
@@ -136,7 +136,8 @@
   {
     "ask": "how many distinct accounts are in the debtors table",
     "want": ["2000"],
-    "why": "a distinct count over Account, the column that labels the table's rows, which `query_table` once could not name"
+    "want_result": ["distinct Account"],
+    "why": "a distinct count over Account, the column that labels the table's rows, which `query_table` once could not name; grounded on the count itself, since `tables` prints 2000 rows too"
   },
   {
     "ask": "which formulas use the Days Overdue column",

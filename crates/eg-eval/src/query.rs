@@ -254,6 +254,7 @@ pub fn query(workbook: &Workbook, table: &Table, query: &Query) -> Result<Answer
     // `read_span` yields — a table is keyed by its row labels as often as
     // not, and a query that could not name them could not group by the key.
     let columns: Vec<&TableColumn> = table.all_columns().collect();
+    let labels = table.label_columns.len();
 
     // Resolved up front so a query naming a column this table does not have
     // fails before it reads a cell, rather than returning an empty answer that
@@ -261,12 +262,12 @@ pub fn query(workbook: &Workbook, table: &Table, query: &Query) -> Result<Answer
     let filters: Vec<(usize, &Test)> = query
         .filters
         .iter()
-        .map(|f| Ok((index_of(&columns, &f.column)?, &f.test)))
+        .map(|f| Ok((index_of(&columns, labels, &f.column)?, &f.test)))
         .collect::<Result<_, _>>()?;
     let groups: Vec<usize> = query
         .group_by
         .iter()
-        .map(|c| index_of(&columns, c))
+        .map(|c| index_of(&columns, labels, c))
         .collect::<Result<_, _>>()?;
     let aggregates: Vec<(Option<usize>, &Aggregate)> = query
         .aggregates
@@ -275,7 +276,7 @@ pub fn query(workbook: &Workbook, table: &Table, query: &Query) -> Result<Answer
             let Some(name) = a.column() else {
                 return Ok((None, a));
             };
-            let i = index_of(&columns, name)?;
+            let i = index_of(&columns, labels, name)?;
             if let Some(what) = a.totals() {
                 if table.is_label(columns[i]) {
                     return Err(QueryError::LabelColumn {
@@ -300,7 +301,6 @@ pub fn query(workbook: &Workbook, table: &Table, query: &Query) -> Result<Answer
 
     // The answer names the cells it read: the body, widened to the label
     // columns only when the query named one of them.
-    let labels = table.label_columns.len();
     let named_label = filters
         .iter()
         .map(|(i, _)| *i)
@@ -385,17 +385,40 @@ pub fn query(workbook: &Workbook, table: &Table, query: &Query) -> Result<Answer
 }
 
 /// The column index for a header, refusing what cannot be resolved.
-fn index_of(columns: &[&TableColumn], header: &str) -> Result<usize, QueryError> {
-    let mut found = None;
-    for (i, column) in columns.iter().enumerate() {
-        if column.header.eq_ignore_ascii_case(header) {
-            if found.is_some() {
-                return Err(QueryError::AmbiguousColumn(header.to_string()));
+///
+/// `columns` is the label columns (the first `labels` of them) then the body.
+/// The body is searched first, and the label columns only when no body column
+/// has the header: a query that named a body column uniquely before the label
+/// columns were nameable must not start being refused as ambiguous because an
+/// unheaded or same-named label column now sits beside it. Two matches within
+/// either part are still refused.
+fn index_of(columns: &[&TableColumn], labels: usize, header: &str) -> Result<usize, QueryError> {
+    let find = |range: std::ops::Range<usize>| -> Result<Option<usize>, QueryError> {
+        let mut found = None;
+        for i in range {
+            if columns[i].header.eq_ignore_ascii_case(header) {
+                if found.is_some() {
+                    return Err(QueryError::AmbiguousColumn(header.to_string()));
+                }
+                found = Some(i);
             }
-            found = Some(i);
         }
-    }
-    found.ok_or_else(|| QueryError::NoSuchColumn(header.to_string()))
+        Ok(found)
+    };
+    let labels = labels.min(columns.len());
+    find(labels..columns.len())?
+        .or(find(0..labels)?)
+        .ok_or_else(|| QueryError::NoSuchColumn(header.to_string()))
+}
+
+/// The column a header names, resolved as [`query`] resolves it: the body
+/// first, then the row-label columns. For a caller that needs the column a
+/// query read — its range, say — and must not pick a different one.
+pub fn column_named<'t>(table: &'t Table, header: &str) -> Option<&'t TableColumn> {
+    let columns: Vec<&TableColumn> = table.all_columns().collect();
+    index_of(&columns, table.label_columns.len(), header)
+        .ok()
+        .map(|i| columns[i])
 }
 
 fn passes(value: &CellValue, test: &Test) -> bool {
