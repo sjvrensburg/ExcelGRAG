@@ -288,7 +288,8 @@ above it.
   `eg-agent --score tests/fixtures/demo/agent-answers.json` marks whether the
   agent's *final reply* names an answer **and** a tool it called returned
   it — the retrieval file's questions with agent-shaped wants, plus six that
-  need computing (`query_table`, `what_if`). An answer of absence grounds on
+  need computing (`query_table`, `what_if`) and six that need `sheets`, a
+  row-label column or grouped `dependents`. An answer of absence grounds on
   the question's `want_result` instead (the reply says "nothing", the tool
   says `read by 0 formula`); a question's optional `workbook` scopes every
   tool call to one workbook of the corpus (`Harness::ask_in`); and `--trace

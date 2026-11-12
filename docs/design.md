@@ -1094,7 +1094,10 @@ answer takes — `Debtors!L632` beside `Impairment`, `Summary!B8` beside
 `Balance` — and its `known_gap` retired, because an agent with the scan
 closes it. Six more can only be answered by computing: a column's sum, a
 filtered sum, a filtered count, a formula's text, a band lookup, and a
-what-if. The mark is the same grounded one, with two loosenings the
+what-if. The last six were added with the `sheets` tool, the row-label
+column in `query_table`, grouped `dependents` and the answer file's
+`workbook` and `want_result` fields, and each needs one of them; two are
+answers of absence, which only `want_result` can mark. The mark is the same grounded one, with two loosenings the
 trails argued for: thousands separators are ignored (a tool prints
 `41789046.97`, a model writes `41,789,046.97`), and the reply and the
 tool result may use different spellings of one want (`0.85` in the cell,
