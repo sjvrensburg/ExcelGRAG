@@ -212,6 +212,18 @@ populated cells, so the third cell of a row that skipped it is *absent* rather
 than blank — a reader that let the row shorten would misalign every column after
 the gap, for that row only.
 
+The row-label columns are read too, into `label_columns`, and kept out of
+`columns`. Keeping them out of the body is what stops a caller that totals every
+column from adding up account numbers; leaving them out of the *table* was a
+separate mistake (issue 16). `tables` listed a staff list without its employee
+code, cited it a column to the right of where it began, and `query_table`
+answered "how many rows per employee code" with "no column called that" while
+`schema` named the very column as a lookup key. So `tables` now cites a table
+by its whole width and marks the label columns, and a query may filter, group
+and count on one — but not sum or average it, which is the original reason for
+keeping it apart. An answer that read a label column widens its `over` range to
+include it, since the range is how a caller checks what was computed.
+
 
 ## What the columns hold
 

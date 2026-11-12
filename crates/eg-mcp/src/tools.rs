@@ -18,7 +18,7 @@
 use eg_eval::query::{query as query_run, Aggregate, Filter, Query, Test};
 use eg_eval::whatif::{what_if, Blocked, Change, WhatIfOptions};
 use eg_eval::{
-    cell as cell_fact, cells_holding, cells_in, dependents_of, precedents_of, recompute, subgraph,
+    cell as cell_fact, cells_holding, cells_in, precedents_of, readers_of, recompute, subgraph,
     value_json, GraphDirection, GraphOptions, Outcome,
 };
 use eg_eval::{infer_schema, Lookup, Schema};
@@ -41,8 +41,33 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         name: "workbooks",
         description: "List the workbooks in this corpus: where each came from, how big it is, \
-                      and the content hash that names it in every other tool.",
-        schema: || json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                      and the content hash that names it in every other tool. `sheets` lists \
+                      one workbook's tabs.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "workbook": { "type": "string", "description": "List only this workbook (content hash, path or file name)." }
+                },
+                "additionalProperties": false
+            })
+        },
+    },
+    Tool {
+        name: "sheets",
+        description: "The sheets of one workbook, in tab order: each one's position, name, \
+                      whether it is visible, hidden or very hidden, and the range it uses. The \
+                      whole list, so a sheet that is not on it is not in the workbook. Hidden \
+                      sheets are where leftover and scratch work tends to sit.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "workbook": { "type": "string", "description": "Which workbook (content hash, path or file name). Optional when the corpus holds one." }
+                },
+                "additionalProperties": false
+            })
+        },
     },
     Tool {
         name: "search",
@@ -104,9 +129,10 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "dependents",
-        description: "The cells whose formulas read a range. Expensive: nothing records who \
-                      reads a cell, so every formula in the workbook is scanned — seconds on a \
-                      large file, not milliseconds.",
+        description: "The cells whose formulas read a range. A filled-down run of one formula \
+                      is one line with its count, so `limit` counts places, not cells. Expensive: \
+                      nothing records who reads a cell, so every formula in the workbook is \
+                      scanned — seconds on a large file, not milliseconds.",
         schema: || cell_schema("The range to find readers of."),
     },
     Tool {
@@ -141,7 +167,11 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "tables",
-        description: "The tables of a workbook, or of one sheet: each one's range, its title,                       and its columns with the type of each. Start here before `query_table` — a                       query names columns by header, and this is what the headers are.",
+        description: "The tables of a workbook, or of one sheet: each one's range, its title, \
+                      and its columns with the type of each. Start here before `query_table` — a \
+                      query names columns by header, and this is what the headers are. A column \
+                      marked (row labels) names the table's rows — usually its key — and can be \
+                      filtered, grouped and counted on but not summed.",
         schema: || {
             json!({
                 "type": "object",
@@ -156,7 +186,12 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "query_table",
-        description: "Filter, group and total the rows of one table — the question a workbook                       only answers if somebody already wrote a cell for it. Names columns by                       header, from `tables`. Every answer carries the range it was computed                       over, because a table's boundaries are inferred and a totals row swept                       into the body would double every sum. Refuses rather than guesses: a                       header naming two columns, or a total over a column that is not numbers.",
+        description: "Filter, group and total the rows of one table — the question a workbook \
+                      only answers if somebody already wrote a cell for it. Names columns by \
+                      header, from `tables`. Every answer carries the range it was computed \
+                      over, because a table's boundaries are inferred and a totals row swept \
+                      into the body would double every sum. Refuses rather than guesses: a \
+                      header naming two columns, or a total over a column that is not numbers.",
         schema: || {
             json!({
                 "type": "object",
@@ -200,7 +235,12 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "schema",
-        description: "The relations the workbook states in its own lookup formulas: which                       column keys into which table, and what comes back. A spreadsheet has no                       schema and declares one anyway, once per row. Use it to follow a value                       from one table to another. An approximate lookup is reported as a                       *banding* — a set of thresholds, not a key — because joining it on                       equality would be wrong.",
+        description: "The relations the workbook states in its own lookup formulas: which \
+                      column keys into which table, and what comes back. A spreadsheet has no \
+                      schema and declares one anyway, once per row. Use it to follow a value \
+                      from one table to another. An approximate lookup is reported as a \
+                      *banding* — a set of thresholds, not a key — because joining it on \
+                      equality would be wrong.",
         schema: || {
             json!({
                 "type": "object",
@@ -288,7 +328,8 @@ fn cell_schema(citation: &str) -> Value {
 /// Run a tool. `Err` is a message for the caller, not a protocol failure.
 pub fn call(state: &mut State, name: &str, args: &Value) -> Result<String, String> {
     match name {
-        "workbooks" => workbooks(state),
+        "workbooks" => workbooks(state, args),
+        "sheets" => sheets(state, args),
         "search" => search(state, args),
         "context" => context(state, args),
         "read_cells" => read_cells(state, args),
@@ -393,10 +434,17 @@ fn opt_bool(args: &Value, key: &str) -> Result<bool, String> {
 
 // ---- tools --------------------------------------------------------------
 
-fn workbooks(state: &mut State) -> Result<String, String> {
+fn workbooks(state: &mut State, args: &Value) -> Result<String, String> {
+    let only = match opt_str(args, "workbook")? {
+        Some(wanted) => Some(state.resolve(Some(&wanted))?.0),
+        None => None,
+    };
     let mut out = String::new();
     let mut count = 0;
     for (hash, entry) in state.corpus.entries() {
+        if only.as_deref().is_some_and(|h| h != hash) {
+            continue;
+        }
         count += 1;
         out.push_str(&format!(
             "{}  {}\n    {} sheets, {} cells, {} nodes, {} edges\n",
@@ -412,6 +460,61 @@ fn workbooks(state: &mut State) -> Result<String, String> {
         return Ok("The corpus is empty. Index a workbook first.".to_string());
     }
     Ok(format!("{count} workbook(s)\n{out}"))
+}
+
+/// Every sheet of one workbook, in tab order, with its visibility.
+///
+/// Read from the workbook itself rather than the stored graph: the graph
+/// keeps visible-or-not, and "very hidden" — a sheet the Excel UI cannot
+/// unhide — is worth saying apart from "hidden".
+fn sheets(state: &mut State, args: &Value) -> Result<String, String> {
+    let (_, path) = state.resolve(opt_str(args, "workbook")?.as_deref())?;
+    let (loaded, load_seconds) = state.workbook(&path)?;
+    let workbook = &loaded.workbook;
+
+    let mut out = String::new();
+    if let Some(seconds) = load_seconds {
+        out.push_str(&format!("(opened {path} in {seconds:.1}s)\n"));
+    }
+    let hidden = workbook
+        .sheets
+        .iter()
+        .filter(|s| !s.visibility.is_visible())
+        .count();
+    out.push_str(&format!(
+        "{} sheet(s) in {path}, {hidden} of them hidden\n",
+        workbook.sheets.len()
+    ));
+    let width = workbook
+        .sheets
+        .iter()
+        .map(|s| s.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(40);
+    for (position, sheet) in workbook.sheets.iter().enumerate() {
+        let visibility = match sheet.visibility {
+            eg_model::Visibility::Visible => "visible",
+            eg_model::Visibility::Hidden => "hidden",
+            eg_model::Visibility::VeryHidden => "very hidden",
+        };
+        let formulas = sheet.iter().filter(|(_, c)| c.formula.is_some()).count();
+        let used = match sheet.used_range() {
+            Some(used) => format!(
+                "uses {}, {} cell(s), {formulas} formula(s)",
+                used.to_a1(),
+                sheet.len()
+            ),
+            None => "empty".to_string(),
+        };
+        out.push_str(&format!(
+            "  {:>3}  {:<width$}  {:<11}  {used}\n",
+            position + 1,
+            sheet.name,
+            visibility,
+        ));
+    }
+    Ok(out)
 }
 
 /// The search half, shared by `search` and `context`.
@@ -873,27 +976,45 @@ fn precedents(state: &mut State, args: &Value) -> Result<String, String> {
 
 fn dependents(state: &mut State, args: &Value) -> Result<String, String> {
     let limit = opt_bounded(args, "limit", 40, 1, 500)?;
+    let redact = state.redact_values;
     let (loaded, range, note) = located(state, args)?;
     let workbook = &loaded.workbook;
 
-    let (refs, report) = dependents_of(workbook, range, limit);
+    // Grouped by filled-down run, not listed per reference: one line per row
+    // of a filled column used up `limit` on the first reader, and the
+    // summaries on other sheets were never shown.
+    let (readers, report) = readers_of(workbook, range, limit);
     let mut out = format!(
-        "{note}{} is read by {} formula(s), of {} scanned\n",
+        "{note}{} is read by {} formula(s) in {} place(s), of {} scanned\n",
         workbook.cite_range(range),
-        report.matches,
+        report.formulas,
+        report.groups,
         report.formulas_scanned
     );
-    for reference in &refs {
-        out.push_str(&format!(
-            "  {:<24} {}\n",
-            workbook.cite(reference.from),
-            reference.text
-        ));
+    for reader in &readers {
+        if reader.formulas == 1 {
+            out.push_str(&format!(
+                "  {:<24} {}\n",
+                workbook.cite_range(reader.range),
+                reader.text
+            ));
+        } else {
+            out.push_str(&format!(
+                "  {:<24} {}  ({} formulas filled from ={})\n",
+                workbook.cite_range(reader.range),
+                reader.text,
+                reader.formulas,
+                show_formula(&reader.formula, redact)
+            ));
+        }
     }
-    if refs.is_empty() {
+    if readers.is_empty() {
         out.push_str("  nothing in this workbook reads it\n");
     } else if report.capped {
-        out.push_str("  … more, raise limit\n");
+        out.push_str(&format!(
+            "  … {} more place(s), raise limit\n",
+            report.groups - readers.len() as u64
+        ));
     }
     Ok(out)
 }
@@ -1266,25 +1387,34 @@ fn tables(state: &mut State, args: &Value) -> Result<String, String> {
                 continue;
             }
             listed += 1;
+            // The table is cited by its whole width, row labels included:
+            // printing only the body hid the key column, and a caller could
+            // not tell the table began a column to the left of the range it
+            // was given. `table_at` accepts this, the body, and the region.
             out.push_str(&format!(
                 "{}{}\n  {} row(s), {} column(s)\n",
-                loaded.workbook.cite_range(table.body),
+                loaded.workbook.cite_range(table.span()),
                 table
                     .title
                     .as_deref()
                     .map(|t| format!("  {t:?}"))
                     .unwrap_or_default(),
                 table.rows(),
-                table.columns.len()
+                table.label_columns.len() + table.columns.len()
             ));
-            for column in &table.columns {
+            for column in table.all_columns() {
                 let name = if column.header.is_empty() {
                     "(no header)"
                 } else {
                     &column.header
                 };
+                let note = if table.is_label(column) {
+                    "  (row labels)"
+                } else {
+                    ""
+                };
                 out.push_str(&format!(
-                    "    {:<38} {:<7} {} populated\n",
+                    "    {:<38} {:<7} {} populated{note}\n",
                     name,
                     column.kind.as_str(),
                     column.populated
@@ -1308,9 +1438,10 @@ fn tables(state: &mut State, args: &Value) -> Result<String, String> {
 
 /// Find the table a caller named by its range.
 ///
-/// Either spelling of a table is accepted: the region it was detected as
-/// (header and label columns included, what `context` cites) or its body
-/// (the rows under the header, what `tables` prints). Matching the region
+/// Any spelling of a table is accepted: the region it was detected as
+/// (header and label columns included, what `context` cites), its span (the
+/// rows under the header, row labels included, what `tables` prints) or its
+/// body (the same without the row labels). Matching the region
 /// alone refused the exact range `tables` had just listed — an agent was
 /// watched asking for `'Debtors'!B2:M2001` twice, being told it was not a
 /// table, and only getting through by guessing the enclosing region.
@@ -1328,7 +1459,7 @@ fn table_at(loaded: &eg_ingest::Loaded, citation: &str) -> Result<Table, String>
         }
         if region.range.intersects(&range) {
             if let Some(table) = read_table(sheet, &region) {
-                if table.body == range {
+                if table.body == range || table.span() == range {
                     return Ok(table);
                 }
             }
@@ -1432,8 +1563,7 @@ fn query_table(state: &mut State, args: &Value) -> Result<String, String> {
             let at = group.at.get(i).copied().flatten().and_then(|row| {
                 let column = query.aggregates[i].column()?;
                 let range = table
-                    .columns
-                    .iter()
+                    .all_columns()
                     .find(|c| c.header.eq_ignore_ascii_case(column))?
                     .range;
                 let cell = eg_model::RangeRef {
@@ -1446,16 +1576,11 @@ fn query_table(state: &mut State, args: &Value) -> Result<String, String> {
                 // And the read that fetches the whole row: a model told the
                 // cell still asked the query five more ways for the row's
                 // key rather than reading the row.
+                let span = table.span();
                 let row_range = eg_model::RangeRef {
-                    sheet: range.sheet,
                     top: row,
-                    // Label columns sit immediately left of the body.
-                    left: table
-                        .body
-                        .left
-                        .saturating_sub(table.label_headers.len() as u16),
                     bottom: row,
-                    right: table.body.right,
+                    ..span
                 };
                 Some(format!(
                     " (at {}; `read_cells {}` for that row)",
@@ -1518,8 +1643,7 @@ fn schema_gate_hint(
     let mut seen = std::collections::BTreeSet::new();
     for name in &named {
         let Some(column) = table
-            .columns
-            .iter()
+            .all_columns()
             .find(|c| c.header.eq_ignore_ascii_case(name))
         else {
             continue;
@@ -1578,13 +1702,15 @@ fn unmatched_values(
     // a wide region that is every cell of the table for the sake of one
     // column, under the engine lock, once per no-match query.
     let profiles = table
-        .columns
-        .iter()
+        .all_columns()
         .filter(|c| wanted.iter().any(|w| w.eq_ignore_ascii_case(&c.header)))
         .flat_map(|c| {
             let narrowed = Table {
                 body: c.range,
                 columns: vec![c.clone()],
+                labels: None,
+                label_headers: Vec::new(),
+                label_columns: Vec::new(),
                 ..table.clone()
             };
             eg_structure::profile_table(sheet, &narrowed, &eg_structure::ProfileOptions::default())
@@ -1953,6 +2079,7 @@ mod tests {
             ],
             labels: None,
             label_headers: Vec::new(),
+            label_columns: Vec::new(),
         };
 
         // No lookup formula in this fixture, so infer_schema finds nothing —
@@ -2198,5 +2325,174 @@ mod tests {
         let err = search(&mut state, &json!({ "query": "revenue", "limit": "3" }))
             .expect_err("a string limit must be refused");
         assert!(err.contains("limit"), "{err}");
+    }
+
+    /// The corpus of [`two_workbook_state`], with `alpha.xlsx` held open as
+    /// `wb` instead of read from disk.
+    fn state_holding(wb: Workbook) -> (State, tempfile::TempDir) {
+        let (mut state, dir) = two_workbook_state();
+        state.preload(
+            "alpha.xlsx",
+            eg_ingest::Loaded {
+                capabilities: eg_ingest::Capabilities::for_format(eg_model::WorkbookFormat::Xlsx),
+                warnings: Vec::new(),
+                workbook: wb,
+            },
+        );
+        (state, dir)
+    }
+
+    fn formula_cell(formula: &str) -> eg_model::Cell {
+        eg_model::Cell {
+            value: CellValue::Number(0.0),
+            formula: Some(formula.to_string()),
+            format: Default::default(),
+        }
+    }
+
+    #[test]
+    fn tables_lists_the_row_label_column_and_query_table_can_group_on_it() {
+        // Issue 16: the key column of a staff list was left out of `tables`,
+        // and `query_table` said it had no column by that name.
+        let mut wb = one_sheet_workbook("hash-alpha", "alpha.xlsx", "Staff");
+        wb.sheets[0] = grid(
+            0,
+            "Staff",
+            &["Code Hours Rate", "E1 8 10", "E2 9 12", "E1 7 14"],
+        );
+        let (mut state, _dir) = state_holding(wb);
+        let listed = call(&mut state, "tables", &json!({ "workbook": "hash-alpha" })).unwrap();
+        assert!(
+            listed.contains("Staff!A2:C4"),
+            "the range includes the key: {listed}"
+        );
+        assert!(listed.contains("Code"), "{listed}");
+        assert!(listed.contains("(row labels)"), "{listed}");
+
+        let grouped = call(
+            &mut state,
+            "query_table",
+            &json!({
+                "workbook": "hash-alpha",
+                "table": "Staff!A2:C4",
+                "group_by": ["Code"],
+                "aggregate": [{ "of": "count" }, { "of": "sum", "column": "Rate" }]
+            }),
+        )
+        .unwrap();
+        assert!(
+            grouped.contains("\"E1\"  (2 rows)  count 2, sum of Rate 24"),
+            "{grouped}"
+        );
+        assert!(grouped.contains("over Staff!A2:C4"), "{grouped}");
+        // The body alone, as `tables` used to print it, still names the table.
+        assert!(call(
+            &mut state,
+            "query_table",
+            &json!({
+                "workbook": "hash-alpha",
+                "table": "Staff!B2:C4",
+                "group_by": ["Code"],
+                "aggregate": [{ "of": "count" }]
+            }),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn dependents_groups_a_filled_column_and_reaches_the_other_readers() {
+        // Issue 18.
+        let mut wb = one_sheet_workbook("hash-alpha", "alpha.xlsx", "Labour");
+        let mut labour = eg_model::Sheet::new(eg_model::SheetId(0), "Labour");
+        labour.set(
+            0,
+            0,
+            eg_model::Cell::literal(CellValue::Text("Hours".into())),
+        );
+        for row in 1..=20u32 {
+            labour.set(
+                row,
+                0,
+                eg_model::Cell::literal(CellValue::Number(row as f64)),
+            );
+            labour.set(
+                row,
+                1,
+                formula_cell(&format!(
+                    "IF(A{0}>8.5,\"C\",IF(A{0}>8,\"D\",\"E\"))",
+                    row + 1
+                )),
+            );
+        }
+        let mut summary = eg_model::Sheet::new(eg_model::SheetId(1), "Summary");
+        summary.set(0, 0, formula_cell("SUM(Labour!$A$2:$A$21)"));
+        wb.sheets = vec![labour, summary];
+        let (mut state, _dir) = state_holding(wb);
+
+        let out = call(
+            &mut state,
+            "dependents",
+            &json!({ "workbook": "hash-alpha", "citation": "Labour!A2:A21", "limit": 5 }),
+        )
+        .unwrap();
+        assert!(
+            out.contains("is read by 21 formula(s) in 2 place(s)"),
+            "{out}"
+        );
+        assert!(out.contains("Labour!B2:B21"), "{out}");
+        assert!(out.contains("(20 formulas filled from =IF(A2>8.5"), "{out}");
+        assert!(
+            out.contains("Summary!A1"),
+            "the other reader is reached: {out}"
+        );
+        assert_eq!(out.lines().count(), 3, "{out}");
+    }
+
+    #[test]
+    fn sheets_lists_every_tab_in_order_with_its_visibility() {
+        // Issue 19.
+        let mut wb = one_sheet_workbook("hash-alpha", "alpha.xlsx", "Front");
+        let mut scratch = eg_model::Sheet::new(eg_model::SheetId(1), "Old workings");
+        scratch.visibility = eg_model::Visibility::Hidden;
+        scratch.set(4, 2, eg_model::Cell::literal(CellValue::Number(1.0)));
+        let mut machinery = eg_model::Sheet::new(eg_model::SheetId(2), "Lists");
+        machinery.visibility = eg_model::Visibility::VeryHidden;
+        wb.sheets.push(scratch);
+        wb.sheets.push(machinery);
+        let (mut state, _dir) = state_holding(wb);
+
+        let out = call(&mut state, "sheets", &json!({ "workbook": "hash-alpha" })).unwrap();
+        assert!(
+            out.contains("3 sheet(s) in alpha.xlsx, 2 of them hidden"),
+            "{out}"
+        );
+        let lines: Vec<&str> = out.lines().skip(1).collect();
+        assert!(
+            lines[0].contains("1  Front") && lines[0].contains("visible"),
+            "{out}"
+        );
+        assert!(lines[0].contains("uses A1:B4"), "{out}");
+        assert!(
+            lines[1].contains("2  Old workings") && lines[1].contains("hidden"),
+            "{out}"
+        );
+        assert!(lines[1].contains("uses C5"), "{out}");
+        assert!(
+            lines[2].contains("very hidden") && lines[2].contains("empty"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn workbooks_can_be_narrowed_to_one() {
+        let (mut state, _dir) = two_workbook_state();
+        let all = call(&mut state, "workbooks", &json!({})).unwrap();
+        assert!(all.starts_with("2 workbook(s)"), "{all}");
+        let one = call(&mut state, "workbooks", &json!({ "workbook": "beta.xlsx" })).unwrap();
+        assert!(one.starts_with("1 workbook(s)"), "{one}");
+        assert!(
+            one.contains("beta.xlsx") && !one.contains("alpha.xlsx"),
+            "{one}"
+        );
     }
 }

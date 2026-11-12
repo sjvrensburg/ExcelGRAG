@@ -81,6 +81,11 @@ pub enum QueryError {
         kind: &'static str,
         what: &'static str,
     },
+    #[error(
+        "{column:?} is the column that labels this table's rows, so {what} of it is not a \
+         quantity; filter, group or count on it instead"
+    )]
+    LabelColumn { column: String, what: &'static str },
     #[error("nothing to compute: give at least one aggregate")]
     NothingAsked,
     #[error("limit is 0, so no group could ever be returned — say how many you want")]
@@ -137,6 +142,16 @@ impl Aggregate {
             | Aggregate::Mean(c)
             | Aggregate::Min(c)
             | Aggregate::Max(c) => Some(c),
+        }
+    }
+
+    /// Whether it adds the column up — meaningless over a column of row labels,
+    /// even a numeric one: the sum of the account numbers is no figure.
+    fn totals(&self) -> Option<&'static str> {
+        match self {
+            Aggregate::Sum(_) => Some("the sum"),
+            Aggregate::Mean(_) => Some("the mean"),
+            _ => None,
         }
     }
 
@@ -235,6 +250,10 @@ pub fn query(workbook: &Workbook, table: &Table, query: &Query) -> Result<Answer
     let sheet = workbook
         .sheet(table.body.sheet)
         .ok_or_else(|| QueryError::NoSuchColumn(String::new()))?;
+    // Indexes run over the label columns and then the body, the order
+    // `read_span` yields — a table is keyed by its row labels as often as
+    // not, and a query that could not name them could not group by the key.
+    let columns: Vec<&TableColumn> = table.all_columns().collect();
 
     // Resolved up front so a query naming a column this table does not have
     // fails before it reads a cell, rather than returning an empty answer that
@@ -242,12 +261,12 @@ pub fn query(workbook: &Workbook, table: &Table, query: &Query) -> Result<Answer
     let filters: Vec<(usize, &Test)> = query
         .filters
         .iter()
-        .map(|f| Ok((index_of(table, &f.column)?, &f.test)))
+        .map(|f| Ok((index_of(&columns, &f.column)?, &f.test)))
         .collect::<Result<_, _>>()?;
     let groups: Vec<usize> = query
         .group_by
         .iter()
-        .map(|c| index_of(table, c))
+        .map(|c| index_of(&columns, c))
         .collect::<Result<_, _>>()?;
     let aggregates: Vec<(Option<usize>, &Aggregate)> = query
         .aggregates
@@ -256,9 +275,17 @@ pub fn query(workbook: &Workbook, table: &Table, query: &Query) -> Result<Answer
             let Some(name) = a.column() else {
                 return Ok((None, a));
             };
-            let i = index_of(table, name)?;
+            let i = index_of(&columns, name)?;
+            if let Some(what) = a.totals() {
+                if table.is_label(columns[i]) {
+                    return Err(QueryError::LabelColumn {
+                        column: name.to_string(),
+                        what,
+                    });
+                }
+            }
             if let Some(what) = a.needs_numbers() {
-                let column = &table.columns[i];
+                let column = columns[i];
                 if !column.kind.is_numeric() {
                     return Err(QueryError::NotNumeric {
                         column: name.to_string(),
@@ -271,8 +298,21 @@ pub fn query(workbook: &Workbook, table: &Table, query: &Query) -> Result<Answer
         })
         .collect::<Result<_, _>>()?;
 
+    // The answer names the cells it read: the body, widened to the label
+    // columns only when the query named one of them.
+    let labels = table.label_columns.len();
+    let named_label = filters
+        .iter()
+        .map(|(i, _)| *i)
+        .chain(groups.iter().copied())
+        .chain(aggregates.iter().filter_map(|(i, _)| *i))
+        .any(|i| i < labels);
     let mut answer = Answer {
-        over: table.body,
+        over: if named_label {
+            table.span()
+        } else {
+            table.body
+        },
         groups: Vec::new(),
         groups_not_listed: 0,
         rows_scanned: 0,
@@ -287,7 +327,7 @@ pub fn query(workbook: &Workbook, table: &Table, query: &Query) -> Result<Answer
         FxHashMap::default();
     let mut order: Vec<Vec<ValueKey>> = Vec::new();
 
-    for row in table.read(sheet) {
+    for row in table.read_span(sheet) {
         answer.rows_scanned += 1;
         let mut kept = true;
         for (i, test) in &filters {
@@ -319,7 +359,7 @@ pub fn query(workbook: &Workbook, table: &Table, query: &Query) -> Result<Answer
             }
         };
         slot.1.rows += 1;
-        // `read` yields every row of the body in order, gaps included, so
+        // `read_span` yields every row of the body in order, gaps included, so
         // the row scanned is the sheet row.
         let sheet_row = table.body.top + (answer.rows_scanned - 1) as u32;
         for (n, (column, aggregate)) in aggregates.iter().enumerate() {
@@ -345,9 +385,9 @@ pub fn query(workbook: &Workbook, table: &Table, query: &Query) -> Result<Answer
 }
 
 /// The column index for a header, refusing what cannot be resolved.
-fn index_of(table: &Table, header: &str) -> Result<usize, QueryError> {
+fn index_of(columns: &[&TableColumn], header: &str) -> Result<usize, QueryError> {
     let mut found = None;
-    for (i, column) in table.columns.iter().enumerate() {
+    for (i, column) in columns.iter().enumerate() {
         if column.header.eq_ignore_ascii_case(header) {
             if found.is_some() {
                 return Err(QueryError::AmbiguousColumn(header.to_string()));
@@ -522,9 +562,10 @@ impl Accumulators {
     }
 }
 
-/// The columns a query may name, for a caller building one.
+/// The columns a query may name, for a caller building one: the row-label
+/// columns, then the body.
 pub fn columns(table: &Table) -> Vec<&TableColumn> {
-    table.columns.iter().collect()
+    table.all_columns().collect()
 }
 
 /// Whether a column can be summed.

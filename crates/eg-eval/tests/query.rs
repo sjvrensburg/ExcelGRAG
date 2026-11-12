@@ -479,3 +479,89 @@ fn a_minimum_and_a_maximum_say_which_row_they_were_found_in() {
     assert_eq!(residential.values[0], Some(1200.0));
     assert_eq!(residential.at[0], Some(1), "North's row");
 }
+
+/// `book()`, with its row-label column named the way detection names one.
+fn keyed_book() -> (Workbook, Table) {
+    let (workbook, _) = book();
+    let mut keyed = region(4, 3, &["Type", "Debt", "Note"]);
+    keyed.label_headers = vec!["Customer".into()];
+    let table = read_table(&workbook.sheets[0], &keyed).unwrap();
+    (workbook, table)
+}
+
+#[test]
+fn the_row_label_column_can_be_filtered_and_grouped_on() {
+    // Issue 16: the column a table is keyed by was kept out of the body, and
+    // with it out of every query — "how many rows per customer" could not be
+    // asked at all.
+    let (workbook, table) = keyed_book();
+    let answer = query(
+        &workbook,
+        &table,
+        &Query {
+            filters: vec![Filter {
+                column: "Customer".into(),
+                test: Test::OneOf(vec![
+                    CellValue::Text("north".into()),
+                    CellValue::Text("East".into()),
+                ]),
+            }],
+            group_by: vec!["Customer".into()],
+            aggregates: vec![Aggregate::Count, Aggregate::Sum("Debt".into())],
+            limit: 10,
+        },
+    )
+    .unwrap();
+    let keys: Vec<&CellValue> = answer.groups.iter().map(|g| &g.key[0]).collect();
+    assert_eq!(
+        keys,
+        vec![
+            &CellValue::Text("North".into()),
+            &CellValue::Text("East".into())
+        ]
+    );
+    assert_eq!(answer.groups[0].values[1], Some(1200.0));
+    // It read the label column, so it says so.
+    assert_eq!(answer.over, RangeRef::new(SheetId(0), 1, 0, 4, 3));
+
+    // A query that never names it still reports the body alone.
+    let plain = query(
+        &workbook,
+        &table,
+        &Query {
+            aggregates: vec![Aggregate::Sum("Debt".into())],
+            limit: 10,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(plain.over, table.body);
+}
+
+#[test]
+fn a_row_label_column_is_counted_but_never_totalled() {
+    let (workbook, table) = keyed_book();
+    let distinct = query(
+        &workbook,
+        &table,
+        &Query {
+            aggregates: vec![Aggregate::CountDistinct("Customer".into())],
+            limit: 10,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(distinct.one().unwrap().counts[0], Some(4));
+
+    let err = query(
+        &workbook,
+        &table,
+        &Query {
+            aggregates: vec![Aggregate::Sum("Customer".into())],
+            limit: 10,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, QueryError::LabelColumn { .. }), "{err}");
+}

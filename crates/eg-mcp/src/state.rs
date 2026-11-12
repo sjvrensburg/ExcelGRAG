@@ -144,6 +144,13 @@ impl State {
         Ok((loaded, Some(seconds)))
     }
 
+    /// Hold `loaded` open under `path`, as though it had been read from there —
+    /// so a tool test can run against a workbook built in memory.
+    #[cfg(test)]
+    pub(crate) fn preload(&mut self, path: &str, loaded: Loaded) {
+        self.workbooks.insert(path.to_string(), Arc::new(loaded));
+    }
+
     /// Where the stored path actually points.
     ///
     /// Indexing now stores an absolute path (see `eg-cli`'s `corpus::index`),

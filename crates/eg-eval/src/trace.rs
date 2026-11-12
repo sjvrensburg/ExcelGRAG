@@ -290,6 +290,115 @@ pub fn dependents_of(
     (out, report)
 }
 
+/// The formulas that read a range, one entry per filled-down run.
+///
+/// A column of filled-down formulas is one idea written once per row, and
+/// [`dependents_of`] lists it once per reference — twice per row for
+/// `=IF(E2>8.5,"C",IF(E2>8,"D","E"))` — so a `limit` of thirty spent every
+/// line on the first reader and never reached the summaries on other sheets.
+/// This groups the readers the way the graph groups formulas: by R1C1 shape,
+/// over contiguous runs, so a filled column comes back as one entry with a
+/// count and `limit` counts entries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Readers {
+    /// The reading cells: one cell, or a solid rectangle sharing one shape.
+    pub range: RangeRef,
+    /// Formula cells in `range`. Each read the range at least once.
+    pub formulas: u64,
+    /// The formula at the top-left cell, as written.
+    pub formula: String,
+    /// The first reference in that formula that reads the range, as written.
+    pub text: String,
+}
+
+/// What [`readers_of`] looked at and found.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadersReport {
+    pub formulas_scanned: u64,
+    /// Formula cells that read the range — each once, however many of its
+    /// references do.
+    pub formulas: u64,
+    /// Groups those formulas make; more than were returned when `capped`.
+    pub groups: u64,
+    pub capped: bool,
+}
+
+/// What reads `range`, grouped by filled-down run. See [`Readers`].
+///
+/// The same full scan as [`dependents_of`], and then a grouping pass over
+/// only the formulas that matched — never the whole sheet, so its cost is
+/// bounded by the readers, not by the workbook.
+pub fn readers_of(
+    workbook: &Workbook,
+    range: RangeRef,
+    limit: usize,
+) -> (Vec<Readers>, ReadersReport) {
+    use eg_structure::formula_group::group_formulas;
+
+    let sheets = sheet_ids(workbook);
+    let mut report = ReadersReport::default();
+    let mut spans: Vec<ReferenceSpan> = Vec::new();
+    let mut out = Vec::new();
+
+    for sheet in &workbook.sheets {
+        // The readers on this sheet, as a sheet of their own, so the grouping
+        // the graph uses can run over them unchanged. Gaps — a row of the
+        // run whose formula reads something else — split a group, as they
+        // should: the cells between do not read the range.
+        let mut readers = Sheet::new(sheet.id, sheet.name.clone());
+        let mut first_text: FxHashMap<CellRef, String> = FxHashMap::default();
+        for (at, cell) in sheet.iter() {
+            let Some(formula) = cell.formula.as_deref() else {
+                continue;
+            };
+            report.formulas_scanned += 1;
+            scan_references_into(formula, &mut spans);
+            let hit = spans.iter().find_map(|span| {
+                let reference = resolve(at, span, formula, &sheets);
+                reference
+                    .target
+                    .ranges()
+                    .iter()
+                    .any(|t| overlaps(*t, range))
+                    .then_some(reference.text)
+            });
+            let Some(text) = hit else {
+                continue;
+            };
+            report.formulas += 1;
+            first_text.insert(at, text);
+            readers.set(
+                at.row,
+                at.col,
+                eg_model::Cell {
+                    value: CellValue::Empty,
+                    formula: Some(formula.to_string()),
+                    format: Default::default(),
+                },
+            );
+        }
+        if first_text.is_empty() {
+            continue;
+        }
+        let (groups, _) = group_formulas(&readers);
+        for group in groups {
+            report.groups += 1;
+            if out.len() >= limit {
+                report.capped = true;
+                continue;
+            }
+            let anchor = group.anchor();
+            out.push(Readers {
+                range: group.range,
+                formulas: group.cell_count,
+                text: first_text.remove(&anchor).unwrap_or_default(),
+                formula: group.representative,
+            });
+        }
+    }
+    (out, report)
+}
+
 /// The cells holding a given value.
 ///
 /// The third direction, and the one nothing indexes at all. A corpus records

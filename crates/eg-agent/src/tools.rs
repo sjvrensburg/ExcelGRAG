@@ -32,6 +32,38 @@ pub fn names() -> impl Iterator<Item = &'static str> {
     eg_mcp::tools::TOOLS.iter().map(|t| t.name)
 }
 
+/// Whether a tool takes a `workbook` argument, by its schema.
+pub fn takes_workbook(name: &str) -> bool {
+    eg_mcp::tools::TOOLS
+        .iter()
+        .find(|t| t.name == name)
+        .is_some_and(|t| (t.schema)()["properties"].get("workbook").is_some())
+}
+
+/// `args` with `workbook` set to `scope`, for a tool that takes one.
+///
+/// A run scoped to one workbook answers about that workbook whatever the
+/// model asked for: a model that named another, or none in a corpus of
+/// several, is overridden rather than refused, the way the tool's own
+/// argument would have narrowed it. A tool with no `workbook` argument is
+/// left alone.
+pub fn scoped(name: &str, args: &Value, scope: Option<&str>) -> Value {
+    let Some(scope) = scope else {
+        return args.clone();
+    };
+    if !takes_workbook(name) {
+        return args.clone();
+    }
+    let mut args = match args {
+        Value::Object(_) => args.clone(),
+        // A model that sent no arguments, or not an object, still gets the
+        // scope; the tool reports anything else wrong with what it sent.
+        _ => Value::Object(Default::default()),
+    };
+    args["workbook"] = Value::String(scope.to_string());
+    args
+}
+
 /// Run one tool against the shared engine.
 ///
 /// Runs on Tokio's blocking pool because every tool underneath is
@@ -89,5 +121,23 @@ mod tests {
             assert_eq!(def.parameters, (tool.schema)());
             assert_eq!(def.parameters["type"], "object", "{}", tool.name);
         }
+    }
+
+    #[test]
+    fn a_scope_is_set_on_every_tool_that_takes_a_workbook_and_no_other() {
+        let args = serde_json::json!({ "query": "rates", "workbook": "other.xlsx" });
+        assert_eq!(
+            scoped("search", &args, Some("a.xlsx"))["workbook"],
+            "a.xlsx",
+            "overridden, not refused"
+        );
+        assert_eq!(scoped("search", &args, None), args);
+        assert_eq!(
+            scoped("workbooks", &Value::Null, Some("a.xlsx")),
+            serde_json::json!({ "workbook": "a.xlsx" })
+        );
+        // A tool without a `workbook` argument is left alone.
+        assert!(!takes_workbook("no_such_tool"));
+        assert_eq!(scoped("no_such_tool", &args, Some("a.xlsx")), args);
     }
 }

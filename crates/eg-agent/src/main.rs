@@ -66,6 +66,17 @@ struct Args {
     /// Print tool results in full rather than their first lines.
     #[arg(long)]
     verbose: bool,
+    /// Append one JSON line per model call to this file: the request as
+    /// sent (system prompt with its progress recap, history after elision,
+    /// tool definitions) and the response received. For replaying a run,
+    /// diffing two, or building training examples from one.
+    #[arg(long)]
+    trace: Option<PathBuf>,
+    /// Ask the question about this workbook only (content hash, path or file
+    /// name): every tool call is scoped to it. An answer file sets this per
+    /// question with a `workbook` field.
+    #[arg(long)]
+    workbook: Option<String>,
     /// A JSON object merged into every request body, for endpoint-specific
     /// switches — e.g. '{"chat_template_kwargs":{"terse":false}}' to a
     /// llama-server whose template takes that flag.
@@ -73,12 +84,66 @@ struct Args {
     extra_params: Option<String>,
 }
 
+/// One question of an answer file.
 #[derive(Deserialize)]
 struct Question {
     ask: String,
+    /// The answer, in its several spellings. The reply must name one.
     want: Vec<String>,
+    /// Text a tool result must carry for the answer to be grounded — for an
+    /// answer of absence, where the reply says "nothing reads it" and the
+    /// tool said "read by 0 formula(s)", and no one string is in both.
+    /// When given, `want` is matched against the reply only, and grounding
+    /// is this; when absent, a tool result must carry the `want` itself.
+    #[serde(default)]
+    want_result: Vec<String>,
+    /// The workbook the question is about (content hash, path or file
+    /// name), so one corpus can hold many. Scopes every tool call.
+    #[serde(default)]
+    workbook: Option<String>,
     #[serde(default)]
     known_gap: Option<String>,
+}
+
+/// How one reply scored against its question.
+#[derive(Debug, PartialEq)]
+enum Mark {
+    /// Named, and grounded: the `want` it named.
+    Hit(String),
+    /// Named, but no tool result carried what grounds it.
+    Echo,
+    Miss,
+}
+
+/// Mark a reply against `q`, given the results of the tool calls that
+/// succeeded.
+///
+/// A hit is *grounded*: the reply names an answer, and a tool the model
+/// actually called returned it — or, with `want_result`, returned what the
+/// answer stands on. The reply alone is not enough: the question usually
+/// contains the answer's own words, and a model that never called a tool
+/// echoes them back. Case-blind, and blind to the thousands separators a
+/// model puts into a figure a tool printed bare — `41,789,046.97` is
+/// `41789046.97`, and the agent answer file wants the number.
+fn mark(q: &Question, answer: &str, results: &[&str]) -> Mark {
+    let named = |text: &str, w: &str| normalise(text).contains(&normalise(w));
+    let carried = |wants: &[String]| {
+        wants
+            .iter()
+            .any(|w| results.iter().any(|result| named(result, w)))
+    };
+    // The wants are one answer in its several spellings — `0.85`, `85%` —
+    // so the reply may use one and the tool another.
+    let grounded = if q.want_result.is_empty() {
+        carried(&q.want)
+    } else {
+        carried(&q.want_result)
+    };
+    match q.want.iter().find(|w| named(answer, w)) {
+        Some(w) if grounded => Mark::Hit(w.clone()),
+        Some(_) => Mark::Echo,
+        None => Mark::Miss,
+    }
 }
 
 /// One question's outcome, saved by `--out` and read back by `--compare`.
@@ -154,12 +219,47 @@ async fn main() -> Result<()> {
         }
         harness = harness.with_extra_params(params);
     }
+    if let Some(path) = &args.trace {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .with_context(|| format!("could not open {}", path.display()))?;
+        let file = Mutex::new(std::io::BufWriter::new(file));
+        let shown = path.display().to_string();
+        harness = harness.with_trace(Arc::new(move |record| {
+            use std::io::Write;
+            // Flushed per line: a run that is killed part-way keeps every
+            // call it finished, which is when the trace is most wanted.
+            let Ok(mut out) = file.lock() else { return };
+            if writeln!(out, "{record}")
+                .and_then(|()| out.flush())
+                .is_err()
+            {
+                eprintln!("could not write the trace to {shown}");
+            }
+        }));
+    }
     let verbose = args.verbose;
 
     if let Some(path) = &args.score {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("could not read {}", path.display()))?;
         let mut questions: Vec<Question> = serde_json::from_str(&text)?;
+        // A question scoped to a workbook the corpus does not hold would be
+        // marked a miss for the file's mistake, not the model's.
+        {
+            let state = engine
+                .lock()
+                .map_err(|_| anyhow!("the engine lock is poisoned"))?;
+            for q in &questions {
+                if let Some(wb) = &q.workbook {
+                    state
+                        .resolve(Some(wb))
+                        .map_err(|e| anyhow!("question {:?}: {e}", q.ask))?;
+                }
+            }
+        }
         if let Some(n) = args.limit {
             questions.truncate(n);
         }
@@ -167,11 +267,18 @@ async fn main() -> Result<()> {
         let mut rows: Vec<ScoreRow> = Vec::new();
         for (i, q) in questions.iter().enumerate() {
             println!("\n=== [{}/{}] {}", i + 1, questions.len(), q.ask);
+            if let Some(wb) = &q.workbook {
+                println!("    (about {wb})");
+            }
             let mut sink = |e: Event| print_event(&e, verbose);
+            let scope = q.workbook.as_deref().or(args.workbook.as_deref());
             // A question the model could not finish — a timed-out call, a
             // provider error — is that question's miss, not the end of the
             // file: the other questions are the point of running it.
-            let outcome = match harness.ask(Arc::clone(&engine), &q.ask, &mut sink).await {
+            let outcome = match harness
+                .ask_in(Arc::clone(&engine), &q.ask, scope, &mut sink)
+                .await
+            {
                 Ok(outcome) => outcome,
                 Err(e) => {
                     println!("--- MISS (run failed: {e})");
@@ -186,32 +293,20 @@ async fn main() -> Result<()> {
                 }
             };
             let answer = outcome.answer.clone().unwrap_or_default();
-            // A hit is *grounded*: the reply names an answer, and a tool the
-            // model actually called returned that name. The reply alone is
-            // not enough — the question usually contains the answer's own
-            // words, and a model that never called a tool echoes them back.
-            // Case-blind, and blind to the thousands separators a model puts
-            // into a figure a tool printed bare — `41,789,046.97` is
-            // `41789046.97`, and the agent answer file wants the number.
-            let named = |text: &str, w: &str| normalise(text).contains(&normalise(w));
-            // The wants are one answer in its several spellings — `0.85`,
-            // `85%` — so the reply may use one and the tool another.
-            let carried = q.want.iter().any(|w| {
-                outcome
-                    .calls
-                    .iter()
-                    .any(|c| c.ok && !c.refused && named(&c.result, w))
-            });
-            let hit = q.want.iter().find(|w| carried && named(&answer, w));
-            let echoed = hit.is_none() && q.want.iter().any(|w| named(&answer, w));
-            let mark = match (hit, echoed, &q.known_gap) {
-                (Some(w), _, _) => {
+            let results: Vec<&str> = outcome
+                .calls
+                .iter()
+                .filter(|c| c.ok && !c.refused)
+                .map(|c| c.result.as_str())
+                .collect();
+            let mark = match (mark(q, &answer, &results), &q.known_gap) {
+                (Mark::Hit(w), _) => {
                     hits += 1;
                     format!("HIT  ({w})")
                 }
-                (None, true, _) => "ECHO (named, but no tool result carried it)".to_string(),
-                (None, false, Some(gap)) => format!("MISS (known gap: {gap})"),
-                (None, false, None) => "MISS".to_string(),
+                (Mark::Echo, _) => "ECHO (named, but no tool result carried it)".to_string(),
+                (Mark::Miss, Some(gap)) => format!("MISS (known gap: {gap})"),
+                (Mark::Miss, None) => "MISS".to_string(),
             };
             println!(
                 "--- {mark}; {} turn(s), {} tool call(s), {} tokens",
@@ -261,7 +356,9 @@ async fn main() -> Result<()> {
         return Err(anyhow!("give a question, or --score <answers.json>"));
     }
     let mut sink = |e: Event| print_event(&e, verbose);
-    let outcome = harness.ask(engine, &question, &mut sink).await?;
+    let outcome = harness
+        .ask_in(engine, &question, args.workbook.as_deref(), &mut sink)
+        .await?;
     match outcome.answer {
         Some(answer) => println!("\n{answer}"),
         None => println!(
@@ -390,4 +487,67 @@ fn indent(text: &str) -> String {
         .map(|l| format!("      {l}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn question(want: &[&str], want_result: &[&str]) -> Question {
+        Question {
+            ask: "Is the Hours column used anywhere?".into(),
+            want: want.iter().map(|s| s.to_string()).collect(),
+            want_result: want_result.iter().map(|s| s.to_string()).collect(),
+            workbook: None,
+            known_gap: None,
+        }
+    }
+
+    #[test]
+    fn an_answer_is_grounded_by_a_tool_result_carrying_it() {
+        let q = question(&["41789046.97"], &[]);
+        let results = ["sum of Debt 41789046.97"];
+        assert_eq!(
+            mark(&q, "The total is 41,789,046.97.", &results),
+            Mark::Hit("41789046.97".into())
+        );
+        assert_eq!(mark(&q, "The total is 41,789,046.97.", &[]), Mark::Echo);
+        assert_eq!(mark(&q, "I could not find it.", &results), Mark::Miss);
+    }
+
+    #[test]
+    fn an_answer_of_absence_is_grounded_by_want_result() {
+        // Issue 20: "nothing reads it" and "read by 0 formula(s)" share no
+        // string, so a correct "nothing" could never be a hit.
+        let q = question(&["nothing", "not used", "unused"], &["read by 0 formula"]);
+        let said_none = ["Labour!E2:E98 is read by 0 formula(s) in 0 place(s), of 9 scanned"];
+        let said_some = ["Labour!E2:E98 is read by 380 formula(s) in 6 place(s), of 1306 scanned"];
+        assert_eq!(
+            mark(&q, "Nothing reads that column; it is unused.", &said_none),
+            Mark::Hit("nothing".into())
+        );
+        assert_eq!(
+            mark(&q, "Nothing reads that column.", &said_some),
+            Mark::Echo,
+            "the reply said nothing, the tool did not"
+        );
+        // `want` is matched against the reply only: a tool result that
+        // happened to say "nothing" grounds nothing by itself.
+        assert_eq!(mark(&q, "Column H reads it.", &said_none), Mark::Miss);
+    }
+
+    #[test]
+    fn an_answer_file_takes_a_workbook_per_question() {
+        let questions: Vec<Question> = serde_json::from_str(
+            r#"[
+                {"ask": "What is this workbook for?", "want": ["payroll"], "workbook": "xf_00001.xlsx"},
+                {"ask": "Is there a Budget sheet?", "want": ["no"], "want_result": ["sheet(s) in"]}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(questions[0].workbook.as_deref(), Some("xf_00001.xlsx"));
+        assert!(questions[0].want_result.is_empty());
+        assert_eq!(questions[1].workbook, None);
+        assert_eq!(questions[1].want_result, vec!["sheet(s) in".to_string()]);
+    }
 }

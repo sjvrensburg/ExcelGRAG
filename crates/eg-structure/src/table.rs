@@ -115,6 +115,17 @@ pub struct Table {
     /// Empty when there are none, and an entry may be empty when a label
     /// column is unheaded.
     pub label_headers: Vec<String>,
+    /// The same label columns, read the way a body column is: header, cells,
+    /// kind and count. Left to right, one per entry of `label_headers`.
+    ///
+    /// Still not in `columns` — a caller iterating `columns` to total them
+    /// must not be handed an account number — but a caller that names one
+    /// can filter and group on it. It is usually the column the table is
+    /// keyed by and the one other tables look up, and leaving it out of
+    /// `tables` and `query_table` made "how many rows per employee code" a
+    /// question nothing could answer.
+    #[serde(default)]
+    pub label_columns: Vec<TableColumn>,
 }
 
 impl Table {
@@ -170,6 +181,52 @@ impl Table {
         })
     }
 
+    /// The table's whole width: the label columns and the body together. Equal
+    /// to `body` for a table without labels.
+    pub fn span(&self) -> RangeRef {
+        match self.labels {
+            Some(labels) => RangeRef::new(
+                self.body.sheet,
+                self.body.top,
+                labels.left,
+                self.body.bottom,
+                self.body.right,
+            ),
+            None => self.body,
+        }
+    }
+
+    /// The rows of [`Self::span`], in order: one value per label column, then
+    /// one per body column — the order of [`Self::all_columns`].
+    ///
+    /// The label columns sit immediately left of the body, so this is the
+    /// same single row-major scan as [`Self::read`], only wider.
+    pub fn read_span<'a>(&'a self, sheet: &'a Sheet) -> impl Iterator<Item = Vec<CellValue>> + 'a {
+        let span = self.span();
+        let width = self.label_columns.len() + self.columns.len();
+        (span.top..=span.bottom).map(move |row| {
+            let mut out = vec![CellValue::Empty; width];
+            let row_range = RangeRef::new(span.sheet, row, span.left, row, span.right);
+            for (at, cell) in sheet.iter_range(row_range) {
+                if let Some(slot) = out.get_mut(usize::from(at.col - span.left)) {
+                    *slot = cell.value.clone();
+                }
+            }
+            out
+        })
+    }
+
+    /// The label columns, then the body columns, left to right — the order
+    /// [`Self::read_span`] yields values in.
+    pub fn all_columns(&self) -> impl Iterator<Item = &TableColumn> {
+        self.label_columns.iter().chain(self.columns.iter())
+    }
+
+    /// Whether `column` is one of the row-label columns.
+    pub fn is_label(&self, column: &TableColumn) -> bool {
+        self.label_columns.iter().any(|c| c.range == column.range)
+    }
+
     /// The label of one body row, where the region has a row-label column.
     pub fn label_of(&self, sheet: &Sheet, row: u32) -> Option<CellValue> {
         let labels = self.labels?;
@@ -185,7 +242,11 @@ impl Table {
 /// or a header row that is the whole of it.
 pub fn read_table(sheet: &Sheet, region: &Region) -> Option<Table> {
     let body = region.body()?;
-    let width = usize::from(body.right - body.left) + 1;
+    // The label columns are tallied in the same pass as the body: they sit
+    // immediately to its left, so the scan only gets wider.
+    let left = region.range.left;
+    let width = usize::from(body.right - left) + 1;
+    let span = RangeRef::new(body.sheet, body.top, left, body.bottom, body.right);
 
     // One row-major pass over the region, not one pass per column. A sheet is
     // an ordered map keyed by (row, column), so asking it for a single column
@@ -193,8 +254,8 @@ pub fn read_table(sheet: &Sheet, region: &Region) -> Option<Table> {
     // 136 columns. Walking the region once and dispatching each cell to its
     // column's tally is the same answer for the cells the region actually has.
     let mut tally = vec![[0u64; 4]; width];
-    for (at, cell) in sheet.iter_range(body) {
-        let Some(slot) = tally.get_mut(usize::from(at.col - body.left)) else {
+    for (at, cell) in sheet.iter_range(span) {
+        let Some(slot) = tally.get_mut(usize::from(at.col - left)) else {
             continue;
         };
         match cell.value.kind() {
@@ -206,21 +267,25 @@ pub fn read_table(sheet: &Sheet, region: &Region) -> Option<Table> {
         }
     }
 
+    let column = |col: u16, header: Option<&String>| {
+        let [numbers, text, bools, errors] = tally[usize::from(col - left)];
+        TableColumn {
+            header: header.cloned().unwrap_or_default(),
+            range: RangeRef::new(body.sheet, body.top, col, body.bottom, col),
+            kind: ColumnKind::of(numbers, text, bools, errors),
+            populated: numbers + text + bools + errors,
+        }
+    };
+    // `headers` is one entry per body column, left to right, so the offset
+    // from the body's own left edge indexes it. A column past the end of that
+    // list is a real column the region found no header for.
     let columns = (body.left..=body.right)
         .enumerate()
-        .map(|(i, col)| {
-            let [numbers, text, bools, errors] = tally[i];
-            TableColumn {
-                // `headers` is one entry per body column, left to right, so the
-                // offset from the body's own left edge indexes it. A column
-                // past the end of that list is a real column the region found
-                // no header for.
-                header: region.headers.get(i).cloned().unwrap_or_default(),
-                range: RangeRef::new(body.sheet, body.top, col, body.bottom, col),
-                kind: ColumnKind::of(numbers, text, bools, errors),
-                populated: numbers + text + bools + errors,
-            }
-        })
+        .map(|(i, col)| column(col, region.headers.get(i)))
+        .collect();
+    let label_columns = (left..body.left)
+        .enumerate()
+        .map(|(i, col)| column(col, region.label_headers.get(i)))
         .collect();
 
     let labels = (region.header_cols > 0).then(|| {
@@ -239,6 +304,7 @@ pub fn read_table(sheet: &Sheet, region: &Region) -> Option<Table> {
         columns,
         labels,
         label_headers: region.label_headers.clone(),
+        label_columns,
     })
 }
 
@@ -396,6 +462,17 @@ mod tests {
         // say *which* customer needs the header, and the graph needs it to
         // give the column a node anyone can search for.
         assert_eq!(table.label_headers, vec!["Customer".to_string()]);
+        // And read like one, for a caller that names it.
+        assert_eq!(table.label_columns.len(), 1);
+        assert_eq!(table.label_columns[0].header, "Customer");
+        assert_eq!(table.label_columns[0].kind, ColumnKind::Text);
+        assert_eq!(table.label_columns[0].populated, 2);
+        assert_eq!(table.span().left, 0);
+        let rows: Vec<Vec<CellValue>> = table.read_span(&sheet).collect();
+        assert_eq!(
+            rows[1],
+            vec![CellValue::Text("South".into()), CellValue::Number(3400.0)]
+        );
     }
 
     #[test]

@@ -465,3 +465,72 @@ fn a_value_that_is_not_there_says_so_over_a_scan_that_saw_everything() {
     assert_eq!(report.other_kind, 0);
     assert_eq!(report.cells_scanned, 8);
 }
+
+/// A column `E` of hours, read twice per row by a filled-down band in `H`
+/// and once by a total on another sheet.
+fn labour() -> Workbook {
+    let mut rows = vec!["Name . . . Hours . . Band".to_string()];
+    for r in 2..=6 {
+        rows.push(format!(
+            "w{r} . . . {r} . . =IF(E{r}>8.5,\"C\",IF(E{r}>8,\"D\",\"E\"))"
+        ));
+    }
+    let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+    Workbook {
+        path: "labour.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash".into(),
+        sheets: vec![
+            grid(0, "Labour", &rows),
+            grid(1, "Summary", &["Total =SUM(Labour!$E$2:$E$6)"]),
+        ],
+        defined_names: Vec::new(),
+        external_links: Vec::new(),
+    }
+}
+
+#[test]
+fn readers_come_back_one_per_filled_run_not_one_per_reference() {
+    // Issue 18: one line per reference spent `limit` on the first reader's
+    // rows — two each, since the band formula names its cell twice — and
+    // the total on another sheet was never reached.
+    let wb = labour();
+    let hours = RangeRef::new(SheetId(0), 1, 4, 5, 4);
+    let (readers, report) = eg_eval::readers_of(&wb, hours, 2);
+
+    assert_eq!(
+        report.formulas, 6,
+        "five band cells and one total, each once"
+    );
+    assert_eq!(report.groups, 2);
+    assert!(!report.capped);
+    let shown: Vec<(String, u64)> = readers
+        .iter()
+        .map(|r| (wb.cite_range(r.range), r.formulas))
+        .collect();
+    assert_eq!(
+        shown,
+        vec![
+            ("Labour!H2:H6".to_string(), 5),
+            ("Summary!B1".to_string(), 1)
+        ]
+    );
+    assert_eq!(readers[0].text, "E2");
+    assert!(readers[0].formula.starts_with("IF(E2>8.5"));
+
+    // `limit` counts places.
+    let (one, capped) = eg_eval::readers_of(&wb, hours, 1);
+    assert_eq!(one.len(), 1);
+    assert!(capped.capped);
+    assert_eq!(capped.groups, 2);
+}
+
+#[test]
+fn a_run_reading_the_range_only_in_part_is_cut_where_it_stops() {
+    // The band filled down H2:H6, asked about E2:E3: only H2:H3 read it, and
+    // the group says so rather than claiming the whole run.
+    let wb = labour();
+    let (readers, report) = eg_eval::readers_of(&wb, RangeRef::new(SheetId(0), 1, 4, 2, 4), 10);
+    assert_eq!(report.formulas, 3, "H2, H3, and the total over all of E");
+    assert_eq!(wb.cite_range(readers[0].range), "Labour!H2:H3");
+}

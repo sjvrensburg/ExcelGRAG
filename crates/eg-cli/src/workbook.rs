@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use eg_eval::whatif::{what_if, Blocked, Change, WhatIfOptions};
 use eg_eval::{
-    cells_holding, cells_in, check as check_formulas, dependents_of, precedents_of, Outcome,
+    cells_holding, cells_in, check as check_formulas, precedents_of, readers_of, Outcome,
 };
 use eg_graph::store::Corpus;
 use eg_ingest::{load_with, LoadOptions};
@@ -124,21 +124,36 @@ pub fn trace(
     let at = Instant::now();
 
     if dependents {
-        let (refs, report) = dependents_of(&workbook, range, limit);
+        // One line per filled-down run, as the MCP tool prints it: a line
+        // per reference spent `--limit` on the first reader's rows.
+        let (readers, report) = readers_of(&workbook, range, limit);
         println!(
-            "{} is read by {} formula(s), of {} scanned in {:.1}s",
+            "{} is read by {} formula(s) in {} place(s), of {} scanned in {:.1}s",
             workbook.cite_range(range),
-            report.matches,
+            report.formulas,
+            report.groups,
             report.formulas_scanned,
             at.elapsed().as_secs_f64()
         );
-        for reference in &refs {
-            println!("  {:<28} {}", workbook.cite(reference.from), reference.text);
+        for reader in &readers {
+            let count = if reader.formulas > 1 {
+                format!("  ({} formulas)", reader.formulas)
+            } else {
+                String::new()
+            };
+            println!(
+                "  {:<28} {}{count}",
+                workbook.cite_range(reader.range),
+                reader.text
+            );
         }
-        if refs.is_empty() {
+        if readers.is_empty() {
             println!("  nothing in this workbook reads it");
         } else if report.capped {
-            println!("  … more, raise --limit");
+            println!(
+                "  … {} more place(s), raise --limit",
+                report.groups - readers.len() as u64
+            );
         }
         return Ok(());
     }

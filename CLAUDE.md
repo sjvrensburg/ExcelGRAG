@@ -231,9 +231,13 @@ above it.
   reference resolving to more than one cell becomes one terminal node instead
   of being expanded — a lookup table is where a chain of reasoning ends, not a
   fork into every cell of its rows.
-- `eg-mcp` — MCP server over the whole stack (`workbooks`, `search`, `context`,
-  `read_cells`, `precedents`, `dependents`, `find_value`, `recompute`, `tables`,
-  `query_table`, `schema`, `what_if`, `graph`). Hand-written stdio JSON
+- `eg-mcp` — MCP server over the whole stack (`workbooks`, `sheets`, `search`,
+  `context`, `read_cells`, `precedents`, `dependents`, `find_value`, `recompute`,
+  `tables`, `query_table`, `schema`, `what_if`, `graph`). `dependents` reports
+  readers per filled-down run (`readers_of`), so `limit` counts places, not
+  cells. `tables` cites a table by its whole width and lists its row-label
+  columns, marked; `query_table` filters, groups and counts on them but
+  refuses to total one. Hand-written stdio JSON
   protocol, no SDK, because the workspace is synchronous. A failing tool returns a
   *result* with `isError`, never a protocol error.
 - `eg-cli` — `eg`.
@@ -284,7 +288,12 @@ above it.
   `eg-agent --score tests/fixtures/demo/agent-answers.json` marks whether the
   agent's *final reply* names an answer **and** a tool it called returned
   it — the retrieval file's questions with agent-shaped wants, plus six that
-  need computing (`query_table`, `what_if`). Read the trails, not just the
+  need computing (`query_table`, `what_if`). An answer of absence grounds on
+  the question's `want_result` instead (the reply says "nothing", the tool
+  says `read by 0 formula`); a question's optional `workbook` scopes every
+  tool call to one workbook of the corpus (`Harness::ask_in`); and `--trace
+  <file.jsonl>` writes one line per model call, the request as sent and the
+  response received. Read the trails, not just the
   marks: three of the four tool defects found so far were found there. The
   scripted-model tests in `tests/scripted.rs` prove the loop's contract with
   no model at all. When running against a local model server, stop **your

@@ -105,7 +105,13 @@ pub struct Harness<M: CompletionModel + Clone> {
     /// Show the model values as their kinds, whatever the engine was opened
     /// with. See [`tools::execute`].
     redact_values: bool,
+    /// Handed one record per model call: the request as sent and the
+    /// response as received. See [`Self::with_trace`].
+    trace: Option<Trace>,
 }
+
+/// Where [`Harness::with_trace`] sends its records.
+pub type Trace = Arc<dyn Fn(Value) + Send + Sync>;
 
 impl<M: CompletionModel + Clone> Harness<M> {
     pub fn new(model: M, policy: Policy) -> Self {
@@ -117,7 +123,24 @@ impl<M: CompletionModel + Clone> Harness<M> {
             preamble: PREAMBLE.to_string(),
             extra_params: None,
             redact_values: false,
+            trace: None,
         }
+    }
+
+    /// Hand `sink` one JSON record per model call, as it completes:
+    /// `{question, workbook, turn, request, response, error}`.
+    ///
+    /// `request` is the request exactly as the model was given it — the
+    /// system prompt with its progress recap, the history after elision, the
+    /// tool definitions, the sampling settings — and `response` what came
+    /// back; `error` instead of `response` when the call failed. One record
+    /// per call rather than per question, because the system prompt and the
+    /// elided history differ from turn to turn: a replay, a diff between two
+    /// runs, or a training example is built from these, not from the
+    /// printed trail.
+    pub fn with_trace(mut self, sink: Trace) -> Self {
+        self.trace = Some(sink);
+        self
     }
 
     /// Never let a cell value reach the model: every tool result is
@@ -310,6 +333,22 @@ impl<M: CompletionModel + Clone> Harness<M> {
         question: &str,
         sink: &mut (dyn FnMut(Event) + Send),
     ) -> Result<Outcome, PromptError> {
+        self.ask_in(engine, question, None, sink).await
+    }
+
+    /// [`Self::ask`], about one workbook of the corpus: every tool call that
+    /// takes a `workbook` argument is made with `workbook` set to this one
+    /// (see [`tools::scoped`]), and the model is told only of it.
+    ///
+    /// So one corpus can hold many workbooks and still be asked "what is
+    /// this workbook for?" of each.
+    pub async fn ask_in(
+        &self,
+        engine: Arc<Mutex<eg_mcp::State>>,
+        question: &str,
+        workbook: Option<&str>,
+        sink: &mut (dyn FnMut(Event) + Send),
+    ) -> Result<Outcome, PromptError> {
         let mut run = AgentRun::new(question)
             .max_turns(self.policy.max_turns)
             .max_invalid_tool_call_retries(2);
@@ -325,12 +364,25 @@ impl<M: CompletionModel + Clone> Harness<M> {
         let preamble = match tools::execute(
             Arc::clone(&engine),
             "workbooks".into(),
-            json!({}),
+            tools::scoped("workbooks", &json!({}), workbook),
             self.redact_values,
         )
         .await
         {
+            Ok(Ok(listing)) if workbook.is_some() => format!(
+                "{}\n\nThis question is about one workbook, and every tool call is made \
+                 against it:\n{listing}",
+                self.preamble
+            ),
             Ok(Ok(listing)) => format!("{}\n\nThe corpus holds:\n{listing}", self.preamble),
+            // A scope naming no workbook of the corpus is the caller's
+            // mistake, and running on would answer about nothing.
+            Ok(Err(message)) if workbook.is_some() => {
+                return Err(PromptError::PromptCancelled {
+                    chat_history: Vec::new(),
+                    reason: format!("cannot scope this question: {message}"),
+                })
+            }
             _ => self.preamble.clone(),
         };
 
@@ -379,15 +431,48 @@ impl<M: CompletionModel + Clone> Harness<M> {
                     } else {
                         request
                     };
-                    let response = tokio::time::timeout(self.policy.model_timeout, request.send())
-                        .await
-                        .map_err(|_| PromptError::PromptCancelled {
-                            chat_history: run.full_history(),
-                            reason: format!(
-                                "the model did not answer within {:?}",
-                                self.policy.model_timeout
+                    // Built here rather than sent from the builder, so the
+                    // trace records the request the model was given.
+                    let request = request.build();
+                    request.validate_message_content()?;
+                    let traced = self.trace.as_ref().map(|_| {
+                        serde_json::to_value(&request)
+                            .unwrap_or_else(|e| json!({ "unserialisable": e.to_string() }))
+                    });
+                    let response = tokio::time::timeout(
+                        self.policy.model_timeout,
+                        self.model.completion(request),
+                    )
+                    .await
+                    .map_err(|_| {
+                        format!(
+                            "the model did not answer within {:?}",
+                            self.policy.model_timeout
+                        )
+                    });
+                    if let (Some(trace), Some(request)) = (&self.trace, traced) {
+                        let (response, error) = match &response {
+                            Ok(Ok(r)) => (
+                                serde_json::to_value(r)
+                                    .unwrap_or_else(|e| json!({ "unserialisable": e.to_string() })),
+                                Value::Null,
                             ),
-                        })??;
+                            Ok(Err(e)) => (Value::Null, json!(e.to_string())),
+                            Err(timeout) => (Value::Null, json!(timeout)),
+                        };
+                        trace(json!({
+                            "question": question,
+                            "workbook": workbook,
+                            "turn": turn,
+                            "request": request,
+                            "response": response,
+                            "error": error,
+                        }));
+                    }
+                    let response = response.map_err(|reason| PromptError::PromptCancelled {
+                        chat_history: run.full_history(),
+                        reason,
+                    })??;
                     let reasoning: String = response
                         .choice
                         .iter()
@@ -508,7 +593,8 @@ impl<M: CompletionModel + Clone> Harness<M> {
                             results.push(result);
                             continue;
                         }
-                        let args = call.tool_call.function.arguments.clone();
+                        let args =
+                            tools::scoped(&name, &call.tool_call.function.arguments, workbook);
                         sink(Event::ToolCall {
                             turn,
                             name: name.clone(),
