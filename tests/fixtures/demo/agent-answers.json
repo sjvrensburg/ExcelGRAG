@@ -123,7 +123,7 @@
   },
   {
     "ask": "is there a Budget sheet in this workbook",
-    "want": ["no budget", "no sheet named budget", "no sheet called budget", "isn't a budget", "is not a budget", "doesn't have a budget", "does not have a budget", "does not contain a budget", "doesn't contain a budget"],
+    "want": ["no budget", "no \"budget\"", "no 'budget'", "no sheet named budget", "no sheet called budget", "isn't a budget", "is not a budget", "doesn't have a budget", "does not have a budget", "does not contain a budget", "doesn't contain a budget"],
     "want_result": ["sheet(s) in"],
     "why": "an answer of absence: only the full list from `sheets` can say no with confidence"
   },
