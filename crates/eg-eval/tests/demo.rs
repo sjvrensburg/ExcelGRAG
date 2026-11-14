@@ -143,3 +143,40 @@ fn the_value_no_index_can_hold_is_still_findable_in_the_cells() {
         report.cells_scanned
     );
 }
+
+#[test]
+fn the_audit_finds_the_row_the_fixture_typed_over_and_the_errors_it_plants() {
+    // The hand-edited row is the fixture's own plant, so this is not a test of
+    // the audit against what its author thought a fault looks like.
+    let loaded = eg_ingest::load(demo()).expect("the demo fixture is committed");
+    let found = eg_eval::audit(
+        &loaded.workbook,
+        eg_eval::AuditScope::Workbook,
+        &eg_eval::AuditOptions::default(),
+    );
+
+    let broken: Vec<&eg_eval::ColumnAudit> = found.broken().collect();
+    let provision = broken
+        .iter()
+        .find(|c| c.header.as_deref() == Some("Provision"))
+        .expect("the typed-over provision is found");
+    assert_eq!(provision.typed_count, 1);
+    assert_eq!(provision.typed[0].cell.to_a1(), "J7");
+    assert_eq!(provision.deviant_count, 0);
+
+    let days = broken
+        .iter()
+        .find(|c| c.header.as_deref() == Some("Days per Unit"))
+        .expect("the division by zero is found");
+    assert!(days.errors > 0);
+    assert_eq!(days.typed_count + days.deviant_count, 0);
+
+    // Everything else is a column that does what its neighbours do, and the
+    // heading row is not counted as a value typed into any of them. The one
+    // column without a common fill is `Summary`'s, a different formula per
+    // line, which is not an exception to anything.
+    assert_eq!(broken.len(), 2, "{broken:#?}");
+    let unfilled: Vec<_> = found.columns.iter().filter(|c| c.fill.is_none()).collect();
+    assert_eq!(unfilled.len(), 1, "{unfilled:#?}");
+    assert_eq!(unfilled[0].header.as_deref(), Some("Value"));
+}

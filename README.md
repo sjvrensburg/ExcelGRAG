@@ -106,7 +106,7 @@ eg where tests/fixtures/demo/impairment.xlsx 1612
 
 ## Usage
 
-Twelve verbs, in the order a question travels.
+Thirteen verbs, in the order a question travels.
 
 ```sh
 eg index corpus/ book.xlsb              # read it, store its graph, index it
@@ -119,6 +119,7 @@ eg where book.xlsb 1612                 # which cells hold a value
 eg trace book.xlsb 'LOOKUP!AE53' --dependents   # and what reads them
 eg graph book.xlsb 'LOOKUP!AE53' --depth 2      # a dependency subgraph, as JSON
 eg check book.xlsb                      # do the formulas still agree
+eg audit book.xlsb                      # where a column's formulas stop being alike
 eg what-if book.xlsb 'RATES!BS9=0.175'  # what moves if one changes
 
 eg serve corpus/                        # the same, to an agent over MCP
@@ -180,6 +181,7 @@ claude mcp add excelgrag -- "$(which eg)" serve "$PWD/corpus"
 | `dependents` | what reads a cell — the expensive direction, and it says so |
 | `find_value` | which cells hold a value, by scanning every one of them |
 | `recompute` | whether a formula still agrees with the value stored beside it |
+| `audit_formulas` | where a column's formulas stop being alike: the cells that differ from the fill, values typed over formulas, formulas holding an error |
 | `tables` | the tables of a workbook and the columns of each, with their types |
 | `query_table` | a total, count or average over the rows of one table |
 | `schema` | which column keys into which table, read out of the lookup formulas |
