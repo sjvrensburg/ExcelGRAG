@@ -112,6 +112,33 @@ pub fn cells(
     Ok(())
 }
 
+pub fn audit(
+    path: &str,
+    range: Option<&str>,
+    sheet: Option<&str>,
+    limit: usize,
+    examples: usize,
+    redact: bool,
+    max_input_cells: Option<u64>,
+) -> Result<(), String> {
+    let workbook = open(path, max_input_cells)?;
+    let (scope, what) = eg_mcp::tools::audit_scope(&workbook, range, sheet)?;
+    let at = Instant::now();
+    print!(
+        "{}",
+        eg_mcp::tools::audit_report(
+            &workbook,
+            scope,
+            &what,
+            &eg_eval::AuditOptions { examples },
+            limit,
+            redact
+        )
+    );
+    eprintln!("({:.1}s)", at.elapsed().as_secs_f64());
+    Ok(())
+}
+
 pub fn trace(
     path: &str,
     citation: &str,

@@ -665,6 +665,14 @@ impl<M: CompletionModel + Clone> Harness<M> {
                             refused,
                             text: text.clone(),
                         });
+                        // Marked here and not earlier: the gates above match on
+                        // how a refusal begins, and the model has nothing but
+                        // this text to tell a refusal from a result by.
+                        let text = if ok {
+                            text
+                        } else {
+                            eg_mcp::tools::failure_text(&text)
+                        };
                         results.push(UserContent::tool_result_for(
                             id,
                             provider,

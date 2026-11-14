@@ -43,6 +43,7 @@ the invariants and working rules that fall out of everything below.
 - [Retrieval](#retrieval)
 - [Cell-level provenance](#cell-level-provenance)
 - [Recomputing a number](#recomputing-a-number)
+- [Looking for a formula that stopped matching](#looking-for-a-formula-that-stopped-matching)
 - [What if this number were different](#what-if-this-number-were-different)
 - [Serving it to an agent](#serving-it-to-an-agent)
 - [Letting the model drive](#letting-the-model-drive)
@@ -449,6 +450,20 @@ The index is keyed by the same blake3 the corpus is, so reindexing a workbook
 replaces it rather than doubling it, and a changed workbook can never match
 under its old hash. It prints node labels and A1 ranges, never cell values.
 
+Equal scores are ordered by the workbook, not by the index. Tantivy breaks a tie
+by document address, and its writer spreads documents over threads, so the
+address of the same node differs from one build of the same file to the next.
+That does not matter where the cut falls between two scores. It matters a great
+deal on a workbook with a repeated layout — a sheet per month, each with the
+same `Pension` column — where a dozen nodes tie exactly and the limit decides
+which of them anyone sees. So the search asks for enough to hold the whole tie
+at the cut, orders it by where the workbook was and then by node number, which
+is sheet order and then position and comes from the file, and only then cuts.
+`fuse_weighted`'s own tie-break was not the cause: it is deterministic given
+what it is handed. What it was handed differed, whenever a tie straddled the cut
+of the ranking before it — the whole result of a word-only search, or the fiftieth
+place of a hybrid one.
+
 ### Indexing the formulas
 
 The formula-group layer is what lets a search reach an actual formula, and it is
@@ -786,6 +801,64 @@ coincidence, the local cell happening to hold what the foreign cell held.
 `docs/upstream-issues.md` records the reader defects and their regression tests;
 the required fixes are present in the vendored reader.
 
+
+## Looking for a formula that stopped matching
+
+`recompute` asks whether one formula still agrees with its stored value. The
+faults a workbook actually carries are of another kind and agree with their
+stored values perfectly well: a number typed over one cell of a formula column,
+a rate typed into some rows' formulas where the rest read a parameter cell, a
+formula edited by hand and never filled down again. Nothing about any one of
+them is wrong *as a formula*; they are wrong against their neighbours. Finding
+them took a model reading whole columns with `read_cells` and comparing formula
+text itself, five hundred cells a call, and an agent run stops long before a
+workbook with a few dozen tables is read.
+
+`eg-eval`'s `consistency` module is the pass that does it. The unit is a
+column of a table, because that is the unit a person fills down. Its formulas
+are normalised to the R1C1 shape grouping already uses, the shape more than half
+of them share is what the column is *filled with*, and everything else is
+reported against that: formulas of another shape, typed values among the
+formulas, and formulas whose stored value is an error. The report is of what
+*differs*, and says so; a running balance's seeded first row differs on
+purpose.
+
+The choices that keep it quiet enough to be asked of a whole workbook:
+
+- **The fill must be a majority, not a plurality.** Among four different
+  formulas the most common one is a plurality of one, and calling the other
+  three deviations from it would say something about the column that is not
+  true. A column with no common fill is a financial model filled across, or a
+  summary with a formula per line; it is reported as having none, still has its
+  errors counted, and is not listed as broken.
+- **The heading row is not data.** The table's own header rows come off the
+  region, so a heading is never counted as a typed value in every formula
+  column — the mistake a per-range tool made on its first outing.
+- **A totals row is not a defect.** A last row holding an aggregate where the
+  column above holds something else, or a text label, is counted and said so
+  but not listed.
+- **A column of formulas has more formulas than typed values.** One formula in
+  a column of typed numbers is a data column with a total in it.
+
+Two things it does not see, which the tool's description says rather than
+leaving a caller to find out: a formula every row agrees on that is wrong (every
+`SUM` stopping a row short of its table), and a pattern filled across a row
+rather than down a column. Both need a different comparison, not a tuning of
+this one.
+
+It takes a range, a sheet or nothing. With nothing it names only the columns
+where something breaks, so that one call answers "is anything wrong with this
+workbook" and says plainly when nothing is; with a range or a sheet it was asked
+about specific columns and describes each. It is one row-major pass per table —
+a sheet is an ordered map keyed by (row, column), and asking it for one column
+costs a probe per row — and keeps a column as runs of rows sharing a shape, so a
+filled-down column of any length is one run and memory follows how often a
+column *changes*.
+
+The demo workbook plants exactly the faults this finds, and
+`crates/eg-eval/tests/demo.rs` asserts them: the provision typed over by hand,
+and the division by zero a zero balance produces. They are the fixture's own,
+not the audit's author's idea of a fault.
 
 ## What if this number were different
 

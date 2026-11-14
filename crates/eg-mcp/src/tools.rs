@@ -17,11 +17,11 @@
 
 use eg_eval::query::{query as query_run, Aggregate, Filter, Query, Test};
 use eg_eval::whatif::{what_if, Blocked, Change, WhatIfOptions};
+use eg_eval::{audit, infer_schema, AuditOptions, AuditScope, ColumnAudit, Lookup, Schema};
 use eg_eval::{
     cell as cell_fact, cells_holding, cells_in, precedents_of, readers_of, recompute, subgraph,
     value_json, GraphDirection, GraphOptions, Outcome,
 };
-use eg_eval::{infer_schema, Lookup, Schema};
 use eg_index::SearchOptions;
 use eg_model::{parse_a1, redact_formula_literals, CellValue, RangeRef, Workbook};
 use eg_retrieve::{expand, find_in, render, ExpandOptions, Fusion, RenderOptions, Search};
@@ -164,6 +164,35 @@ pub const TOOLS: &[Tool] = &[
                       used, so the verdict can be checked. What it cannot model it refuses by \
                       name rather than guessing.",
         schema: || cell_schema("The cell or range to recompute, e.g. \"Sheet1!D7\"."),
+    },
+    Tool {
+        name: "audit_formulas",
+        description: "Look through a workbook's formulas for the ones that stopped matching. \
+                      For each column of a table that holds formulas: what it is filled with \
+                      and how far, the cells whose formula differs, the cells holding a typed \
+                      value where the column has formulas, and how many formulas hold an \
+                      error. With no `range` or `sheet` it covers the whole workbook and \
+                      lists only the columns where something breaks, so one call answers \
+                      \"is anything wrong with this workbook?\" — and says so when nothing \
+                      is. Reports what differs, not what is wrong: a running balance's first \
+                      row differs on purpose. A table's heading row and its totals row are \
+                      not counted. Does not see a formula that every row agrees on and that \
+                      is wrong, such as a range that stops a row short, nor a pattern filled \
+                      across a row. Reads every populated cell of the scope: seconds on a \
+                      large file.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "range": {"type": "string", "description": "Audit the columns of the tables this range overlaps, clipped to it, e.g. \"'Q3 Sales'!D5:D400\". Lists every formula column in it, clean ones too."},
+                    "sheet": {"type": "string", "description": "Audit one sheet, by exact name. Lists every formula column on it, clean ones too."},
+                    "workbook": {"type": "string", "description": "Path or hash. Optional when the corpus holds one."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 500, "description": "Most columns to describe, default 40. Counts stay exact."},
+                    "examples": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Most cells to name per kind of finding in a column, default 10."}
+                },
+                "additionalProperties": false
+            })
+        },
     },
     Tool {
         name: "tables",
@@ -325,7 +354,30 @@ fn cell_schema(citation: &str) -> Value {
     })
 }
 
+/// What marks a tool's refusal as one, in the text a caller reads.
+///
+/// `isError` carries that over MCP, and the agent harness has its own `ok`,
+/// but a model — or a scripted stand-in for one — is handed only the text. A
+/// bare `limit must be between 1 and 500, got 813` reads as a result, and was
+/// counted as a read of the cells it declined to return.
+pub const ERROR_PREFIX: &str = "error: ";
+
+/// A tool's `Err` message as the text a caller is shown: marked as a failure,
+/// once. Idempotent, so a layer that cannot tell whether an inner one already
+/// marked it may mark it again.
+pub fn failure_text(message: &str) -> String {
+    if message.starts_with(ERROR_PREFIX) {
+        message.to_string()
+    } else {
+        format!("{ERROR_PREFIX}{message}")
+    }
+}
+
 /// Run a tool. `Err` is a message for the caller, not a protocol failure.
+///
+/// The message is the tool's own, unmarked, so the gates that read it
+/// ([`STRUCTURAL_GATE_PREFIX`]) can match on its start; [`failure_text`] is
+/// what to show a caller.
 pub fn call(state: &mut State, name: &str, args: &Value) -> Result<String, String> {
     match name {
         "workbooks" => workbooks(state, args),
@@ -337,6 +389,7 @@ pub fn call(state: &mut State, name: &str, args: &Value) -> Result<String, Strin
         "dependents" => dependents(state, args),
         "find_value" => find_value(state, args),
         "recompute" => recompute_tool(state, args),
+        "audit_formulas" => audit_formulas(state, args),
         "tables" => tables(state, args),
         "query_table" => query_table(state, args),
         "schema" => schema(state, args),
@@ -1360,6 +1413,207 @@ fn what_if_tool(state: &mut State, args: &Value) -> Result<String, String> {
 // ---- tables, queries and the schema --------------------------------------
 
 /// The tables of a workbook, which is what a query names its columns from.
+/// Where a column's formulas stop being alike, for a workbook, a sheet or a range.
+fn audit_formulas(state: &mut State, args: &Value) -> Result<String, String> {
+    let redact = state.redact_values;
+    let limit = opt_bounded(args, "limit", 40, 1, 500)?;
+    let examples = opt_bounded(args, "examples", 10, 1, 100)?;
+    let range = opt_str(args, "range")?;
+    let sheet = opt_str(args, "sheet")?;
+    let (_, path) = state.resolve(opt_str(args, "workbook")?.as_deref())?;
+    let (loaded, load_seconds) = state.workbook(&path)?;
+
+    let mut out = String::new();
+    if let Some(seconds) = load_seconds {
+        out.push_str(&format!("(opened {path} in {seconds:.1}s)\n"));
+    }
+    let (scope, what) = audit_scope(&loaded.workbook, range.as_deref(), sheet.as_deref())?;
+    out.push_str(&audit_report(
+        &loaded.workbook,
+        scope,
+        &what,
+        &AuditOptions { examples },
+        limit,
+        redact,
+    ));
+    Ok(out)
+}
+
+/// What a caller's `range` and `sheet` ask the audit to cover, and how to say
+/// it. Neither is the whole workbook; both is a contradiction.
+pub fn audit_scope(
+    workbook: &Workbook,
+    range: Option<&str>,
+    sheet: Option<&str>,
+) -> Result<(AuditScope, String), String> {
+    match (range, sheet) {
+        (Some(_), Some(_)) => {
+            Err("give a `range` or a `sheet`, not both; give neither for the whole workbook".into())
+        }
+        (Some(citation), None) => {
+            let range = resolve_range(workbook, citation)?;
+            Ok((AuditScope::Range(range), workbook.cite_range(range)))
+        }
+        (None, Some(name)) => match workbook.sheet_id_by_name(name) {
+            Some(id) => Ok((AuditScope::Sheet(id), format!("sheet {name:?}"))),
+            None => {
+                let names: Vec<&str> = workbook.sheets.iter().map(|s| s.name.as_str()).collect();
+                Err(format!(
+                    "no sheet called {name:?}. This workbook has: {}",
+                    names.join(", ")
+                ))
+            }
+        },
+        (None, None) => Ok((AuditScope::Workbook, "the whole workbook".to_string())),
+    }
+}
+
+/// The audit of a scope, as text. The whole workbook says where it breaks and
+/// is silent about the rest; a range or a sheet was asked about by name, so
+/// each of its columns gets a line. Shared by the tool and `eg audit`.
+pub fn audit_report(
+    workbook: &Workbook,
+    scope: AuditScope,
+    what: &str,
+    opts: &AuditOptions,
+    limit: usize,
+    redact: bool,
+) -> String {
+    let whole = matches!(scope, AuditScope::Workbook);
+    let found = audit(workbook, scope, opts);
+    let broken = found.broken().count();
+
+    let mut out = format!(
+        "Formula audit of {what}: {} table(s), {} column(s) of formulas, {} formula(s)\n",
+        found.tables,
+        found.columns.len(),
+        found.formulas()
+    );
+    if found.columns.is_empty() {
+        out.push_str(
+            "No table in scope has a column of formulas, so there is nothing to compare.\n",
+        );
+        return out;
+    }
+    if broken == 0 {
+        out.push_str(
+            "Nothing breaks: no column has a formula that differs from the one it is filled \
+             with, a typed value among its formulas, or a formula holding an error.\n",
+        );
+    } else {
+        out.push_str(&format!("{broken} column(s) have something that breaks.\n"));
+    }
+
+    let listed: Vec<&ColumnAudit> = found
+        .columns
+        .iter()
+        .filter(|c| !whole || c.is_broken())
+        .collect();
+    for column in listed.iter().take(limit) {
+        out.push('\n');
+        out.push_str(&describe_column(workbook, column, redact));
+    }
+    if listed.len() > limit {
+        out.push_str(&format!(
+            "\n… {} more column(s) not described, raise `limit` (at most 500) or narrow with \
+             `sheet` or `range`\n",
+            listed.len() - limit
+        ));
+    }
+    if broken > 0 {
+        out.push_str(
+            "\nThese cells differ from the rest of their column; that is a reason to look, not \
+             a verdict. `read_cells` shows them, `precedents` what they read.\n",
+        );
+    }
+    out
+}
+
+fn describe_column(workbook: &Workbook, column: &ColumnAudit, redact: bool) -> String {
+    let mut out = workbook.cite_range(column.column);
+    if let Some(header) = &column.header {
+        out.push_str(&format!("  {header:?}"));
+    }
+    out.push('\n');
+    match &column.fill {
+        Some(fill) => out.push_str(&format!(
+            "  filled with ={} from {} ({} of {} formula(s), {})\n",
+            show_formula(&fill.formula, redact),
+            fill.at.to_a1(),
+            fill.cells,
+            column.formulas,
+            fill.span.to_a1(),
+        )),
+        None => out.push_str(&format!(
+            "  {} formula(s) in {} different patterns, none shared by most: no common fill, \
+             so none is compared\n",
+            column.formulas, column.shapes
+        )),
+    }
+    if column.deviant_count > 0 {
+        out.push_str(&format!(
+            "  {} formula(s) differ from it:\n",
+            column.deviant_count
+        ));
+        for d in &column.deviants {
+            out.push_str(&format!(
+                "    {:<8} ={}\n",
+                d.cell.to_a1(),
+                show_formula(&d.formula, redact)
+            ));
+        }
+        if column.deviant_count > column.deviants.len() as u64 {
+            out.push_str(&format!(
+                "    … and {} more\n",
+                column.deviant_count - column.deviants.len() as u64
+            ));
+        }
+    }
+    if column.typed_count > 0 {
+        out.push_str(&format!(
+            "  {} typed value(s) where the column has formulas:\n",
+            column.typed_count
+        ));
+        for t in &column.typed {
+            out.push_str(&format!(
+                "    {:<8} {}\n",
+                t.cell.to_a1(),
+                show(&t.value, redact)
+            ));
+        }
+        if column.typed_count > column.typed.len() as u64 {
+            out.push_str(&format!(
+                "    … and {} more\n",
+                column.typed_count - column.typed.len() as u64
+            ));
+        }
+    }
+    if column.errors > 0 {
+        let cells: Vec<String> = column.error_cells.iter().map(|c| c.to_a1()).collect();
+        let more = column.errors - cells.len() as u64;
+        out.push_str(&format!(
+            "  {} formula(s) whose value is an error: {}{}\n",
+            column.errors,
+            cells.join(", "),
+            if more > 0 {
+                format!(" … and {more} more")
+            } else {
+                String::new()
+            }
+        ));
+    }
+    if !column.is_broken() && column.fill.is_some() {
+        out.push_str("  consistent\n");
+    }
+    if column.totals_row > 0 {
+        out.push_str(&format!(
+            "  (the table's last row, {} cell(s), taken as a totals row and not compared)\n",
+            column.totals_row
+        ));
+    }
+    out
+}
+
 fn tables(state: &mut State, args: &Value) -> Result<String, String> {
     let (_, path) = state.resolve(opt_str(args, "workbook")?.as_deref())?;
     let (loaded, load_seconds) = state.workbook(&path)?;
@@ -2493,6 +2747,106 @@ mod tests {
         assert!(
             one.contains("beta.xlsx") && !one.contains("alpha.xlsx"),
             "{one}"
+        );
+    }
+    /// A table `Item Gross Tax` with `Tax = Gross*0.2` down five rows, and the
+    /// third row's tax typed over.
+    fn faulted() -> Workbook {
+        let mut sheet = grid(
+            0,
+            "Pay",
+            &[
+                "Item Gross Tax",
+                "a 100 0",
+                "b 200 0",
+                "c 300 0",
+                "d 400 0",
+                "e 500 0",
+            ],
+        );
+        for r in 1..=5u32 {
+            sheet.set(
+                r,
+                2,
+                eg_model::Cell {
+                    value: CellValue::Number(f64::from(r) * 20.0),
+                    formula: Some(format!("B{}*0.2", r + 1)),
+                    format: Default::default(),
+                },
+            );
+        }
+        sheet.set(3, 2, eg_model::Cell::literal(CellValue::Number(61.5)));
+        Workbook {
+            path: "pay.xlsx".into(),
+            format: Some(eg_model::WorkbookFormat::Xlsx),
+            content_hash: "hash-pay".into(),
+            sheets: vec![sheet],
+            defined_names: Vec::new(),
+            external_links: Vec::new(),
+        }
+    }
+
+    fn report(wb: &Workbook, range: Option<&str>, sheet: Option<&str>, redact: bool) -> String {
+        let (scope, what) = audit_scope(wb, range, sheet).expect("a scope");
+        audit_report(wb, scope, &what, &AuditOptions::default(), 40, redact)
+    }
+
+    #[test]
+    fn an_audit_names_the_typed_cell_and_what_the_column_is_filled_with() {
+        let text = report(&faulted(), None, None, false);
+        assert!(text.contains("Pay!C2:C6"), "{text}");
+        assert!(text.contains("=B2*0.2"), "{text}");
+        assert!(text.contains("1 typed value(s)"), "{text}");
+        assert!(text.contains("C4") && text.contains("61.5"), "{text}");
+    }
+
+    #[test]
+    fn a_redacted_audit_names_the_cell_and_not_the_value() {
+        let text = report(&faulted(), None, None, true);
+        assert!(text.contains("C4") && text.contains("<number>"), "{text}");
+        assert!(!text.contains("61.5"), "{text}");
+        assert!(
+            !text.contains("0.2"),
+            "formula literals are values too: {text}"
+        );
+    }
+
+    #[test]
+    fn a_workbook_audit_says_so_when_nothing_breaks() {
+        let mut wb = faulted();
+        wb.sheets[0].set(
+            3,
+            2,
+            eg_model::Cell {
+                value: CellValue::Number(60.0),
+                formula: Some("B4*0.2".into()),
+                format: Default::default(),
+            },
+        );
+        let text = report(&wb, None, None, false);
+        assert!(text.contains("Nothing breaks"), "{text}");
+        assert!(
+            !text.contains("Pay!C2:C6"),
+            "a clean column is not listed: {text}"
+        );
+
+        // Asked about by name, the clean column gets its line.
+        let by_sheet = report(&wb, None, Some("Pay"), false);
+        assert!(
+            by_sheet.contains("Pay!C2:C6") && by_sheet.contains("consistent"),
+            "{by_sheet}"
+        );
+    }
+
+    #[test]
+    fn an_audit_scope_refuses_a_contradiction_and_an_unknown_sheet() {
+        let wb = faulted();
+        let both = audit_scope(&wb, Some("Pay!A1:C6"), Some("Pay")).unwrap_err();
+        assert!(both.contains("not both"), "{both}");
+        let missing = audit_scope(&wb, None, Some("Nope")).unwrap_err();
+        assert!(
+            missing.contains("no sheet called \"Nope\"") && missing.contains("Pay"),
+            "{missing}"
         );
     }
 }

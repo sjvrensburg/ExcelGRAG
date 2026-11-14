@@ -31,7 +31,7 @@ cargo clippy --workspace --all-targets
 cargo fmt
 ```
 
-The front door is the `eg` binary (`crates/eg-cli`), twelve verbs in the order a
+The front door is the `eg` binary (`crates/eg-cli`), thirteen verbs in the order a
 question travels:
 
 ```sh
@@ -43,6 +43,7 @@ cargo run --release -p eg-cli -- where book.xlsb 1612          # which cells hol
 cargo run --release -p eg-cli -- trace book.xlsb 'LOOKUP!AE53' --dependents
 cargo run --release -p eg-cli -- graph book.xlsb 'LOOKUP!AE53' --depth 2   # a bounded subgraph, as JSON
 cargo run --release -p eg-cli -- check book.xlsb           # sweep: do formulas still agree
+cargo run --release -p eg-cli -- audit book.xlsb           # where a column's formulas stop being alike
 cargo run --release -p eg-cli -- what-if book.xlsb 'RATES!B4=0.15'
 cargo run --release -p eg-cli -- serve corpus/             # MCP over stdio
 cargo run --release -p eg-cli -- gui corpus/ --open        # a browser tab *and* an MCP server, sharing one session
@@ -175,7 +176,9 @@ above it.
   score — BM25 and cosine are not on one scale. The word ranking is weighted
   `LEXICAL_WEIGHT` (2) against the meaning ranking and both are asked 50 deep
   before fusing; both numbers were measured with the answer scorer, not chosen,
-  and `RRF_K` stays at 60 because sweeping it changes nothing. Custom tokenizer indexes each run
+  and `RRF_K` stays at 60 because sweeping it changes nothing. Equal scores are ordered by workbook path then node number, never by tantivy's
+  document address, which differs between builds of one file
+  (`TextIndex::search` over-fetches to hold a whole tie at the cut). Custom tokenizer indexes each run
   whole *and* split at case/letter-digit boundaries (`NetRevenue` → `net`,
   `revenue`, `netrevenue`).
 - `eg-retrieve` — `find()`/`find_in()` is the **one** hybrid search — the CLI,
@@ -214,7 +217,14 @@ above it.
   fifteen digits, text without regard to case, never across types, and the cells
   that only *look* like the probe are counted rather than folded in), and
   `recompute`/`check` which evaluate a formula and compare with the value Excel
-  stored. `whatif::what_if` substitutes values
+  stored. `consistency::audit` is the other comparison, of a column's formulas
+  with *each other*: the shape most of a table column shares is what it is
+  filled with, and formulas of another shape, typed values among the formulas
+  and formulas holding an error are reported against it. It says *differs*,
+  never *wrong*; a column with no majority shape is reported as having none
+  rather than as all exceptions, a table's heading and totals rows are not
+  compared, and it does not see a formula every row agrees on, or a pattern
+  filled across a row. `whatif::what_if` substitutes values
   through an `Overrides` overlay — the workbook is never mutated, since XLSB
   cannot be written — and walks the closure a level per full formula scan. The
   overlay is indexed by column: a what-if's overlay holds every cell it has
@@ -233,13 +243,16 @@ above it.
   fork into every cell of its rows.
 - `eg-mcp` — MCP server over the whole stack (`workbooks`, `sheets`, `search`,
   `context`, `read_cells`, `precedents`, `dependents`, `find_value`, `recompute`,
-  `tables`, `query_table`, `schema`, `what_if`, `graph`). `dependents` reports
-  readers per filled-down run (`readers_of`), so `limit` counts places, not
+  `tables`, `query_table`, `schema`, `what_if`, `graph`, `audit_formulas`).
+  `dependents` reports readers per filled-down run (`readers_of`), so `limit` counts places, not
   cells. `tables` cites a table by its whole width and lists its row-label
   columns, marked; `query_table` filters, groups and counts on them but
   refuses to total one. Hand-written stdio JSON
   protocol, no SDK, because the workspace is synchronous. A failing tool returns a
-  *result* with `isError`, never a protocol error.
+  *result* with `isError`, never a protocol error, and its text begins `error: `
+  (`tools::failure_text`) because a model, or a scripted stand-in for one, is
+  handed only the text; `tools::call` itself returns the bare message so the
+  gates that match on how a refusal starts still can.
 - `eg-cli` — `eg`.
 - `eg-gui` — the browser GUI and, in the same process, an MCP bridge over
   `rmcp` re-exposing every `eg-mcp` tool generically (iterating

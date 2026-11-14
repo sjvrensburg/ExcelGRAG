@@ -257,7 +257,9 @@ impl ServerHandler for McpBridge {
             .map_err(|e| ErrorData::internal_error(format!("tool call panicked: {e}"), None))?;
             let result = match result {
                 Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
-                Err(message) => CallToolResult::error(vec![ContentBlock::text(message)]),
+                Err(message) => CallToolResult::error(vec![ContentBlock::text(
+                    eg_mcp::tools::failure_text(&message),
+                )]),
             };
             return Ok(result.into());
         }

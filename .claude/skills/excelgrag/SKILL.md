@@ -73,18 +73,27 @@ in a few places (e.g. `cells` vs `read_cells`) and are cross-referenced.
    against what the workbook cached. Refuses by name what it cannot model
    (a handful of Excel functions, whole-column references, volatile
    functions like `TODAY()`) rather than guessing — see Refusals below.
-7. **`what-if` / `what_if`** for scenario analysis: substitute a value into
+7. **`audit` / `audit_formulas`** for "is anything wrong with this
+   workbook?": for each column of a table that holds formulas, what it is
+   filled with, the cells whose formula differs, the cells where a value
+   was typed over a formula, and the formulas holding an error. With no
+   range or sheet it covers the whole workbook and lists only the columns
+   where something breaks — and says so when nothing does. *Differs* is not
+   *wrong* (a running balance's first row differs on purpose); follow a
+   cell with `read_cells` and `precedents`. It cannot see a formula every
+   row agrees on that is wrong, nor a pattern filled across a row.
+8. **`what-if` / `what_if`** for scenario analysis: substitute a value into
    a cell (in memory only — nothing is written, XLSB can't be written
    anyway) and see every cell that moves, and how far the walk got before
    giving up.
-8. **`tables` → `query_table`** and **`schema`** for tabular questions —
+9. **`tables` → `query_table`** and **`schema`** for tabular questions —
    "total X where Y", "which orders are late" — and for following a lookup
    from one table to another. `query_table` needs a table's exact range
    from `tables` first; it does not guess at table boundaries.
 
 Cheap vs expensive, roughly: `search`/`context`/`cells`/`precedents` are
-fast (index reads or formula-text reads). `dependents`/`what_if`/`check`
-scan every formula in the workbook, and `where`/`find_value` scans every
+fast (index reads or formula-text reads). `dependents`/`what_if`/`check`/
+`audit_formulas` scan every formula in the workbook, and `where`/`find_value` scans every
 cell — seconds to tens of seconds on a large file, not milliseconds. Don't
 call the expensive ones speculatively in a loop.
 
@@ -201,6 +210,7 @@ Verb ↔ tool cross-reference, for translating between the two:
 | `trace` (no `--dependents`) | `precedents` | What a formula reads |
 | `trace --dependents` | `dependents`   | What reads a range |
 | `check`              | `recompute`    | Does the arithmetic still hold |
+| `audit`              | `audit_formulas` | Where a column's formulas stop being alike — "is anything wrong with this workbook?" |
 | `what-if`            | `what_if`      | What moves if a cell changes |
 | *(no CLI equivalent)* | `tables`      | A workbook's tables and columns |
 | *(no CLI equivalent)* | `query_table` | Filter/group/aggregate a table |

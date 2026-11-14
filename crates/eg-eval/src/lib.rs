@@ -36,6 +36,7 @@
 //! ```
 
 pub mod calc;
+pub mod consistency;
 pub mod graph;
 pub mod parse;
 pub mod query;
@@ -46,6 +47,9 @@ pub mod whatif;
 pub use calc::{
     check, evaluate, evaluate_over, recompute, recompute_over, CheckReport, Evaluator, Input,
     Outcome, Overrides, Recomputed, Unsupported,
+};
+pub use consistency::{
+    audit, Audit, AuditOptions, ColumnAudit, Deviant, Fill, Scope as AuditScope, Typed,
 };
 pub use graph::{
     subgraph, value_json, Direction as GraphDirection, EdgeKind, GraphEdge, GraphExport, GraphNode,

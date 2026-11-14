@@ -227,6 +227,31 @@ enum Command {
         privacy: Privacy,
     },
 
+    /// Look through the formulas for columns whose cells stopped matching.
+    ///
+    /// For each column of a table that holds formulas: what it is filled
+    /// with, the cells whose formula differs, the cells holding a typed value
+    /// where the column has formulas, and the formulas holding an error. With
+    /// no `--range` or `--sheet`, the whole workbook, naming only the columns
+    /// where something breaks. What differs is not necessarily wrong.
+    Audit {
+        workbook: String,
+        /// Only the columns of the tables this range overlaps, clipped to it.
+        #[arg(long, conflicts_with = "sheet")]
+        range: Option<String>,
+        /// Only this sheet, by exact name.
+        #[arg(long)]
+        sheet: Option<String>,
+        /// How many columns to describe.
+        #[arg(long, default_value_t = 40, value_parser = nonzero_usize)]
+        limit: usize,
+        /// Cells to name per kind of finding in a column.
+        #[arg(long, default_value_t = 10, value_parser = nonzero_usize)]
+        examples: usize,
+        #[command(flatten)]
+        privacy: Privacy,
+    },
+
     /// Change a cell and report every cell that moves because of it.
     #[command(name = "what-if", alias = "whatif")]
     WhatIf {
@@ -439,6 +464,22 @@ fn main() {
             max_input_cells,
         )
         .map(|found_disagreements| disagreements = found_disagreements),
+        Command::Audit {
+            workbook,
+            range,
+            sheet,
+            limit,
+            examples,
+            privacy,
+        } => workbook::audit(
+            &workbook,
+            range.as_deref(),
+            sheet.as_deref(),
+            limit,
+            examples,
+            privacy.redact_values,
+            max_input_cells,
+        ),
         Command::WhatIf {
             workbook,
             changes,
@@ -534,6 +575,7 @@ mod tests {
             "trace",
             "graph",
             "check",
+            "audit",
             "what-if",
             "serve",
             "gui",

@@ -103,14 +103,14 @@ impl Server {
             .find(|tool| tool.name == name)
             .expect("checked above");
         if let Err(message) = validate_schema(&arguments, &(tool.schema)(), "arguments") {
-            return Ok(text_result(message, true));
+            return Ok(text_result(tools::failure_text(&message), true));
         }
         Ok(match tools::call(&mut self.state, name, &arguments) {
             Ok(text) => text_result(text, false),
             // A tool that could not do what was asked reports back through the
             // result, not through a protocol error: the model is the one who
             // can act on it.
-            Err(message) => text_result(message, true),
+            Err(message) => text_result(tools::failure_text(&message), true),
         })
     }
 }
@@ -458,6 +458,29 @@ mod tests {
         let (text, is_error) = call(&mut server, "search", json!({ "query": "bad debt" }));
         assert!(!is_error, "{text}");
         assert!(text.contains("nothing matched"), "{text}");
+    }
+
+    #[test]
+    fn a_refusal_is_marked_as_one_in_its_text_and_a_result_is_not() {
+        // The text is all a model or a scripted stand-in is handed, and a bare
+        // "limit must be between 1 and 500" was counted as a read.
+        let (mut server, _dir) = server();
+        let (text, is_error) = call(&mut server, "search", json!({}));
+        assert!(is_error);
+        assert!(text.starts_with("error: "), "{text}");
+
+        let (text, is_error) = call(
+            &mut server,
+            "read_cells",
+            json!({ "citation": "Sheet1!A1", "limit": 813 }),
+        );
+        assert!(is_error);
+        assert!(text.starts_with("error: "), "{text}");
+        assert!(!text.starts_with("error: error: "), "marked once: {text}");
+
+        let (text, is_error) = call(&mut server, "workbooks", json!({}));
+        assert!(!is_error);
+        assert!(!text.starts_with("error: "), "{text}");
     }
 
     #[test]
