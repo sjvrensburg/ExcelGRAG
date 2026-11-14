@@ -566,3 +566,70 @@ fn a_read_only_index_does_not_hold_the_writer_lock() -> Result<(), IndexError> {
     assert!(TextIndex::open(&root)?.is_empty()?);
     Ok(())
 }
+
+/// A sheet per month, each with the same `Pension` column: the layout where a
+/// dozen nodes tie exactly and the limit decides which of them anyone sees.
+fn monthly() -> Workbook {
+    const MONTHS: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    Workbook {
+        path: "monthly.xlsx".into(),
+        format: Some(WorkbookFormat::Xlsx),
+        content_hash: "hash-monthly".into(),
+        sheets: MONTHS
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                grid(
+                    i as u16,
+                    name,
+                    &[
+                        "Employee Gross Pension",
+                        "Ann 100 =B2*0.05",
+                        "Ben 200 =B3*0.05",
+                    ],
+                )
+            })
+            .collect(),
+        defined_names: Vec::new(),
+        external_links: Vec::new(),
+    }
+}
+
+#[test]
+fn tied_hits_come_out_in_workbook_order_whatever_the_build() -> Result<(), IndexError> {
+    // Tantivy breaks a tie by document address, and the writer spreads
+    // documents over threads, so which of twelve identical columns made the
+    // top eight changed from one build of the same file to the next.
+    let opts = SearchOptions {
+        limit: 8,
+        kinds: vec![NodeKind::Column],
+        ..SearchOptions::default()
+    };
+    let expected: Vec<String> = [
+        "January", "February", "March", "April", "May", "June", "July", "August",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+
+    for build in 0..40 {
+        let (_, index) = indexed(&format!("ties-{build}"), &[monthly()]);
+        let hits = index.search("Pension", &opts)?;
+        let sheets: Vec<String> = hits.iter().filter_map(|h| h.sheet.clone()).collect();
+        assert_eq!(sheets, expected, "build {build}");
+    }
+    Ok(())
+}

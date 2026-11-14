@@ -474,16 +474,44 @@ impl TextIndex {
     }
 
     /// Search, most relevant first.
+    ///
+    /// Equal scores come out in the order the workbook has them — by where the
+    /// workbook was, then node number, which is sheet order and then position
+    /// — never in the order tantivy happens to have stored them. Tantivy
+    /// breaks a tie by document address, and the writer spreads documents over
+    /// threads, so the address of a node differs from one build of the same
+    /// file to the next. That would be harmless if the cut fell between two
+    /// scores; it does not when a layout repeats (a sheet per month, one
+    /// `Pension` column on each), because then a dozen nodes tie and the limit
+    /// decides which of them a caller ever sees. So the search asks for enough
+    /// to hold the whole tie at the cut, orders it by something that comes
+    /// from the file, and only then cuts.
     pub fn search(&self, query: &str, opts: &SearchOptions) -> Result<Vec<Hit>, IndexError> {
         let searcher = self.searcher()?;
         let query = self.build_query(query, opts);
 
-        let top = searcher
-            .search(
-                &query,
-                &TopDocs::with_limit(opts.limit.max(1)).tweak_score(size_weighted),
-            )
-            .map_err(tantivy_err("searching"))?;
+        let want = opts.limit.max(1);
+        // One past the limit is enough to see whether the cut falls inside a
+        // tie; when it does, double until the tie is whole or the index is
+        // exhausted.
+        let mut fetch = want.saturating_add(1);
+        let top = loop {
+            let top = searcher
+                .search(
+                    &query,
+                    &TopDocs::with_limit(fetch).tweak_score(size_weighted),
+                )
+                .map_err(tantivy_err("searching"))?;
+            let exhausted = top.len() < fetch;
+            let cut_is_clean = match (top.get(want - 1), top.last()) {
+                (Some((at_cut, _)), Some((last, _))) => at_cut > last,
+                _ => true,
+            };
+            if exhausted || cut_is_clean {
+                break top;
+            }
+            fetch = fetch.saturating_mul(2);
+        };
 
         let mut hits = Vec::with_capacity(top.len());
         for (score, address) in top {
@@ -494,6 +522,15 @@ impl TextIndex {
                 hits.push(hit);
             }
         }
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.path.cmp(&b.path))
+                .then_with(|| a.node.cmp(&b.node))
+                .then_with(|| a.workbook.cmp(&b.workbook))
+        });
+        hits.truncate(want);
         Ok(hits)
     }
 
